@@ -1,0 +1,119 @@
+# ---------------------------------------------------------------------------
+# Build output and the locally installed server binary
+# (anchored: an unanchored `bin/` would also hide a future src/bin/)
+# ---------------------------------------------------------------------------
+/target/
+/bin/
+**/*.rs.bk
+*.profraw
+*.profdata
+
+# ---------------------------------------------------------------------------
+# Secrets and per-machine configuration
+# scripts/start.sh generates .env (mode 0600) with real credentials; only the
+# template is committed. Local smoke/eval env files hold credentials too.
+# ---------------------------------------------------------------------------
+.env
+.env.*
+*.env
+!.env.example
+
+# ---------------------------------------------------------------------------
+# Live memory data: MEMORY_NOTES_ROOT in .env points here and start.sh creates
+# it. Anchored so examples/notes/ (committed demo data) is NOT ignored.
+# ---------------------------------------------------------------------------
+/notes/
+
+# ---------------------------------------------------------------------------
+# AI assistant files: kept locally, never published
+# ---------------------------------------------------------------------------
+# Local assistant policies, validation logs, and traces kept on this machine
+/KILO_MEMORY.md
+/VERIFICATION.md
+/QWEN_VALIDATION.md
+/validation/
+/tests/check_kilo_trace.py
+# Personal notes about this machine's setup
+*.local.md
+
+# Agent / assistant configuration for any tool, at any depth
+.claude/
+CLAUDE.md
+CLAUDE.local.md
+.mcp.json
+AGENTS.md
+AGENT.md
+.agents/
+.codex/
+.kilocode/
+.kilo/
+.kilocodemodes
+kilo.json
+kilo.jsonc
+.cursor/
+.cursorrules
+.cursorignore
+.cursorindexingignore
+.gemini/
+GEMINI.md
+.qwen/
+QWEN.md
+.roo/
+.roomodes
+.rooignore
+.roorules*
+.clinerules
+.clineignore
+.windsurf/
+.windsurfrules
+.codeium/
+.aider*
+.continue/
+.continuerules
+.github/copilot-instructions.md
+.github/instructions/
+.github/prompts/
+.github/chatmodes/
+.junie/
+.augment/
+.augment-guidelines
+.opencode/
+opencode.json
+opencode.jsonc
+.crush/
+CRUSH.md
+.amazonq/
+.kiro/
+.trae/
+.goosehints
+.specstory/
+
+# Private evaluation sets built from your own notes and queries
+/evals/private/
+# Server-side tool-call traces (contain queries and note text)
+*.trace.jsonl
+
+# ---------------------------------------------------------------------------
+# Python (tests and tools are stdlib-only)
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# ---------------------------------------------------------------------------
+# Test / log output
+# ---------------------------------------------------------------------------
+/test-results/
+*.log
+
+# ---------------------------------------------------------------------------
+# OS and editor clutter
+# ---------------------------------------------------------------------------
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
