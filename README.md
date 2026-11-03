@@ -1,18 +1,239 @@
 # Kioku (記憶)
 
-Local long-term memory for coding agents, served over MCP. PostgreSQL stores
-curated Markdown notes, their explicit links, and lifecycle state; Qdrant
-retrieves similar notes; Personalized PageRank over the links ranks them; and
-Ollama computes embeddings locally.
+[![CI](https://github.com/Jpgomesf/kioku/actions/workflows/ci.yml/badge.svg)](https://github.com/Jpgomesf/kioku/actions/workflows/ci.yml)
+
+Long-term memory for coding agents, served over [MCP](https://modelcontextprotocol.io).
+Kioku keeps curated notes (decisions, architecture, conventions, verified fixes,
+preferences) and lets any agent find and read just the ones a task needs,
+instead of re-reading a whole docs folder every session.
+
+- **Hybrid retrieval with a link graph.** Embeddings and BM25 are fused with
+  Reciprocal Rank Fusion; explicit links between notes pull in related context
+  without pushing direct matches down. Exact keys, titles, and aliases always
+  win.
+- **Works with any model.** The same server serves a quantized local model and
+  frontier models through Claude Code, Codex, Kilo, Gemini CLI, Cursor, or any
+  stdio MCP client: three core tools, flat schemas, keys instead of UUIDs,
+  lenient arguments, and actionable errors. See [docs/clients.md](docs/clients.md).
+- **Measured, not assumed.** `kioku eval` scores retrieval on graded queries;
+  behavior checks score what agents actually do. See
+  [docs/evaluation.md](docs/evaluation.md).
+- **Local and inspectable.** PostgreSQL holds the notes, Qdrant the vectors,
+  Ollama computes embeddings. Notes can live as Markdown files you edit and
+  review. Nothing is ever hard-deleted, and the server runs no language model.
+
+```mermaid
+flowchart LR
+    Agent[Agent: Claude Code, Codex, Kilo, ...] <-->|MCP over stdio| Kioku[kioku serve]
+    Notes[Markdown notes] -->|memory_import| Kioku
+    Kioku <-->|notes, links, lifecycle| PG[(PostgreSQL)]
+    Kioku <-->|vectors| Q[(Qdrant)]
+    Kioku -->|embeddings| O[Ollama]
+```
 
 ## Quick start
 
+Requirements: Docker with Compose, a Rust toolchain (1.94 or newer), and
+Python 3 (used once to generate credentials).
+
 ```sh
-cargo build --release --locked
-./scripts/start.sh
-./target/release/local-memory-mcp --env-file .env doctor
-./target/release/local-memory-mcp --env-file .env ingest --path examples/notes --domain demo
-./target/release/local-memory-mcp --env-file .env search "Which service replaces the old indexing worker?" --domain demo
+git clone https://github.com/Jpgomesf/kioku && cd kioku
+make start     # PostgreSQL, Qdrant, Ollama on loopback ports; creates a private .env
+make install   # builds bin/kioku
+./bin/kioku doctor
+./bin/kioku ingest --path examples/notes --domain demo
+./bin/kioku search "Which service replaces the old indexing worker?" --domain demo
 ```
 
-MCP clients start `scripts/mcp.sh`, which serves the tools over stdio.
+`make start` writes `.env` (mode 0600) with unique credentials on first run and
+never evaluates it as shell code. The services bind to 127.0.0.1 only:
+
+| Service | Address | Volume |
+|---|---|---|
+| PostgreSQL | `127.0.0.1:15432` | `local-memory_postgres_data` |
+| Qdrant | `http://127.0.0.1:16333` | `local-memory_qdrant_data` |
+| Ollama | `http://127.0.0.1:11435` | `local-memory_ollama_models` |
+
+`make stop` stops them and keeps the volumes. Back up PostgreSQL together with
+your notes; the Qdrant index is derived data that `kioku repair --all` rebuilds.
+
+## Connect a client
+
+Every client launches [`scripts/mcp.sh`](scripts/mcp.sh), which runs
+`bin/kioku serve` with this checkout's `.env`. Use the absolute path:
+
+```sh
+# Claude Code
+claude mcp add --scope user kioku -- /absolute/path/to/kioku/scripts/mcp.sh
+
+# Codex CLI / IDE / app
+codex mcp add kioku -- /absolute/path/to/kioku/scripts/mcp.sh
+```
+
+Kilo (`~/.config/kilo/kilo.jsonc`):
+
+```json
+{"mcp": {"kioku": {"type": "local", "command": ["/absolute/path/to/kioku/scripts/mcp.sh"], "enabled": true}}}
+```
+
+Then tell agents which memory domain belongs to each project, in its
+`AGENTS.md` or `CLAUDE.md`:
+
+```markdown
+The Kioku memory domain for this project is `my-project`.
+```
+
+The server's instructions carry the usage policy to every client, so no
+client-specific prompt files are needed. [docs/clients.md](docs/clients.md)
+covers more clients, tool profiles, and tuning for small local models.
+
+## Tools
+
+The default `core` profile exposes three tools; `MEMORY_TOOLS=all` (or
+`scripts/mcp.sh --tools all`) adds the rest, and a list such as
+`core,memory_import` picks individual tools.
+
+| Tool | Profile | What it does |
+|---|---|---|
+| `memory_search` | core | Ranked previews (key, title, snippet, score) for a question |
+| `memory_get` | core | Full text of chosen memories by key, with links, within a byte budget |
+| `memory_save` | core | Create or update one memory by key; refuses credentials and file-backed notes |
+| `memory_inspect` | all | Provenance, lifecycle, usage, and links of one memory |
+| `memory_feedback` | all | Record that a memory proved right or wrong |
+| `memory_retire` / `memory_restore` | all | Move a memory to legacy and back; nothing is deleted |
+| `memory_import` | all | Import Markdown notes from `MEMORY_NOTES_ROOT` |
+| `memory_maintenance` | all | Preview or apply monthly aging |
+| `memory_stats` | all | Counts by status and domain, index health |
+
+Two prompts, `recall` and `remember`, give users explicit shortcuts in clients
+that support MCP prompts. Tools from earlier versions (`rag_search`,
+`rag_context`, `memory_upsert`, ...) are still accepted under their old names.
+
+## Notes
+
+A note is one focused fact with a stable key. Markdown notes use YAML
+frontmatter; editing the file and importing it again updates the same memory:
+
+```markdown
+---
+key: jobs-worker
+title: Jobs worker owns background indexing
+domain: my-project
+aliases: [indexing worker, worker de indexação]
+related: [local-stack, batch-worker-retirement]
+tags: [service, indexing]
+confidence: 0.9
+pinned: false
+---
+
+The jobs-worker is the current owner of background document indexing.
+It replaces the retired batch-worker.
+```
+
+- `related` links resolve within the domain by key, then title, then alias;
+  `[[wiki links]]` work. Missing or ambiguous references are reported.
+- Import with `memory_import` (paths stay inside `MEMORY_NOTES_ROOT`) or
+  `kioku ingest --path DIR --domain DOMAIN`. A file's path is its provenance;
+  agents can't overwrite file-backed notes through `memory_save`.
+- Each note must fit the embedding model's context window (about 6 KB of
+  English text for `nomic-embed-text`); longer notes are rejected before
+  anything is saved, with a request to split them.
+
+## How retrieval works
+
+1. **Signals.** Qdrant returns cosine similarity for current vectors; BM25 runs
+   over keys, titles, aliases, tags, and bodies, with accent folding and
+   identifiers such as `TW-4290` kept whole. Notes the vector index hasn't
+   caught up with still match by keyword.
+2. **Fusion.** Reciprocal Rank Fusion combines the rankings without
+   calibrating their score scales. A note whose key, title, or alias equals the
+   query ranks first.
+3. **Graph expansion.** Personalized PageRank from the top matches, with a 0.5
+   restart probability, fills the last result slot with a linked note, marked
+   `linked_from`. It never displaces direct matches.
+4. **Lifecycle.** Retention (confidence, feedback, usage, and age) breaks near
+   ties. Monthly maintenance moves stale, unpinned notes to a reversible
+   `legacy` status that default search skips.
+
+The design follows measurements, summarized in the next section.
+
+## Evaluation
+
+`make eval` builds isolated storage, imports a 24-note fixture corpus, and
+scores 40 graded queries across nine categories (exact labels, identifiers,
+paraphrases, Portuguese/English, multi-hop links, supersession, legacy history,
+distractors, abstention), plus whether 1,500-byte context packs contain the
+answer. With `nomic-embed-text` (k = 5):
+
+| Ranking | Recall | MRR | nDCG | Hit@1 | Packs with the answer |
+|---|---|---|---|---|---|
+| Previous release (linear score with PageRank) | 0.773 | 0.544 | 0.541 | 0.222 | 14/32 |
+| Vector only | 0.884 | 0.894 | 0.865 | 0.861 | |
+| Hybrid (vector + BM25) | 0.935 | 0.958 | 0.919 | 0.861 | |
+| **Hybrid + graph expansion (current)** | **0.958** | **0.958** | **0.928** | **0.861** | **29/32** |
+
+The same run with `qwen3-embedding:0.6b` reaches recall 1.000, nDCG 0.975, and
+31/32, mostly from better Portuguese/English matching. Compare models on your
+own notes and switch with `kioku reindex` when one wins. The dataset is small
+and synthetic, so treat these as regression guards rather than general claims;
+[docs/evaluation.md](docs/evaluation.md) has the method, the caveats, and the
+behavior checks for agents.
+
+## Configuration
+
+`.env` (see [`.env.example`](.env.example)) or environment variables. Values in
+the file named by `--env-file` win over inherited variables.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `DATABASE_URL` | (required) | PostgreSQL connection |
+| `QDRANT_URL`, `QDRANT_COLLECTION`, `QDRANT_API_KEY` | `http://127.0.0.1:16333`, `local_memory_v1` | Vector index; non-local URLs must use https |
+| `EMBEDDING_PROVIDER` | `ollama` | `ollama` or `openai` (any OpenAI-compatible `/embeddings`) |
+| `EMBEDDING_URL`, `EMBEDDING_MODEL`, `EMBEDDING_DIM` | `http://127.0.0.1:11435`, `nomic-embed-text`, `768` | Embedding service; non-local URLs need `ALLOW_REMOTE_EMBEDDINGS=true` |
+| `EMBEDDING_QUERY_PREFIX`, `EMBEDDING_DOCUMENT_PREFIX` | per model family | Override query/document prompts |
+| `MEMORY_DEFAULT_DOMAIN` | `local` | Domain used when a call names none |
+| `MEMORY_NOTES_ROOT` | unset | Absolute folder `memory_import` may read |
+| `MEMORY_TOOLS` | `core` | `core`, `all`, or a comma-separated list |
+| `MEMORY_HALF_LIFE_DAYS`, `MEMORY_LEGACY_THRESHOLD` | `90`, `0.2` | Aging policy |
+| `MEMORY_BACKGROUND_UPKEEP` | `true` | Daily index repair and aging while serving |
+| `MEMORY_TRACE_FILE`, `MEMORY_TRACE_RUN` | unset | Record every tool call as JSONL (contains note text) |
+
+## Operations
+
+```sh
+./bin/kioku doctor                 # check services and embeddings
+./bin/kioku stats                  # counts and pending index work
+./bin/kioku repair [--all]         # re-index missing (or all) vectors
+./bin/kioku maintenance --dry-run  # preview monthly aging
+./bin/kioku pin KEY --domain D     # protect a memory from aging
+./bin/kioku reindex --embedding-model qwen3-embedding:0.6b --embedding-dim 1024 --collection local_memory_v2
+```
+
+`reindex` embeds every memory into a new collection, switches the database to
+it, and prints the settings to put in `.env`; close MCP clients first. The
+server repairs the index and applies aging in the background while it runs.
+
+## Development
+
+```sh
+make check   # fmt, clippy with warnings denied, unit and contract tests
+make smoke   # 67 end-to-end checks over stdio; SMOKE_ENV must name test storage
+make eval    # retrieval quality in isolated storage
+```
+
+The model-facing contract (tool names, schemas, descriptions, annotations,
+instructions) is snapshot-tested in `tests/snapshots/`; changing it is a
+deliberate `KIOKU_BLESS=1 cargo test`. CI runs formatting, clippy, tests, the
+minimum Rust version, cargo-deny, and the stdio smoke test against real
+PostgreSQL and Qdrant; a weekly workflow runs the retrieval eval with a real
+embedding model.
+
+## Security
+
+Memory text is untrusted input: results are labelled as evidence, never
+instructions, and the server never builds its tool catalog from stored data.
+See [SECURITY.md](SECURITY.md) for the threat model and how to report issues.
+
+## License
+
+[MIT](LICENSE)
