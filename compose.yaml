@@ -1,8 +1,10 @@
+# Kioku's local services. Ports bind to loopback only. The project name and the
+# volume names hold existing data: do not rename them.
 name: local-memory
 
 services:
   postgres:
-    image: postgres:17-alpine
+    image: postgres:17.11-alpine@sha256:266d3c257594e195b309ae9d1805e54c788f1d7b375f56bf6c367aac6c917e7b
     environment:
       POSTGRES_USER: memory
       POSTGRES_DB: memory
@@ -17,12 +19,14 @@ services:
       timeout: 5s
       retries: 20
       start_period: 10s
+    stop_grace_period: 30s
     restart: unless-stopped
 
   qdrant:
-    image: qdrant/qdrant:v1.20.0
+    image: qdrant/qdrant:v1.20.0@sha256:9bfc89f9914fc14876a88c05270685921a55b8877b254a98bcc1cc2f0a424cd2
     environment:
       QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY:?Run scripts/start.sh to generate .env}
+      QDRANT__TELEMETRY_DISABLED: "true"
     ports:
       - "127.0.0.1:16333:6333"
     volumes:
@@ -32,7 +36,7 @@ services:
         - CMD
         - bash
         - -ec
-        - 'exec 3<>/dev/tcp/127.0.0.1/6333; printf "GET /readyz HTTP/1.0\r\nHost: localhost\r\napi-key: %s\r\n\r\n" "$$QDRANT__SERVICE__API_KEY" >&3; read -r response <&3; [[ "$$response" == *" 200 "* ]]'
+        - 'exec 3<>/dev/tcp/127.0.0.1/6333; printf "GET /readyz HTTP/1.0\r\nHost: localhost\r\n\r\n" >&3; read -r response <&3; [[ "$$response" == *" 200 "* ]]'
       interval: 5s
       timeout: 5s
       retries: 20
@@ -40,7 +44,7 @@ services:
     restart: unless-stopped
 
   ollama:
-    image: ollama/ollama:0.40.12
+    image: ollama/ollama:0.40.12@sha256:20d1bbfbabe1c97ba4b16301f08a20d8484bcf77047742a3cb71c613d8e12d0b
     ports:
       - "127.0.0.1:11435:11434"
     volumes:
@@ -55,5 +59,8 @@ services:
 
 volumes:
   postgres_data:
+    name: local-memory_postgres_data
   qdrant_data:
+    name: local-memory_qdrant_data
   ollama_models:
+    name: local-memory_ollama_models

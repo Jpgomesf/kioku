@@ -2,23 +2,15 @@
 set -euo pipefail
 
 PROJECT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-if [[ -d /Applications/Docker.app/Contents/Resources/bin ]]; then
-  export PATH="/Applications/Docker.app/Contents/Resources/bin:$PATH"
-fi
-if command -v docker >/dev/null 2>&1; then
-  DOCKER_BIN="$(command -v docker)"
-elif [[ -x /Applications/Docker.app/Contents/Resources/bin/docker ]]; then
-  DOCKER_BIN=/Applications/Docker.app/Contents/Resources/bin/docker
-else
-  printf 'Docker Desktop is required. Install it, start its engine, and retry.\n' >&2
-  exit 1
-fi
-if [[ -x /usr/bin/python3 ]]; then
-  PYTHON_BIN=/usr/bin/python3
-elif command -v python3 >/dev/null 2>&1; then
+# shellcheck source=scripts/lib.sh
+source "$PROJECT_DIR/scripts/lib.sh"
+DOCKER_BIN="$(find_docker)"
+if command -v python3 >/dev/null 2>&1; then
   PYTHON_BIN="$(command -v python3)"
+elif [[ -x /usr/bin/python3 ]]; then
+  PYTHON_BIN=/usr/bin/python3
 else
-  printf 'Python 3 is required only for secure .env creation.\n' >&2
+  printf 'Python 3 is required once, to create .env with random credentials.\n' >&2
   exit 1
 fi
 
@@ -45,7 +37,7 @@ elif 'CHANGE_ME_' in env_file.read_text(encoding='utf-8'):
     sys.exit('.env still contains template credentials. Set unique values before starting.')
 PY
 
-COMPOSE=("$DOCKER_BIN" compose --project-name local-memory --project-directory "$PROJECT_DIR" --env-file "$PROJECT_DIR/.env" -f "$PROJECT_DIR/compose.yaml")
+COMPOSE=("$DOCKER_BIN" compose --project-name "$KIOKU_COMPOSE_PROJECT" --project-directory "$PROJECT_DIR" --env-file "$PROJECT_DIR/.env" -f "$PROJECT_DIR/compose.yaml")
 "${COMPOSE[@]}" up -d --wait --wait-timeout 180
 
 # Parse this one value as data; .env is never evaluated by a shell.
@@ -67,8 +59,9 @@ if [[ -n "$EMBEDDING_MODEL_NAME" ]]; then
   fi
 fi
 
-printf '\nLocal memory services are ready. PostgreSQL: 15432; Qdrant: 16333; embeddings: 11435.\n'
-printf 'Run from %s:\n' "$PROJECT_DIR"
-printf '  ./bin/local-memory-mcp --env-file .env doctor\n'
-printf '  ./bin/local-memory-mcp --env-file .env ingest --path examples/notes --domain demo\n'
-printf '  ./bin/local-memory-mcp --env-file .env search "Which service replaces the old worker?" --domain demo --limit 5\n'
+printf '\nKioku services are ready: PostgreSQL 127.0.0.1:15432, Qdrant 127.0.0.1:16333, embeddings 127.0.0.1:11435.\n'
+printf 'Next, from %s:\n' "$PROJECT_DIR"
+printf '  make install\n'
+printf '  ./bin/kioku doctor\n'
+printf '  ./bin/kioku ingest --path examples/notes --domain demo\n'
+printf '  ./bin/kioku search "Which service replaces the old indexing worker?" --domain demo\n'

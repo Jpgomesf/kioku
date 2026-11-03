@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""Exercise the real stdio MCP server against isolated local test services.
+"""Exercise the real stdio MCP server against isolated test services.
 
 Usage:
-    python3 tests/mcp_smoke.py --binary /absolute/path/local-memory-mcp \
-        --env-file /absolute/path/smoke.env
+    python3 tests/mcp_smoke.py --binary /absolute/path/kioku --env-file /absolute/path/smoke.env
 
-The env file must select a PostgreSQL database and Qdrant collection whose names
-contain "smoke" or "test". This script creates fixture notes and feedback there;
-it never deletes databases, collections, or memories. No Python packages needed.
+The env file must name a PostgreSQL database and a Qdrant collection whose
+names contain "smoke" or "test". The script writes fixture notes and feedback
+there; it never deletes databases, collections, or memories. It runs the server
+with every tool enabled, its own notes folder, and a trace file, all in a
+temporary directory. No Python packages are needed.
 """
 
 from __future__ import annotations
@@ -30,17 +31,19 @@ CONFIG_ENV = {
     "DATABASE_URL", "QDRANT_URL", "QDRANT_COLLECTION", "QDRANT_API_KEY",
     "EMBEDDING_PROVIDER", "EMBEDDING_URL", "EMBEDDING_MODEL", "EMBEDDING_DIM",
     "EMBEDDING_API_KEY", "ALLOW_REMOTE_EMBEDDINGS", "MEMORY_HALF_LIFE_DAYS",
-    "MEMORY_LEGACY_THRESHOLD", "MEMORY_DEFAULT_DOMAIN", "MEMORY_NOTES_ROOT", "RUST_LOG",
+    "MEMORY_LEGACY_THRESHOLD", "MEMORY_DEFAULT_DOMAIN", "MEMORY_NOTES_ROOT", "MEMORY_TOOLS",
+    "MEMORY_TRACE_FILE", "MEMORY_TRACE_RUN", "MEMORY_BACKGROUND_UPKEEP", "KIOKU_ENV_FILE", "RUST_LOG",
 }
 
 
 class SmokeFailure(Exception):
-    """An intentionally concise failure without server payloads or secrets."""
+    """A concise failure without server payloads or secrets."""
 
 
 def read_env(path: Path) -> dict[str, str]:
-    """Read literal dotenv values for isolation checks, never execute shell text."""
-    values = {}
+    """Read literal dotenv values; never execute shell text. Duplicate keys are
+    rejected because the server and this check could otherwise disagree."""
+    values: dict[str, str] = {}
     for number, original in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         line = original.strip()
         if not line or line.startswith("#"):
@@ -50,13 +53,16 @@ def read_env(path: Path) -> dict[str, str]:
         if "=" not in line:
             raise SmokeFailure(f"env file line {number} is not KEY=value")
         key, raw = line.split("=", 1)
+        key = key.strip()
         try:
             parts = shlex.split(raw, comments=True, posix=True)
         except ValueError:
             raise SmokeFailure(f"env file line {number} has invalid quoting") from None
         if len(parts) > 1:
             raise SmokeFailure(f"env file line {number} requires a quoted value")
-        values[key.strip()] = parts[0] if parts else ""
+        if key in values:
+            raise SmokeFailure(f"env file defines {key} twice")
+        values[key] = parts[0] if parts else ""
     return values
 
 
@@ -71,15 +77,18 @@ def require_test_storage(values: dict[str, str]) -> None:
             raise SmokeFailure(f"refusing to write: {label} name must contain test or smoke")
 
 
+def write_env(values: dict[str, str], path: Path) -> None:
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        for key, value in values.items():
+            handle.write(f"{key}={json.dumps(value)}\n")
+
+
 class StdioClient:
-    def __init__(self, binary: Path, env_file: Path, timeout: float, notes_root: Path):
-        # dotenvy preserves inherited variables. Remove them so this explicit
-        # isolated test file cannot accidentally be overridden by a live setup.
+    def __init__(self, binary: Path, env_file: Path, timeout: float):
+        # Inherited settings must not override the isolated test configuration.
         env = {key: value for key, value in os.environ.items() if key not in CONFIG_ENV}
         env["RUST_LOG"] = "error"
-        # Deliberately override an env-file notes root with this isolated fixture
-        # directory. Never hydrate the user's actual documents during tests.
-        env["MEMORY_NOTES_ROOT"] = str(notes_root)
         self.process = subprocess.Popen(
             [str(binary), "--env-file", str(env_file), "serve"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -101,7 +110,7 @@ class StdioClient:
         except (BrokenPipeError, OSError):
             raise SmokeFailure("server exited while receiving an MCP message") from None
 
-    def request(self, method: str, params: dict | None = None) -> dict:
+    def request(self, method: str, params: dict | None = None, *, allow_error: bool = False) -> dict:
         self.sequence += 1
         request_id = self.sequence
         message = {"jsonrpc": "2.0", "id": request_id, "method": method}
@@ -122,8 +131,6 @@ class StdioClient:
                 if not isinstance(response, dict):
                     raise SmokeFailure("server emitted an invalid JSON-RPC message")
                 if "method" in response:
-                    # Notifications need no reply. Unexpected server requests
-                    # get a protocol error instead of hanging this test client.
                     if "id" in response:
                         self.send({"jsonrpc": "2.0", "id": response["id"], "error": {
                             "code": -32601, "message": "test client has no server-request handlers",
@@ -132,6 +139,8 @@ class StdioClient:
                 if response.get("id") != request_id:
                     raise SmokeFailure("server replied with an unexpected request ID")
                 if "error" in response:
+                    if allow_error:
+                        return {"_jsonrpc_error": response["error"]}
                     raise SmokeFailure(f"MCP request {method} returned a protocol error")
                 if "result" not in response:
                     raise SmokeFailure(f"MCP request {method} returned no result")
@@ -153,8 +162,7 @@ class StdioClient:
                     if len(self.buffer) > 2_000_000:
                         raise SmokeFailure("server response exceeded the smoke-test size limit")
                 else:
-                    # Capture bounded diagnostics for debugging in-process, but
-                    # never print server stderr, which could contain credentials.
+                    # Kept for debugging in-process; never printed, it could hold credentials.
                     self.stderr_tail.extend(data)
                     del self.stderr_tail[:-32768]
             if not events and self.process.poll() is not None:
@@ -165,8 +173,7 @@ class StdioClient:
         if not isinstance(result, dict):
             raise SmokeFailure(f"tool {name} returned a malformed result")
         is_error = bool(result.get("isError", False))
-        blocks = result.get("content", [])
-        texts = [block.get("text", "") for block in blocks if block.get("type") == "text"]
+        texts = [b.get("text", "") for b in result.get("content", []) if b.get("type") == "text"]
         raw = "\n".join(texts)
         if is_error:
             return {}, raw, True
@@ -176,12 +183,14 @@ class StdioClient:
             raise SmokeFailure(f"tool {name} did not return JSON text") from None
         if not isinstance(value, dict):
             raise SmokeFailure(f"tool {name} did not return a JSON object")
+        if result.get("structuredContent") not in (None, value):
+            raise SmokeFailure(f"tool {name} returned different text and structured content")
         return value, raw, False
 
     def call(self, name: str, arguments: dict | None = None) -> dict:
-        value, _, error = self.call_raw(name, arguments)
+        value, raw, error = self.call_raw(name, arguments)
         if error:
-            raise SmokeFailure(f"tool {name} returned an application error")
+            raise SmokeFailure(f"tool {name} returned an error: {raw[:200]}")
         return value
 
     def close(self) -> None:
@@ -191,7 +200,7 @@ class StdioClient:
             except (BrokenPipeError, OSError):
                 pass
         try:
-            self.process.wait(timeout=5)
+            self.process.wait(timeout=10)
         except subprocess.TimeoutExpired:
             self.process.terminate()
             try:
@@ -216,24 +225,36 @@ class Checks:
         print(f"ok {self.count:02d} - {name}", flush=True)
 
 
-def run(client: StdioClient, checks: Checks, notes_root: Path, hydration_key: str) -> None:
+def keys(results: list[dict]) -> list[str]:
+    return [r["key"] for r in results]
+
+
+def run(client: StdioClient, checks: Checks, notes_root: Path, hydration_key: str, trace_path: Path) -> None:
     initialized = client.request("initialize", {
         "protocolVersion": "2025-11-25", "capabilities": {},
-        "clientInfo": {"name": "local-memory-smoke-test", "version": "1.0.0"},
+        "clientInfo": {"name": "kioku-smoke-test", "version": "1.0.0"},
     })
     checks.check("MCP initialize negotiates a supported protocol", initialized.get("protocolVersion") == "2025-11-25")
+    checks.check("server identifies itself as kioku", initialized.get("serverInfo", {}).get("name") == "kioku")
+    checks.check("server instructions carry the memory policy", "memory_search" in initialized.get("instructions", ""))
     client.send({"jsonrpc": "2.0", "method": "notifications/initialized"})
-    listing = client.request("tools/list", {})
-    names = {tool["name"] for tool in listing.get("tools", [])}
-    expected = {
-        "rag_search", "rag_context", "graph_context", "provenance_lookup", "task_route",
-        "memory_upsert", "memory_feedback", "memory_retire", "memory_restore",
-        "memory_maintenance", "memory_stats", "memory_hydrate",
-    }
-    checks.check("all retrieval and lifecycle tools are discoverable", expected <= names)
 
-    domain = "smoke"
-    foreign_domain = "smoke-foreign"
+    tools = {tool["name"]: tool for tool in client.request("tools/list", {}).get("tools", [])}
+    expected = {"memory_search", "memory_get", "memory_save", "memory_inspect", "memory_feedback",
+                "memory_retire", "memory_restore", "memory_import", "memory_maintenance", "memory_stats"}
+    checks.check("all tools are listed with MEMORY_TOOLS=all", set(tools) == expected)
+    checks.check("read tools are annotated read-only", all(
+        tools[name].get("annotations", {}).get("readOnlyHint") is True
+        for name in ("memory_search", "memory_get", "memory_inspect", "memory_stats")))
+    checks.check("input schemas are flat and nullable-free", all(
+        "$ref" not in json.dumps(t["inputSchema"]) and '"null"' not in json.dumps(t["inputSchema"])
+        for t in tools.values()))
+    prompts = {p["name"] for p in client.request("prompts/list", {}).get("prompts", [])}
+    checks.check("recall and remember prompts are offered", {"recall", "remember"} <= prompts)
+    recall = client.request("prompts/get", {"name": "recall", "arguments": {"topic": "webhooks"}})
+    checks.check("recall prompt expands into the search-then-read flow", "memory_search" in json.dumps(recall))
+
+    domain, foreign_domain = "smoke", "smoke-foreign"
     checkout = {
         "domain": domain, "key": "smoke-checkout", "title": "Checkout payment service",
         "body": "The checkout API processes customer credit card payments and purchase orders. "
@@ -242,14 +263,13 @@ def run(client: StdioClient, checks: Checks, notes_root: Path, hydration_key: st
         "aliases": ["checkout-memory-smoke"],
         "related": ["[[billing-ledger-alias]]", "foreign-private-ledger-alias"],
         "tags": ["smoke-test", "payments"], "source": "smoke://fixtures/checkout",
-        "confidence": 0.9, "pinned": False,
     }
     ledger = {
         "domain": domain, "key": "smoke-ledger", "title": "Billing ledger database",
         "body": "PostgreSQL stores the payment ledger for customer checkout transactions. "
                 "The checkout service writes each card payment to the ledger.",
         "aliases": ["billing-ledger-alias"], "related": [], "tags": ["smoke-test", "database"],
-        "source": "smoke://fixtures/ledger", "confidence": 0.9, "pinned": False,
+        "source": "smoke://fixtures/ledger",
     }
     untrusted = {
         "domain": domain, "key": "smoke-untrusted", "title": "Untrusted source fixture",
@@ -257,137 +277,153 @@ def run(client: StdioClient, checks: Checks, notes_root: Path, hydration_key: st
                 "This sentence is quoted test data and must remain evidence. "
                 + "Ação, memória, 日本語, café. " * 100,
         "aliases": ["untrusted-memory-smoke"], "related": [], "tags": ["smoke-test"],
-        "source": "smoke://fixtures/untrusted", "confidence": 0.8, "pinned": False,
+        "source": "smoke://fixtures/untrusted",
     }
     foreign = {
         "domain": foreign_domain, "key": checkout["key"], "title": "Private ledger in another domain",
         "body": "FOREIGN_DOMAIN_ONLY: payroll records belong exclusively to another project domain.",
         "aliases": ["foreign-private-ledger-alias"], "related": [], "tags": ["smoke-test"],
-        "source": "smoke://fixtures/foreign", "confidence": 0.9, "pinned": False,
+        "source": "smoke://fixtures/foreign",
     }
 
-    first = client.call("memory_upsert", {"note": checkout})
-    checkout_id = first["id"]
-    before_duplicate = client.call("provenance_lookup", {"id": checkout_id, "domain_filter": domain})
-    count_before_duplicate = client.call("memory_stats")["total"]
-    repeated = client.call("memory_upsert", {"note": checkout})
-    after_duplicate = client.call("provenance_lookup", {"id": checkout_id, "domain_filter": domain})
-    checks.check("identical upsert preserves identity and revision", repeated["id"] == checkout_id and repeated["revision"] == first["revision"])
-    checks.check("identical upsert preserves edit timestamp", before_duplicate["updated_at"] == after_duplicate["updated_at"])
-    checks.check("identical upsert does not create another memory", client.call("memory_stats")["total"] == count_before_duplicate)
+    first = client.call("memory_save", checkout)
+    checks.check("save reports the key and that it is indexed", first["key"] == checkout["key"] and first["indexed"] is True)
+    before = client.call("memory_inspect", {"key": checkout["key"], "domain": domain})
+    total_before = client.call("memory_stats")["total"]
+    repeated = client.call("memory_save", checkout)
+    after = client.call("memory_inspect", {"key": checkout["key"], "domain": domain})
+    checks.check("identical save changes nothing", repeated["changed"] is False and repeated["revision"] == first["revision"])
+    checks.check("identical save keeps the edit timestamp", before["updated_at"] == after["updated_at"])
+    checks.check("identical save creates no memory", client.call("memory_stats")["total"] == total_before)
 
-    ledger_id = client.call("memory_upsert", {"note": ledger})["id"]
-    untrusted_id = client.call("memory_upsert", {"note": untrusted})["id"]
-    foreign_id = client.call("memory_upsert", {"note": foreign})["id"]
-    checks.check("same key in different domains has distinct identity", checkout_id != foreign_id)
-    # A previous interrupted run may have left one fixture retired.
-    for note_id, note_domain in [(checkout_id, domain), (ledger_id, domain), (untrusted_id, domain), (foreign_id, foreign_domain)]:
-        current = client.call("provenance_lookup", {"id": note_id, "domain_filter": note_domain})
-        if current["status"] == "legacy":
-            client.call("memory_restore", {"id": note_id, "domain_filter": note_domain})
+    client.call("memory_save", ledger)
+    client.call("memory_save", untrusted)
+    client.call("memory_save", foreign)
+    foreign_id = client.call("memory_inspect", {"key": foreign["key"], "domain": foreign_domain})["id"]
+    checks.check("the same key in two domains is two memories", foreign_id != before["id"])
+    # A previous interrupted run may have left a fixture retired.
+    for key, note_domain in [(checkout["key"], domain), (ledger["key"], domain), (untrusted["key"], domain), (foreign["key"], foreign_domain)]:
+        if client.call("memory_inspect", {"key": key, "domain": note_domain})["status"] == "legacy":
+            client.call("memory_restore", {"key": key, "domain": note_domain})
 
-    graph = client.call("graph_context", {"id": checkout_id, "domain_filter": domain})
-    neighbors = {neighbor["id"] for neighbor in graph["neighbors"]}
-    checks.check("related wiki link resolves through a note alias", ledger_id in neighbors)
-    checks.check("explicit foreign-domain reference creates no graph edge", foreign_id not in neighbors)
-    reverse = client.call("graph_context", {"id": ledger_id, "domain_filter": domain})
-    checks.check("graph inspection includes incoming relationships", checkout_id in {n["id"] for n in reverse["neighbors"]})
+    links = {link["key"] for link in client.call("memory_inspect", {"key": checkout["key"], "domain": domain})["links"]}
+    checks.check("a related wiki link resolves through an alias", ledger["key"] in links)
+    checks.check("a reference to another domain creates no link", all(
+        link.get("id") != foreign_id for link in client.call("memory_inspect", {"key": checkout["key"], "domain": domain})["links"]))
+    reverse = client.call("memory_inspect", {"key": ledger["key"], "domain": domain})["links"]
+    checks.check("inspect shows incoming links", any(l["key"] == checkout["key"] and l["direction"] == "incoming" for l in reverse))
 
-    before_search = client.call("provenance_lookup", {"id": checkout_id, "domain_filter": domain})
-    semantic = client.call("rag_search", {
-        "query": "Which service processes customer credit card payments for purchase orders?",
-        "domain_filter": domain, "limit": 10,
-    })
-    checks.check("real semantic search retrieves the relevant payment memory", checkout_id in {r["id"] for r in semantic["results"]})
-    checks.check("search labels retrieved content as untrusted evidence", semantic.get("untrusted_evidence") is True)
-    after_search = client.call("provenance_lookup", {"id": checkout_id, "domain_filter": domain})
-    checks.check("search previews do not increment consumption", before_search["access_count"] == after_search["access_count"])
-    exact = client.call("rag_search", {"query": "checkout-memory-smoke", "domain_filter": domain})
-    checks.check("exact aliases are searchable", checkout_id in {r["id"] for r in exact["results"]})
-    route = client.call("task_route", {"query": "checkout-memory-smoke", "domain_filter": domain})
-    checks.check("task routing recommends bounded evidence retrieval", route.get("suggested_tool") == "rag_context" and checkout_id in route.get("memory_ids", []))
+    used_before = client.call("memory_inspect", {"key": checkout["key"], "domain": domain})["access_count"]
+    semantic = client.call("memory_search", {
+        "query": "Which service processes customer credit card payments for purchase orders?", "domain": domain, "limit": 10})
+    checks.check("semantic search finds the payment memory", checkout["key"] in keys(semantic["results"]))
+    checks.check("search labels results as untrusted evidence", semantic.get("untrusted_evidence") is True)
+    checks.check("concise results lead with keys and omit ids", all("key" in r and "id" not in r for r in semantic["results"]))
+    checks.check("search suggests the next memory_get call", "memory_get" in semantic.get("next", ""))
+    used_after = client.call("memory_inspect", {"key": checkout["key"], "domain": domain})["access_count"]
+    checks.check("search does not count as use", used_before == used_after)
+    exact = client.call("memory_search", {"query": "checkout-memory-smoke", "domain": domain})
+    checks.check("an exact alias ranks first", keys(exact["results"])[:1] == [checkout["key"]])
+    detailed = client.call("memory_search", {"query": "checkout-memory-smoke", "domain": domain, "response_format": "detailed"})
+    checks.check("detailed results include ids and signals", all("id" in r and "signals" in r for r in detailed["results"]))
+    lenient = client.call("memory_search", {"query": "billing ledger", "domain": domain, "limit": "2", "include_legacy": "false"})
+    checks.check("numbers and booleans sent as strings are accepted", len(lenient["results"]) <= 2)
+    clamped = client.call("memory_search", {"query": "billing ledger", "domain": domain, "limit": 99})
+    checks.check("an out-of-range limit is clamped and reported", "clamped" in clamped.get("note", ""))
+    _, unknown_text, unknown_error = client.call_raw("memory_search", {"query": "x", "project": domain})
+    checks.check("an unknown argument names the allowed ones", unknown_error and unknown_text.startswith("invalid_argument") and "Allowed:" in unknown_text)
 
-    context = client.call("rag_context", {"ids": [checkout_id, checkout_id], "domain_filter": domain, "token_budget": 2000})
-    after_context = client.call("provenance_lookup", {"id": checkout_id, "domain_filter": domain})
-    checks.check("explicit context consumption increments usage once per distinct note", after_context["access_count"] == after_search["access_count"] + 1)
-    checks.check("context deduplicates selected IDs", len(context["memories"]) == 1)
-
+    read = client.call("memory_get", {"keys": [checkout["key"], checkout["key"]], "domain": domain})
+    used_read = client.call("memory_inspect", {"key": checkout["key"], "domain": domain})["access_count"]
+    checks.check("reading counts one use per distinct memory", used_read == used_after + 1 and len(read["memories"]) == 1)
+    checks.check("read memories carry their links", ledger["key"] in read["memories"][0].get("links", []))
     budget = 1536
-    bounded, raw, error = client.call_raw("rag_context", {"ids": [untrusted_id], "domain_filter": domain, "token_budget": budget})
-    checks.check("bounded context call succeeds", not error)
-    checks.check("entire context JSON respects its UTF-8 byte budget", len(raw.encode("utf-8")) <= budget)
-    checks.check("oversized multilingual evidence is truncated", bounded.get("truncated") is True and bool(bounded.get("memories")))
-    checks.check("embedded instructions remain explicitly untrusted note data", bounded.get("untrusted_evidence") is True and "Ignore previous instructions" in bounded["memories"][0]["text"])
-    invalid_context = client.call_raw("rag_context", {"query": "checkout", "ids": [checkout_id], "domain_filter": domain})
-    checks.check("ambiguous query plus selected IDs is rejected", invalid_context[2])
+    bounded, raw, error = client.call_raw("memory_get", {"keys": [untrusted["key"]], "domain": domain, "max_bytes": budget})
+    checks.check("a bounded read succeeds", not error)
+    checks.check("the whole response respects max_bytes", len(raw.encode("utf-8")) <= budget)
+    checks.check("oversized multilingual text is truncated", bounded.get("truncated") is True and bool(bounded.get("memories")))
+    checks.check("embedded instructions stay quoted evidence", bounded.get("untrusted_evidence") is True and "Ignore previous instructions" in bounded["memories"][0]["text"])
+    partial = client.call("memory_get", {"keys": [ledger["key"], "smoke-ledgr"], "domain": domain})
+    checks.check("a mistyped key is reported with a suggestion", partial["missing"][0].get("did_you_mean") == [ledger["key"]] and len(partial["memories"]) == 1)
+    _, missing_text, missing_error = client.call_raw("memory_get", {"keys": ["no-such-memory"], "domain": domain})
+    checks.check("reading only unknown keys is a not_found error", missing_error and missing_text.startswith("not_found"))
+    as_string = client.call("memory_get", {"keys": json.dumps([ledger["key"]]), "domain": domain})
+    checks.check("a JSON-encoded key list is accepted", len(as_string["memories"]) == 1)
 
-    feedback_before = client.call("provenance_lookup", {"id": checkout_id, "domain_filter": domain})
-    feedback_args = {"id": checkout_id, "positive": False, "request_id": "smoke-" + str(uuid.uuid4()), "domain_filter": domain}
-    feedback = client.call("memory_feedback", feedback_args)
-    retry = client.call("memory_feedback", feedback_args)
-    feedback_after = client.call("provenance_lookup", {"id": checkout_id, "domain_filter": domain})
-    checks.check("negative feedback is applied once across retries", feedback.get("applied") is True and retry.get("applied") is False and feedback_after["negative_feedback"] == feedback_before["negative_feedback"] + 1)
-    conflict = client.call_raw("memory_feedback", {**feedback_args, "positive": True})
-    checks.check("reusing a feedback event ID with different content is rejected", conflict[2])
+    negative_before = client.call("memory_inspect", {"key": checkout["key"], "domain": domain})["feedback"]["negative"]
+    feedback_args = {"key": checkout["key"], "positive": False, "request_id": "smoke-" + str(uuid.uuid4()), "domain": domain}
+    applied = client.call("memory_feedback", feedback_args)
+    retried = client.call("memory_feedback", feedback_args)
+    negative_after = client.call("memory_inspect", {"key": checkout["key"], "domain": domain})["feedback"]["negative"]
+    checks.check("feedback counts once across retries", applied["applied"] is True and retried["applied"] is False and negative_after == negative_before + 1)
+    _, conflict_text, conflict_error = client.call_raw("memory_feedback", {**feedback_args, "positive": True})
+    checks.check("reusing a request_id for different feedback is a conflict", conflict_error and conflict_text.startswith("conflict"))
 
-    retired = client.call("memory_retire", {"id": checkout_id, "domain_filter": domain})
-    checks.check("retirement preserves the memory in legacy state", retired.get("status") == "legacy" and retired.get("deleted") is False)
-    hidden = client.call("rag_search", {"query": "checkout-memory-smoke", "domain_filter": domain})
-    checks.check("default search excludes retired memories", checkout_id not in {r["id"] for r in hidden["results"]})
-    legacy = client.call("rag_search", {"query": "checkout-memory-smoke", "domain_filter": domain, "include_legacy": True})
-    checks.check("legacy search can retrieve retired memories", checkout_id in {r["id"] for r in legacy["results"]})
-    restored = client.call("memory_restore", {"id": checkout_id, "domain_filter": domain})
-    visible = client.call("rag_search", {"query": "checkout-memory-smoke", "domain_filter": domain})
-    checks.check("restoration returns a memory to default retrieval", restored.get("status") == "active" and checkout_id in {r["id"] for r in visible["results"]})
+    retired = client.call("memory_retire", {"key": checkout["key"], "domain": domain})
+    checks.check("retiring keeps the memory as legacy", retired["status"] == "legacy")
+    hidden = client.call("memory_search", {"query": "checkout-memory-smoke", "domain": domain})
+    checks.check("default search excludes retired memories", checkout["key"] not in keys(hidden["results"]))
+    legacy = client.call("memory_search", {"query": "checkout-memory-smoke", "domain": domain, "include_legacy": True})
+    checks.check("include_legacy finds retired memories, marked legacy", any(r["key"] == checkout["key"] and r.get("status") == "legacy" for r in legacy["results"]))
+    legacy_read = client.call("memory_get", {"keys": [checkout["key"]], "domain": domain})
+    checks.check("a retired memory can still be read by key", legacy_read["memories"][0].get("status") == "legacy")
+    restored = client.call("memory_restore", {"key": checkout["key"], "domain": domain})
+    visible = client.call("memory_search", {"query": "checkout-memory-smoke", "domain": domain})
+    checks.check("restoring returns a memory to default search", restored["status"] == "active" and checkout["key"] in keys(visible["results"]))
 
-    cross_domain_requests = [
-        ("provenance_lookup", {"id": foreign_id, "domain_filter": domain}),
-        ("graph_context", {"id": foreign_id, "domain_filter": domain}),
-        ("rag_context", {"ids": [foreign_id], "domain_filter": domain}),
-        ("memory_feedback", {"id": foreign_id, "domain_filter": domain, "positive": False, "request_id": "forbidden-" + str(uuid.uuid4())}),
-        ("memory_retire", {"id": foreign_id, "domain_filter": domain}),
-        ("memory_restore", {"id": foreign_id, "domain_filter": domain}),
-    ]
-    for tool_name, arguments in cross_domain_requests:
-        checks.check(f"{tool_name} rejects an ID from another domain", client.call_raw(tool_name, arguments)[2])
-    isolated = client.call("rag_search", {"query": "foreign-private-ledger-alias", "domain_filter": domain, "include_legacy": True})
-    checks.check("query results stay inside the requested domain", all(r["domain"] == domain and r["id"] != foreign_id for r in isolated["results"]))
-    foreign_provenance = client.call("provenance_lookup", {"id": foreign_id, "domain_filter": foreign_domain})
-    checks.check("rejected cross-domain mutations leave the foreign memory active", foreign_provenance["status"] == "active")
+    for tool, arguments in [
+        ("memory_inspect", {"key": foreign_id, "domain": domain}),
+        ("memory_get", {"keys": [foreign_id], "domain": domain}),
+        ("memory_feedback", {"key": foreign_id, "domain": domain, "positive": False}),
+        ("memory_retire", {"key": foreign_id, "domain": domain}),
+        ("memory_restore", {"key": foreign_id, "domain": domain}),
+    ]:
+        _, text, error = client.call_raw(tool, arguments)
+        checks.check(f"{tool} cannot reach a memory in another domain", error and text.startswith("not_found"))
+    isolated = client.call("memory_search", {"query": "foreign-private-ledger-alias", "domain": domain, "include_legacy": True})
+    checks.check("search stays inside the requested domain", isolated["domain"] == domain and all("FOREIGN_DOMAIN_ONLY" not in r["snippet"] for r in isolated["results"]))
+    checks.check("rejected cross-domain writes left the other memory active",
+                 client.call("memory_inspect", {"key": foreign["key"], "domain": foreign_domain})["status"] == "active")
 
-    hydrated = client.call("memory_hydrate", {"domain_filter": domain})
-    checks.check("hydration imports canonical Markdown notes", hydrated.get("imported") == 1 and len(hydrated.get("notes", [])) == 1)
-    hydrated_note = hydrated["notes"][0]
-    hydrated_id = hydrated_note["id"]
-    checks.check("hydration preserves the explicit frontmatter key", hydrated_note.get("key") == hydration_key)
-    hydrated_search = client.call("rag_search", {"query": hydration_key + "-alias", "domain_filter": domain})
-    checks.check("hydrated alias is immediately searchable", hydrated_id in {r["id"] for r in hydrated_search["results"]})
-    hydrated_graph = client.call("graph_context", {"id": hydrated_id, "domain_filter": domain})
-    checks.check("hydrated related link resolves through existing aliases", ledger_id in {n["id"] for n in hydrated_graph["neighbors"]})
-    hydrated_provenance = client.call("provenance_lookup", {"id": hydrated_id, "domain_filter": domain})
-    checks.check("hydration provenance is the actual canonical source file", hydrated_provenance.get("source") == str((notes_root / "canonical.md").resolve()))
-    hydrated_retry = client.call("memory_hydrate", {"path": "canonical.md", "domain_filter": domain})
-    checks.check("repeated hydration is idempotent", hydrated_retry["notes"][0]["id"] == hydrated_id and hydrated_retry["notes"][0]["revision"] == hydrated_note["revision"])
-    checks.check("hydration rejects parent-directory traversal", client.call_raw("memory_hydrate", {"path": "../outside.md", "domain_filter": domain})[2])
-    checks.check("hydration rejects a symlink escaping the notes root", client.call_raw("memory_hydrate", {"path": "escape.md", "domain_filter": domain})[2])
-    checks.check("hydration rejects an absolute file path", client.call_raw("memory_hydrate", {"path": str(notes_root.parent / "outside.md"), "domain_filter": domain})[2])
-    mismatched_key = hydration_key + "-wrong-domain"
+    _, secret_text, secret_error = client.call_raw("memory_save", {
+        **ledger, "key": "smoke-secret", "body": "Deploy token: " + "gh" + "p_" + "a1B2c3D4e5" * 4})
+    checks.check("a note containing a credential is refused", secret_error and secret_text.startswith("refused"))
+
+    imported = client.call("memory_import", {"domain": domain})
+    checks.check("import reads the notes folder", imported["imported"] == 1 and imported["notes"][0]["key"] == hydration_key)
+    hydrated_search = client.call("memory_search", {"query": hydration_key + "-alias", "domain": domain})
+    checks.check("an imported alias is immediately searchable", keys(hydrated_search["results"])[:1] == [hydration_key])
+    hydrated = client.call("memory_inspect", {"key": hydration_key, "domain": domain})
+    checks.check("an imported note links through existing aliases", ledger["key"] in {l["key"] for l in hydrated["links"]})
+    checks.check("imported provenance is the file, shown relative to the notes folder", hydrated["source"] == "canonical.md" and hydrated["origin"] == "file")
+    again = client.call("memory_import", {"path": "canonical.md", "domain": domain})
+    checks.check("re-importing an unchanged file is a no-op", again["notes"][0]["revision"] == imported["notes"][0]["revision"])
+    _, owned_text, owned_error = client.call_raw("memory_save", {
+        "key": hydration_key, "title": "Overwrite", "body": "A tool must not overwrite a Markdown note.", "domain": domain})
+    checks.check("tools cannot overwrite a note that lives in Markdown", owned_error and owned_text.startswith("conflict") and "memory_import" in owned_text)
+    for label, path in [("parent-directory traversal", "../outside.md"), ("a symlink escaping the folder", "escape.md"),
+                        ("an absolute path", str(notes_root.parent / "outside.md"))]:
+        checks.check(f"import rejects {label}", client.call_raw("memory_import", {"path": path, "domain": domain})[2])
     (notes_root / "wrong-domain.md").write_text(
-        "---\nkey: " + mismatched_key + "\ndomain: " + foreign_domain + "\n"
-        "title: Mismatched domain fixture\n---\n"
-        "This note must not be persisted when hydration targets the smoke domain.\n",
-        encoding="utf-8",
-    )
-    before_mismatched = client.call("memory_stats")["total"]
-    mismatched = client.call_raw("memory_hydrate", {"path": "wrong-domain.md", "domain_filter": domain})
-    checks.check("hydration rejects frontmatter outside its requested domain", mismatched[2])
-    checks.check("rejected domain hydration creates no memory", client.call("memory_stats")["total"] == before_mismatched)
+        "---\nkey: " + hydration_key + "-wrong\ndomain: " + foreign_domain + "\ntitle: Mismatched domain\n---\n"
+        "This note must not be imported into the smoke domain.\n", encoding="utf-8")
+    total = client.call("memory_stats")["total"]
+    checks.check("import rejects frontmatter for another domain", client.call_raw("memory_import", {"path": "wrong-domain.md", "domain": domain})[2])
+    checks.check("a rejected import writes nothing", client.call("memory_stats")["total"] == total)
 
-    preview = client.call("memory_maintenance", {"dry_run": True})
-    checks.check("maintenance supports preview without permanent deletion", preview.get("dry_run") is True and preview.get("policy", {}).get("permanent_deletion") is False)
+    legacy_search = client.call("rag_search", {"query": "checkout-memory-smoke", "domain_filter": domain, "limit": 3})
+    checks.check("older tool and argument names still work", checkout["key"] in keys(legacy_search["results"]))
+
+    preview = client.call("memory_maintenance", {})
+    checks.check("maintenance previews by default and never deletes", preview["dry_run"] is True and preview["policy"]["permanent_deletion"] is False)
     stats = client.call("memory_stats")
-    checks.check("statistics include persisted notes and graph edges", stats.get("total", 0) >= 4 and stats.get("edges", 0) >= 1 and stats.get("domains", 0) >= 2)
-    checks.check("all fixture vectors are synchronized", stats.get("pending_vectors") == 0)
+    checks.check("stats count notes, links, and domains", stats["total"] >= 4 and stats["edges"] >= 1 and stats["by_domain"].get(domain, 0) >= 4)
+    checks.check("every fixture vector is indexed", stats["pending_vectors"] == 0)
+
+    records = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
+    checks.check("the trace has one record per tool call", len(records) >= 60 and all("tool" in r and "duration_ms" in r for r in records))
+    checks.check("the trace names the client and older aliases", any(r.get("called") == "rag_search" for r in records)
+                 and all(r.get("client", {}).get("name") == "kioku-smoke-test" for r in records))
 
 
 def main() -> int:
@@ -405,11 +441,13 @@ def main() -> int:
             raise SmokeFailure("--binary must be an executable file")
         if args.timeout <= 0 or args.timeout > 600:
             raise SmokeFailure("--timeout must be greater than zero and at most 600 seconds")
-        require_test_storage(read_env(env_file))
-        fixtures = tempfile.TemporaryDirectory(prefix="local-memory-smoke-")
+        values = read_env(env_file)
+        require_test_storage(values)
+        fixtures = tempfile.TemporaryDirectory(prefix="kioku-smoke-")
         fixture_root = Path(fixtures.name).resolve()
         notes_root = fixture_root / "notes"
         notes_root.mkdir()
+        trace_path = fixture_root / "trace.jsonl"
         hydration_key = "smoke-hydrated-" + uuid.uuid4().hex[:12]
         (notes_root / "canonical.md").write_text(
             "---\nkey: " + hydration_key + "\ndomain: smoke\n"
@@ -422,11 +460,19 @@ def main() -> int:
         outside = fixture_root / "outside.md"
         outside.write_text("# Outside allowed notes\nThis file must never be imported.\n", encoding="utf-8")
         (notes_root / "escape.md").symlink_to(outside)
-        client = StdioClient(binary, env_file, args.timeout, notes_root)
-        run(client, checks, notes_root, hydration_key)
-    except (SmokeFailure, OSError, KeyError, TypeError, ValueError) as error:
-        # Never print arbitrary exceptions/server payloads containing connection
-        # strings. SmokeFailure messages above are controlled diagnostic labels.
+        # Never touch the user's real notes, and run everything the server offers.
+        values.update({
+            "MEMORY_NOTES_ROOT": str(notes_root),
+            "MEMORY_TOOLS": "all",
+            "MEMORY_TRACE_FILE": str(trace_path),
+            "MEMORY_BACKGROUND_UPKEEP": "false",
+        })
+        server_env = fixture_root / "server.env"
+        write_env(values, server_env)
+        client = StdioClient(binary, server_env, args.timeout)
+        run(client, checks, notes_root, hydration_key, trace_path)
+    except (SmokeFailure, OSError, KeyError, TypeError, ValueError, IndexError) as error:
+        # Never print arbitrary exceptions or server payloads; they can hold connection strings.
         message = str(error) if isinstance(error, SmokeFailure) else type(error).__name__
         print(f"FAIL after {checks.count} checks: {message}", file=sys.stderr)
         return 1

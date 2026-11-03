@@ -1,4 +1,5 @@
-//! Note ingestion, explicit relationship resolution, and graph ranking.
+//! Note parsing, explicit relationship resolution, graph propagation, and
+//! retention.
 //!
 //! Note text is evidence, never executable instructions. Aliases identify a note;
 //! they do not silently merge notes or create claims about relationships.
@@ -8,28 +9,156 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
-use serde::Serialize;
-use serde_yaml::{Mapping, Value};
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::model::{Edge, Note, NoteInput};
+use crate::model::{Edge, Note, NoteInput, Status};
+
+/// Frontmatter fields Kioku reads. Other fields (Obsidian dates, CSS classes,
+/// and so on) are ignored. Plain YAML scalars such as `2024` are accepted as
+/// strings; booleans must be `true` or `false`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct Frontmatter {
+    key: Option<String>,
+    id: Option<String>,
+    title: Option<String>,
+    domain: Option<String>,
+    aliases: Option<OneOrMany>,
+    alias: Option<OneOrMany>,
+    related: Option<OneOrMany>,
+    tags: Option<OneOrMany>,
+    confidence: Option<f64>,
+    pinned: Option<bool>,
+}
+
+/// A frontmatter list that may also be written as a single value. Plain
+/// scalars (`2024`, `true`) are kept as text.
+#[derive(Debug)]
+struct OneOrMany(Vec<String>);
+
+impl OneOrMany {
+    fn into_vec(self) -> Vec<String> {
+        self.0
+    }
+}
+
+/// One scalar written as text.
+struct Scalar(String);
+
+struct ScalarVisitor;
+
+impl<'de> serde::de::Visitor<'de> for ScalarVisitor {
+    type Value = String;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("a string (quote [[wiki links]] inside lists)")
+    }
+    fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<String, E> {
+        Ok(v.to_owned())
+    }
+    fn visit_string<E: serde::de::Error>(self, v: String) -> Result<String, E> {
+        Ok(v)
+    }
+    fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<String, E> {
+        Ok(v.to_string())
+    }
+    fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<String, E> {
+        Ok(v.to_string())
+    }
+    fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<String, E> {
+        Ok(v.to_string())
+    }
+    fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<String, E> {
+        Ok(v.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for Scalar {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_any(ScalarVisitor).map(Scalar)
+    }
+}
+
+impl<'de> Deserialize<'de> for OneOrMany {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct ListVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for ListVisitor {
+            type Value = OneOrMany;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a string or a list of strings")
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<OneOrMany, A::Error> {
+                let mut values = Vec::new();
+                while let Some(Scalar(value)) = seq.next_element()? {
+                    values.push(value);
+                }
+                Ok(OneOrMany(values))
+            }
+            fn visit_unit<E: serde::de::Error>(self) -> Result<OneOrMany, E> {
+                Ok(OneOrMany(Vec::new()))
+            }
+            fn visit_none<E: serde::de::Error>(self) -> Result<OneOrMany, E> {
+                Ok(OneOrMany(Vec::new()))
+            }
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<OneOrMany, E> {
+                ScalarVisitor.visit_str(v).map(|s| OneOrMany(vec![s]))
+            }
+            fn visit_string<E: serde::de::Error>(self, v: String) -> Result<OneOrMany, E> {
+                Ok(OneOrMany(vec![v]))
+            }
+            fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<OneOrMany, E> {
+                Ok(OneOrMany(vec![v.to_string()]))
+            }
+            fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<OneOrMany, E> {
+                Ok(OneOrMany(vec![v.to_string()]))
+            }
+            fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<OneOrMany, E> {
+                Ok(OneOrMany(vec![v.to_string()]))
+            }
+            fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<OneOrMany, E> {
+                Ok(OneOrMany(vec![v.to_string()]))
+            }
+        }
+
+        deserializer.deserialize_any(ListVisitor)
+    }
+}
+
+fn list(values: Option<OneOrMany>) -> Vec<String> {
+    values
+        .map(OneOrMany::into_vec)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .collect()
+}
+
+fn text(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
 
 /// Parse one focused Markdown note. The actual import location supplies provenance.
 /// Frontmatter `id` is accepted as a stable textual key, not a database UUID override.
-pub fn parse_markdown(text: &str, source: &str, default_domain: &str) -> Result<NoteInput> {
+pub fn parse_markdown(text_in: &str, source: &str, default_domain: &str) -> Result<NoteInput> {
     // A BOM and Windows line endings should not prevent frontmatter recognition.
-    let normalized = text.trim_start_matches('\u{feff}').replace("\r\n", "\n");
+    let normalized = text_in.trim_start_matches('\u{feff}').replace("\r\n", "\n");
     let (frontmatter, body) = split_frontmatter(&normalized)?;
-    let metadata = match frontmatter {
-        Some(yaml) => {
-            let value: Value = serde_yaml::from_str(yaml).context("invalid YAML frontmatter")?;
-            match value {
-                Value::Mapping(map) => map,
-                Value::Null => Mapping::new(),
-                _ => bail!("frontmatter must be a YAML mapping"),
-            }
-        }
-        None => Mapping::new(),
+    let meta: Frontmatter = match frontmatter {
+        Some(yaml) if !yaml.trim().is_empty() => serde_saphyr::from_str_with_options(
+            yaml,
+            serde_saphyr::options! { strict_booleans: true },
+        )
+        .context("invalid YAML frontmatter (quote [[wiki links]] inside lists, for example related: ['[[Note]]'])")?,
+        _ => Frontmatter::default(),
     };
 
     let fallback_key = Path::new(source)
@@ -37,35 +166,61 @@ pub fn parse_markdown(text: &str, source: &str, default_domain: &str) -> Result<
         .and_then(|s| s.to_str())
         .filter(|s| !s.trim().is_empty())
         .unwrap_or("note");
-    let key = string_field(&metadata, "key")?
-        .or(string_field(&metadata, "id")?)
+    let key = text(meta.key)
+        .or(text(meta.id))
         .unwrap_or_else(|| fallback_key.to_owned());
-    let title = string_field(&metadata, "title")?
-        .or_else(|| {
-            body.lines()
-                .find_map(|line| line.strip_prefix("# "))
-                .map(|line| line.trim().trim_end_matches('#').trim().to_owned())
-                .filter(|line| !line.is_empty())
-        })
+    let title = text(meta.title)
+        .or_else(|| first_heading(body))
         .unwrap_or_else(|| key.clone());
-    let mut aliases = string_list(&metadata, "aliases")?;
-    aliases.extend(string_list(&metadata, "alias")?);
+    let mut aliases = list(meta.aliases);
+    aliases.extend(list(meta.alias));
     let note = NoteInput {
-        domain: string_field(&metadata, "domain")?.unwrap_or_else(|| default_domain.to_owned()),
+        domain: text(meta.domain).unwrap_or_else(|| default_domain.to_owned()),
         key,
         title,
         body: body.trim().to_owned(),
         aliases: deduplicate_strings(aliases),
-        related: deduplicate_strings(string_list(&metadata, "related")?),
-        tags: deduplicate_strings(string_list(&metadata, "tags")?),
+        related: deduplicate_strings(list(meta.related)),
+        tags: deduplicate_strings(list(meta.tags)),
         source: Some(source.to_owned()),
-        confidence: number_field(&metadata, "confidence")?.unwrap_or(0.8),
-        pinned: bool_field(&metadata, "pinned")?.unwrap_or(false),
+        confidence: meta.confidence.unwrap_or(0.8),
+        pinned: meta.pinned.unwrap_or(false),
     };
     note.validate()?;
     Ok(note)
 }
 
+/// The first `# ` heading outside fenced code blocks.
+fn first_heading(body: &str) -> Option<String> {
+    let mut fence: Option<&str> = None;
+    for line in body.lines() {
+        let trimmed = line.trim_start();
+        if let Some(open) = fence {
+            if trimmed.starts_with(open) {
+                fence = None;
+            }
+            continue;
+        }
+        if trimmed.starts_with("```") {
+            fence = Some("```");
+            continue;
+        }
+        if trimmed.starts_with("~~~") {
+            fence = Some("~~~");
+            continue;
+        }
+        if let Some(heading) = line.strip_prefix("# ") {
+            let heading = heading.trim().trim_end_matches('#').trim();
+            if !heading.is_empty() {
+                return Some(heading.to_owned());
+            }
+        }
+    }
+    None
+}
+
+/// Split `---` frontmatter from the body. The delimiters must start at the
+/// beginning of a line, so indented `---` inside a YAML block scalar is content.
 fn split_frontmatter(text: &str) -> Result<(Option<&str>, &str)> {
     let Some(first_newline) = text.find('\n') else {
         if text.trim() == "---" {
@@ -73,13 +228,14 @@ fn split_frontmatter(text: &str) -> Result<(Option<&str>, &str)> {
         }
         return Ok((None, text));
     };
-    if text[..first_newline].trim() != "---" {
+    if text[..first_newline].trim_end() != "---" {
         return Ok((None, text));
     }
     let yaml_start = first_newline + 1;
     let mut offset = yaml_start;
     for line in text[yaml_start..].split_inclusive('\n') {
-        if line.trim() == "---" || line.trim() == "..." {
+        let marker = line.trim_end();
+        if marker == "---" || marker == "..." {
             return Ok((
                 Some(&text[yaml_start..offset]),
                 &text[offset + line.len()..],
@@ -90,52 +246,6 @@ fn split_frontmatter(text: &str) -> Result<(Option<&str>, &str)> {
     bail!("frontmatter is missing its closing --- delimiter")
 }
 
-fn field<'a>(mapping: &'a Mapping, name: &str) -> Option<&'a Value> {
-    mapping.get(Value::String(name.to_owned()))
-}
-
-fn string_field(mapping: &Mapping, name: &str) -> Result<Option<String>> {
-    match field(mapping, name) {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::String(value)) => Ok(Some(value.trim().to_owned())),
-        _ => bail!("frontmatter {name} must be a string"),
-    }
-}
-
-fn string_list(mapping: &Mapping, name: &str) -> Result<Vec<String>> {
-    match field(mapping, name) {
-        None | Some(Value::Null) => Ok(Vec::new()),
-        Some(Value::String(value)) => Ok(vec![value.trim().to_owned()]),
-        Some(Value::Sequence(values)) => values
-            .iter()
-            .map(|value| match value {
-                Value::String(value) => Ok(value.trim().to_owned()),
-                _ => bail!("frontmatter {name} must contain strings; quote [[wiki links]] in YAML"),
-            })
-            .collect(),
-        _ => bail!("frontmatter {name} must be a string or a list of strings"),
-    }
-}
-
-fn number_field(mapping: &Mapping, name: &str) -> Result<Option<f64>> {
-    match field(mapping, name) {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::Number(value)) => value
-            .as_f64()
-            .map(Some)
-            .with_context(|| format!("frontmatter {name} must be a finite number")),
-        _ => bail!("frontmatter {name} must be a number"),
-    }
-}
-
-fn bool_field(mapping: &Mapping, name: &str) -> Result<Option<bool>> {
-    match field(mapping, name) {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::Bool(value)) => Ok(Some(*value)),
-        _ => bail!("frontmatter {name} must be true or false"),
-    }
-}
-
 fn deduplicate_strings(values: Vec<String>) -> Vec<String> {
     let mut seen = BTreeSet::new();
     values
@@ -144,16 +254,22 @@ fn deduplicate_strings(values: Vec<String>) -> Vec<String> {
         .collect()
 }
 
-/// Normalize an explicit link or a name without interpreting Markdown as commands.
+/// Normalize a reference or label for matching. Obsidian `[[Note#Heading|label]]`
+/// syntax is understood only inside double brackets, so plain names such as
+/// `C# Tips` or `Issue #123` keep their meaning.
 fn normalized_reference(value: &str) -> String {
     let value = value.trim();
-    let value = value
+    let value = match value
         .strip_prefix("[[")
         .and_then(|inner| inner.strip_suffix("]]"))
-        .unwrap_or(value);
-    // Obsidian display labels and heading anchors are not parts of note identity.
-    let value = value.split('|').next().unwrap_or(value);
-    let value = value.split('#').next().unwrap_or(value).trim();
+    {
+        Some(inner) => {
+            let inner = inner.split('|').next().unwrap_or(inner);
+            inner.split('#').next().unwrap_or(inner)
+        }
+        None => value,
+    };
+    let value = value.trim();
     value
         .strip_suffix(".md")
         .unwrap_or(value)
@@ -170,53 +286,104 @@ pub struct UnresolvedRelation {
     pub reason: String,
 }
 
+/// Labels by which notes can be referenced within one domain, in precedence
+/// order: an exact key wins over a title, and a title over an alias. Active
+/// notes own a label before legacy ones.
+#[derive(Default)]
+struct LabelIndex {
+    keys: HashMap<(String, String), BTreeSet<(bool, Uuid)>>,
+    titles: HashMap<(String, String), BTreeSet<(bool, Uuid)>>,
+    aliases: HashMap<(String, String), BTreeSet<(bool, Uuid)>>,
+    ids: HashMap<(String, String), Uuid>,
+}
+
+impl LabelIndex {
+    fn build(notes: &[Note]) -> Self {
+        let mut index = Self::default();
+        for note in notes {
+            let domain = &note.input.domain;
+            // `false` sorts before `true`, so legacy = true sorts active notes first.
+            let entry = (note.status == Status::Legacy, note.id);
+            let add = |map: &mut HashMap<(String, String), BTreeSet<(bool, Uuid)>>, label: &str| {
+                let normalized = normalized_reference(label);
+                if !normalized.is_empty() {
+                    map.entry((domain.clone(), normalized))
+                        .or_default()
+                        .insert(entry);
+                }
+            };
+            add(&mut index.keys, &note.input.key);
+            add(&mut index.titles, &note.input.title);
+            for alias in &note.input.aliases {
+                add(&mut index.aliases, alias);
+            }
+            index
+                .ids
+                .insert((domain.clone(), note.id.to_string()), note.id);
+        }
+        index
+    }
+
+    /// Resolve a reference to exactly one note, or explain why not.
+    fn resolve(&self, domain: &str, reference: &str) -> Result<Uuid, &'static str> {
+        let key = (domain.to_owned(), normalized_reference(reference));
+        if let Some(id) = self.ids.get(&key) {
+            return Ok(*id);
+        }
+        for map in [&self.keys, &self.titles, &self.aliases] {
+            if let Some(candidates) = map.get(&key) {
+                let active: Vec<Uuid> = candidates
+                    .iter()
+                    .filter(|(legacy, _)| !legacy)
+                    .map(|(_, id)| *id)
+                    .collect();
+                let pool: Vec<Uuid> = if active.is_empty() {
+                    candidates.iter().map(|(_, id)| *id).collect()
+                } else {
+                    active
+                };
+                return match pool.as_slice() {
+                    [only] => Ok(*only),
+                    _ => Err("ambiguous"),
+                };
+            }
+        }
+        Err("not_found")
+    }
+}
+
+/// Resolve a key, title, alias, wiki link, or id to one note of `domain`,
+/// with the same rules that resolve `related` links.
+pub fn resolve_reference(
+    notes: &[Note],
+    domain: &str,
+    reference: &str,
+) -> Result<Uuid, &'static str> {
+    LabelIndex::build(notes).resolve(domain, reference)
+}
+
 /// Return explicit edges and diagnostics for references that cannot safely resolve.
 /// Only same-domain matches are eligible, including when the reference is a UUID.
 pub fn resolve_edges_with_report(notes: &[Note]) -> (Vec<Edge>, Vec<UnresolvedRelation>) {
-    let mut names: HashMap<(String, String), BTreeSet<Uuid>> = HashMap::new();
-    for note in notes {
-        let mut labels = vec![
-            note.input.key.clone(),
-            note.input.title.clone(),
-            note.id.to_string(),
-        ];
-        labels.extend(note.input.aliases.clone());
-        for label in labels {
-            let normalized = normalized_reference(&label);
-            if !normalized.is_empty() {
-                names
-                    .entry((note.input.domain.clone(), normalized))
-                    .or_default()
-                    .insert(note.id);
-            }
-        }
-    }
+    let index = LabelIndex::build(notes);
     let mut edges = BTreeMap::new();
     let mut unresolved = Vec::new();
     for note in notes {
         for reference in &note.input.related {
-            let key = (note.input.domain.clone(), normalized_reference(reference));
-            match names.get(&key) {
-                Some(targets) if targets.len() == 1 => {
-                    let target = *targets.first().expect("one target checked");
-                    if target != note.id {
-                        edges.entry((note.id, target)).or_insert_with(|| Edge {
-                            source: note.id,
-                            target,
-                            kind: "related".to_owned(),
-                            weight: 1.0,
-                        });
-                    }
+            match index.resolve(&note.input.domain, reference) {
+                Ok(target) if target != note.id => {
+                    edges.entry((note.id, target)).or_insert_with(|| Edge {
+                        source: note.id,
+                        target,
+                        kind: "related".to_owned(),
+                        weight: 1.0,
+                    });
                 }
-                targets => unresolved.push(UnresolvedRelation {
+                Ok(_) => {}
+                Err(reason) => unresolved.push(UnresolvedRelation {
                     source: note.id,
                     reference: reference.clone(),
-                    reason: if targets.is_some() {
-                        "ambiguous"
-                    } else {
-                        "not_found"
-                    }
-                    .to_owned(),
+                    reason: reason.to_owned(),
                 }),
             }
         }
@@ -229,17 +396,26 @@ pub fn resolve_edges(notes: &[Note]) -> Vec<Edge> {
     resolve_edges_with_report(notes).0
 }
 
-/// Query-personalized PageRank with a 15% restart probability and bidirectional
-/// traversal of explicit relationships. This ranks query relevance; it does not
-/// age or delete memories. Dangling mass returns to the query's seed distribution.
+/// Query-personalized PageRank over explicit relationships, traversed in both
+/// directions. `restart` is the probability of jumping back to the seeds at
+/// each step: higher values keep the mass near the seeds. This measures
+/// closeness to the query's matches; it does not age or delete memories.
+/// Dangling mass returns to the seed distribution.
 pub fn personalized_pagerank(
     notes: &[Note],
     edges: &[Edge],
     seeds: &HashMap<Uuid, f64>,
+    restart: f64,
 ) -> HashMap<Uuid, f64> {
     if notes.is_empty() {
         return HashMap::new();
     }
+    let restart = if restart.is_finite() {
+        restart.clamp(0.01, 1.0)
+    } else {
+        0.5
+    };
+    let walk = 1.0 - restart;
     let mut note_by_id = BTreeMap::new();
     for note in notes {
         note_by_id.insert(note.id, note);
@@ -298,19 +474,22 @@ pub fn personalized_pagerank(
         .collect();
     let mut scores = personalization.clone();
     for _ in 0..200 {
-        let mut next: Vec<f64> = personalization.iter().map(|value| 0.15 * value).collect();
+        let mut next: Vec<f64> = personalization
+            .iter()
+            .map(|value| restart * value)
+            .collect();
         let mut dangling = 0.0;
         for (i, neighbors) in adjacency.iter().enumerate() {
             if totals[i] == 0.0 {
                 dangling += scores[i];
             } else {
                 for (neighbor, weight) in neighbors {
-                    next[*neighbor] += 0.85 * scores[i] * weight / totals[i];
+                    next[*neighbor] += walk * scores[i] * weight / totals[i];
                 }
             }
         }
         for (value, seed) in next.iter_mut().zip(&personalization) {
-            *value += 0.85 * dangling * seed;
+            *value += walk * dangling * seed;
         }
         let difference: f64 = next.iter().zip(&scores).map(|(a, b)| (a - b).abs()).sum();
         scores = next;
@@ -399,7 +578,7 @@ mod tests {
         Note {
             id: input.id(),
             input,
-            status: "active".into(),
+            status: Status::Active,
             created_at: now(),
             updated_at: now(),
             last_accessed_at: None,
@@ -474,6 +653,98 @@ mod tests {
     }
 
     #[test]
+    fn plain_yaml_scalars_are_accepted_as_text() {
+        let parsed = parse_markdown(
+            "---\nkey: release-2024\nid: 20231102\ntitle: 2025\ntags: [rust, 2024]\n---\nBody.",
+            "notes/x.md",
+            "local",
+        )
+        .unwrap();
+        assert_eq!(parsed.key, "release-2024");
+        assert_eq!(parsed.title, "2025");
+        assert_eq!(parsed.tags, vec!["rust", "2024"]);
+    }
+
+    #[test]
+    fn unknown_frontmatter_fields_are_ignored() {
+        let parsed = parse_markdown(
+            "---\ntitle: T\ncreated: 2026-01-01\ncssclasses: [wide]\n---\nBody.",
+            "n.md",
+            "local",
+        )
+        .unwrap();
+        assert_eq!(parsed.title, "T");
+    }
+
+    #[test]
+    fn headings_inside_code_blocks_are_not_titles() {
+        let parsed = parse_markdown(
+            "```sh\n# install deps first\n```\n# Real title\nText.",
+            "n.md",
+            "local",
+        )
+        .unwrap();
+        assert_eq!(parsed.title, "Real title");
+    }
+
+    #[test]
+    fn indented_delimiter_inside_a_block_scalar_does_not_close_frontmatter() {
+        let parsed = parse_markdown(
+            "---\nkey: k\naliases:\n  - a\nnote: |\n  ---\n  still yaml\ntitle: T\n---\nBody.",
+            "n.md",
+            "local",
+        )
+        .unwrap();
+        assert_eq!(parsed.title, "T");
+        assert_eq!(parsed.body, "Body.");
+    }
+
+    #[test]
+    fn hash_and_pipe_only_matter_inside_wiki_links() {
+        let mut source = note("source", "code");
+        let tips = {
+            let mut n = note("csharp-tips", "code");
+            n.input.title = "C# Tips".into();
+            n
+        };
+        let asynchronous = {
+            let mut n = note("csharp-async", "code");
+            n.input.title = "C# Async".into();
+            n
+        };
+        // Inside [[...]], `#` starts a heading anchor, as in Obsidian.
+        source.input.related = vec![
+            "C# Tips".into(),
+            "[[csharp-async#Tasks|async notes]]".into(),
+        ];
+        let (edges, unresolved) =
+            resolve_edges_with_report(&[source, tips.clone(), asynchronous.clone()]);
+        assert!(unresolved.is_empty(), "{unresolved:?}");
+        let targets: Vec<Uuid> = edges.iter().map(|e| e.target).collect();
+        assert!(targets.contains(&tips.id) && targets.contains(&asynchronous.id));
+    }
+
+    #[test]
+    fn keys_win_over_titles_and_active_notes_over_legacy() {
+        let mut source = note("source", "d");
+        let auth = note("auth", "d");
+        let mut titled = note("login-flow", "d");
+        titled.input.title = "Auth".into();
+        let mut retired = note("old-worker", "d");
+        retired.input.title = "Indexing worker".into();
+        retired.status = Status::Legacy;
+        let mut current = note("jobs-worker", "d");
+        current.input.title = "Indexing worker".into();
+        source.input.related = vec!["auth".into(), "Indexing worker".into()];
+        let notes = [source, auth.clone(), titled, retired, current.clone()];
+        let (edges, unresolved) = resolve_edges_with_report(&notes);
+        assert!(unresolved.is_empty(), "{unresolved:?}");
+        let targets: Vec<Uuid> = edges.iter().map(|e| e.target).collect();
+        assert_eq!(targets.len(), 2);
+        assert!(targets.contains(&auth.id) && targets.contains(&current.id));
+    }
+
+    #[test]
     fn foreign_domain_uuid_and_alias_do_not_create_edges() {
         let mut a = note("source", "a");
         let b = note("target", "b");
@@ -496,6 +767,7 @@ mod tests {
             &[a.clone(), b.clone(), c.clone()],
             &edges,
             &HashMap::from([(a.id, 1.0)]),
+            0.15,
         );
         assert!((scores.values().sum::<f64>() - 1.0).abs() < 1e-12);
         assert!(scores[&a.id] > scores[&b.id]);
@@ -517,10 +789,11 @@ mod tests {
             &[a.clone(), b.clone()],
             &edges,
             &HashMap::from([(a.id, 1.0), (b.id, f64::NAN)]),
+            0.15,
         );
         assert_eq!(scores[&a.id], 1.0);
         assert_eq!(scores[&b.id], 0.0);
-        let uniform = personalized_pagerank(&[a.clone(), b.clone()], &[], &HashMap::new());
+        let uniform = personalized_pagerank(&[a.clone(), b.clone()], &[], &HashMap::new(), 0.15);
         assert_eq!(uniform[&a.id], 0.5);
         assert_eq!(uniform[&b.id], 0.5);
     }

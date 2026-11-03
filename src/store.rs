@@ -1,5 +1,6 @@
 //! Authoritative PostgreSQL persistence. All multi-store mutations must hold
 //! `mutation_lock` until their Qdrant updates and graph rebuild have completed.
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
@@ -11,7 +12,7 @@ use sqlx::{
 };
 use uuid::Uuid;
 
-use crate::model::{Edge, Note, NoteInput};
+use crate::model::{Edge, Note, NoteInput, Status};
 
 const MAX_NOTES: i64 = 10_000;
 const MUTATION_LOCK: i64 = 0x4d454d4f525931;
@@ -19,6 +20,9 @@ const MUTATION_LOCK: i64 = 0x4d454d4f525931;
 #[derive(Clone)]
 pub struct Store {
     pool: PgPool,
+    /// Serializes writers inside this process before they take a pooled
+    /// connection, so waiters cannot starve the lock holder of connections.
+    writer: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// Dropping this guard rolls back its otherwise empty transaction and releases
@@ -26,6 +30,7 @@ pub struct Store {
 /// inside a held guard.
 pub struct MutationGuard {
     _transaction: Transaction<'static, Postgres>,
+    _writer: tokio::sync::OwnedMutexGuard<()>,
 }
 
 impl Store {
@@ -35,12 +40,19 @@ impl Store {
             .acquire_timeout(Duration::from_secs(10))
             .connect(database_url)
             .await
-            .context("Could not connect to the memory PostgreSQL database")?;
-        Ok(Self { pool })
+            .context("cannot connect to the memory PostgreSQL database")?;
+        Ok(Self {
+            pool,
+            writer: Arc::new(tokio::sync::Mutex::new(())),
+        })
     }
 
     pub async fn migrate(&self) -> Result<()> {
         let mut tx = self.pool.begin().await?;
+        // Bounded wait: a long repair elsewhere must not hang a client's startup.
+        sqlx::query("SET LOCAL lock_timeout = '15s'")
+            .execute(&mut *tx)
+            .await?;
         sqlx::query("SELECT pg_advisory_xact_lock($1)")
             .bind(MUTATION_LOCK)
             .execute(&mut *tx)
@@ -48,12 +60,15 @@ impl Store {
         sqlx::raw_sql(include_str!("../migrations/schema.sql"))
             .execute(&mut *tx)
             .await
-            .context("Could not initialize memory schema")?;
+            .context(
+                "cannot initialize the memory schema (another kioku process may be busy; retry)",
+            )?;
         tx.commit().await?;
         Ok(())
     }
 
     pub async fn mutation_lock(&self) -> Result<MutationGuard> {
+        let writer = self.writer.clone().lock_owned().await;
         let mut tx = self.pool.begin().await?;
         sqlx::query("SET LOCAL lock_timeout = '60s'")
             .execute(&mut *tx)
@@ -62,8 +77,11 @@ impl Store {
             .bind(MUTATION_LOCK)
             .execute(&mut *tx)
             .await
-            .context("Another memory writer is busy; retry shortly")?;
-        Ok(MutationGuard { _transaction: tx })
+            .context("another memory writer is busy; retry shortly")?;
+        Ok(MutationGuard {
+            _transaction: tx,
+            _writer: writer,
+        })
     }
 
     /// Fail closed when a model changes, even if its output dimension does not.
@@ -71,7 +89,7 @@ impl Store {
     pub async fn ensure_embedding_identity(&self, identity: &str) -> Result<()> {
         ensure!(
             !identity.is_empty() && identity.len() <= 4096,
-            "Invalid embedding identity"
+            "invalid embedding identity"
         );
         let mut tx = self.pool.begin().await?;
         sqlx::query("INSERT INTO memory_settings(key,value) VALUES('embedding_identity',$1) ON CONFLICT(key) DO NOTHING")
@@ -82,7 +100,7 @@ impl Store {
                 .await?;
         ensure!(
             stored == identity,
-            "Embedding configuration changed. Use a fresh database and Qdrant collection, then rehydrate your notes; mixing models invalidates semantic search"
+            "the embedding settings differ from those this database was indexed with ({stored}). Restore those settings, or switch safely with `kioku reindex --embedding-model <model> --embedding-dim <n> --collection <new-collection>`"
         );
         tx.commit().await?;
         Ok(())
@@ -123,6 +141,98 @@ impl Store {
             "More than {MAX_NOTES} memories in this scope; choose a narrower domain before loading the graph"
         );
         rows.iter().map(decode_note).collect()
+    }
+
+    /// Replace the stored embedding identity after a full reindex.
+    pub async fn set_embedding_identity(&self, identity: &str) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO memory_settings(key, value) VALUES ('embedding_identity', $1)
+             ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+        )
+        .bind(identity)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Every domain that has at least one note.
+    pub async fn domains(&self) -> Result<Vec<String>> {
+        Ok(
+            sqlx::query_scalar("SELECT DISTINCT domain FROM memory_notes ORDER BY domain")
+                .fetch_all(&self.pool)
+                .await?,
+        )
+    }
+
+    /// Keys of active notes explicitly linked to each of `ids`, both directions,
+    /// at most ten per note.
+    pub async fn neighbor_keys(
+        &self,
+        ids: &[Uuid],
+    ) -> Result<std::collections::HashMap<Uuid, Vec<String>>> {
+        let mut out: std::collections::HashMap<Uuid, Vec<String>> =
+            std::collections::HashMap::new();
+        if ids.is_empty() {
+            return Ok(out);
+        }
+        let rows = sqlx::query(
+            "SELECT e.source, e.target, s.note_key AS source_key, t.note_key AS target_key,
+                    s.status AS source_status, t.status AS target_status
+             FROM memory_edges e
+             JOIN memory_notes s ON s.id = e.source
+             JOIN memory_notes t ON t.id = e.target
+             WHERE e.source = ANY($1) OR e.target = ANY($1)
+             ORDER BY s.note_key, t.note_key",
+        )
+        .bind(ids)
+        .fetch_all(&self.pool)
+        .await?;
+        for row in rows {
+            let source: Uuid = row.try_get("source")?;
+            let target: Uuid = row.try_get("target")?;
+            for (from, other_key, other_status) in [
+                (
+                    source,
+                    row.try_get::<String, _>("target_key")?,
+                    row.try_get::<String, _>("target_status")?,
+                ),
+                (
+                    target,
+                    row.try_get::<String, _>("source_key")?,
+                    row.try_get::<String, _>("source_status")?,
+                ),
+            ] {
+                if ids.contains(&from) && other_status == "active" {
+                    let keys = out.entry(from).or_default();
+                    if keys.len() < 10 && !keys.contains(&other_key) {
+                        keys.push(other_key);
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Note counts per domain, largest first, at most 50 domains.
+    pub async fn domain_counts(&self) -> Result<Vec<(String, i64)>> {
+        let rows = sqlx::query(
+            "SELECT domain, count(*) AS notes FROM memory_notes GROUP BY domain ORDER BY notes DESC, domain LIMIT 50",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter()
+            .map(|row| Ok((row.try_get("domain")?, row.try_get("notes")?)))
+            .collect()
+    }
+
+    /// Keys in a domain, for suggesting near matches to a mistyped key.
+    pub async fn keys(&self, domain: &str) -> Result<Vec<String>> {
+        Ok(sqlx::query_scalar(
+            "SELECT note_key FROM memory_notes WHERE domain = $1 ORDER BY note_key LIMIT 10001",
+        )
+        .bind(domain)
+        .fetch_all(&self.pool)
+        .await?)
     }
 
     pub async fn get(&self, id: Uuid) -> Result<Option<Note>> {
@@ -242,9 +352,14 @@ impl Store {
         Ok(())
     }
 
-    /// Returns false for an exact retry. Reusing a request ID with different
-    /// feedback is rejected rather than silently counting an unrelated event.
-    pub async fn feedback(&self, id: Uuid, positive: bool, request_id: &str) -> Result<bool> {
+    /// `Some(true)` when recorded, `Some(false)` for an exact retry, and `None`
+    /// when the request id was already used for different feedback.
+    pub async fn feedback(
+        &self,
+        id: Uuid,
+        positive: bool,
+        request_id: &str,
+    ) -> Result<Option<bool>> {
         ensure!(
             !request_id.trim().is_empty() && request_id.len() <= 256,
             "request_id must contain 1–256 bytes"
@@ -262,34 +377,30 @@ impl Store {
                     .bind(request_id)
                     .fetch_one(&mut *tx)
                     .await?;
-            ensure!(
-                row.try_get::<Uuid, _>("note_id")? == id
-                    && row.try_get::<bool, _>("positive")? == positive,
-                "request_id was already used for different feedback"
-            );
+            if row.try_get::<Uuid, _>("note_id")? != id
+                || row.try_get::<bool, _>("positive")? != positive
+            {
+                return Ok(None);
+            }
         }
         tx.commit().await?;
-        Ok(inserted)
+        Ok(Some(inserted))
     }
 
     pub async fn set_retention(
         &self,
         id: Uuid,
         score: f64,
-        status: &str,
+        status: Status,
         at: DateTime<Utc>,
     ) -> Result<()> {
         ensure!(
             score.is_finite() && (0.0..=1.0).contains(&score),
-            "Invalid retention score"
-        );
-        ensure!(
-            matches!(status, "active" | "legacy"),
-            "Invalid memory status"
+            "invalid retention score"
         );
         let result = sqlx::query("UPDATE memory_notes SET retention_score=$2,status=$3,last_decay_at=$4,
             vector_synced=CASE WHEN status IS DISTINCT FROM $3 THEN false ELSE vector_synced END WHERE id=$1")
-            .bind(id).bind(score).bind(status).bind(at).execute(&self.pool).await?;
+            .bind(id).bind(score).bind(status.as_str()).bind(at).execute(&self.pool).await?;
         ensure!(result.rows_affected() == 1, "Memory not found");
         Ok(())
     }
@@ -336,7 +447,7 @@ fn decode_note(row: &PgRow) -> Result<Note> {
     Ok(Note {
         id: row.try_get("id")?,
         input,
-        status: row.try_get("status")?,
+        status: row.try_get::<String, _>("status")?.parse()?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
         last_accessed_at: row.try_get("last_accessed_at")?,
@@ -354,13 +465,63 @@ fn decode_note(row: &PgRow) -> Result<Note> {
 mod tests {
     use super::*;
 
-    /// Run with MEMORY_TEST_DATABASE_URL pointing to a disposable database.
+    /// A database created for one test run and dropped afterwards, so tests
+    /// never touch data they did not create.
+    struct ScratchDatabase {
+        admin_url: String,
+        name: String,
+        url: String,
+    }
+
+    impl ScratchDatabase {
+        async fn create() -> Result<Self> {
+            use sqlx::Connection;
+            let admin_url = std::env::var("MEMORY_TEST_DATABASE_URL").context(
+                "set MEMORY_TEST_DATABASE_URL to a PostgreSQL URL that may create databases",
+            )?;
+            let name = format!("kioku_test_{}", Uuid::new_v4().simple());
+            let mut admin = sqlx::PgConnection::connect(&admin_url).await?;
+            // Audited: the name is generated from a UUID.
+            sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE DATABASE \"{name}\"")))
+                .execute(&mut admin)
+                .await?;
+            admin.close().await?;
+            let mut url = reqwest::Url::parse(&admin_url)?;
+            url.set_path(&format!("/{name}"));
+            Ok(Self {
+                admin_url,
+                name,
+                url: url.to_string(),
+            })
+        }
+
+        async fn drop_database(self) -> Result<()> {
+            use sqlx::Connection;
+            let mut admin = sqlx::PgConnection::connect(&self.admin_url).await?;
+            sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+                "DROP DATABASE IF EXISTS \"{}\" WITH (FORCE)",
+                self.name
+            )))
+            .execute(&mut admin)
+            .await?;
+            admin.close().await?;
+            Ok(())
+        }
+    }
+
+    /// Creates and drops its own database on the server in MEMORY_TEST_DATABASE_URL.
     #[tokio::test]
-    #[ignore = "requires a disposable PostgreSQL database"]
+    #[ignore = "requires PostgreSQL; set MEMORY_TEST_DATABASE_URL"]
     async fn postgres_preserves_lifecycle_and_rejects_cross_domain_edges() -> Result<()> {
-        let url =
-            std::env::var("MEMORY_TEST_DATABASE_URL").context("Set MEMORY_TEST_DATABASE_URL")?;
-        let store = Store::connect(&url).await?;
+        let scratch = ScratchDatabase::create().await?;
+        let store = Store::connect(&scratch.url).await?;
+        let outcome = lifecycle_checks(&store).await;
+        store.pool.close().await;
+        scratch.drop_database().await?;
+        outcome
+    }
+
+    async fn lifecycle_checks(store: &Store) -> Result<()> {
         store.migrate().await?;
         let _guard = store.mutation_lock().await?;
         let domain = format!("test-{}", Uuid::new_v4());
@@ -383,17 +544,23 @@ mod tests {
         assert_eq!(replay.updated_at, note.updated_at);
         assert!(replay.vector_synced);
         let request_id = Uuid::new_v4().to_string();
-        assert!(store.feedback(note.id, true, &request_id).await?);
-        assert!(!store.feedback(note.id, true, &request_id).await?);
-        assert!(store.feedback(note.id, false, &request_id).await.is_err());
+        assert_eq!(
+            store.feedback(note.id, true, &request_id).await?,
+            Some(true)
+        );
+        assert_eq!(
+            store.feedback(note.id, true, &request_id).await?,
+            Some(false)
+        );
+        assert_eq!(store.feedback(note.id, false, &request_id).await?, None);
         store.record_access(&[note.id, note.id]).await?;
         store
-            .set_retention(note.id, 0.1, "legacy", Utc::now())
+            .set_retention(note.id, 0.1, Status::Legacy, Utc::now())
             .await?;
         input.body = "Service has been retired.".into();
         let changed = store.upsert(&input).await?;
         assert_eq!(changed.revision, 2);
-        assert_eq!(changed.status, "legacy");
+        assert_eq!(changed.status, Status::Legacy);
         assert_eq!(changed.access_count, 1);
         assert_eq!(changed.positive_feedback, 1);
         assert!(!changed.vector_synced);
@@ -446,22 +613,23 @@ mod tests {
             store.feedback(note.id, false, &concurrent_id),
         );
         assert_ne!(first?, second?);
+        // Exactly one of the two concurrent retries was recorded.
         assert_eq!(store.get(note.id).await?.unwrap().negative_feedback, 1);
         store.restore(note.id).await?;
-        assert_eq!(store.get(note.id).await?.unwrap().status, "active");
+        assert_eq!(store.get(note.id).await?.unwrap().status, Status::Active);
         assert!(
             store
-                .set_retention(note.id, f64::NAN, "active", Utc::now())
+                .set_retention(note.id, f64::NAN, Status::Active, Utc::now())
                 .await
                 .is_err()
         );
         // A retried monthly persistence pass does not multiply the previous score.
         let maintenance_time = Utc::now();
         store
-            .set_retention(note.id, 0.25, "active", maintenance_time)
+            .set_retention(note.id, 0.25, Status::Active, maintenance_time)
             .await?;
         store
-            .set_retention(note.id, 0.25, "active", maintenance_time)
+            .set_retention(note.id, 0.25, Status::Active, maintenance_time)
             .await?;
         let maintained = store.get(note.id).await?.unwrap();
         assert_eq!(maintained.retention_score, 0.25);
@@ -481,10 +649,6 @@ mod tests {
             store.get(note.id).await?.unwrap().revision,
             maintained.revision
         );
-        sqlx::query("DELETE FROM memory_notes WHERE id=ANY($1)")
-            .bind(vec![note.id, other_note.id, neighbor_note.id])
-            .execute(&store.pool)
-            .await?;
         Ok(())
     }
 }

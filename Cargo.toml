@@ -1,33 +1,51 @@
 [package]
-name = "local-memory-mcp"
-version = "0.1.0"
+name = "kioku"
+version = "0.2.0"
 edition = "2024"
+rust-version = "1.94"
 license = "MIT"
-description = "Local graph memory for coding agents: PostgreSQL, Qdrant, and MCP"
+description = "Curated long-term memory for coding agents over MCP: hybrid search over Markdown notes with an explicit link graph"
+repository = "https://github.com/Jpgomesf/kioku"
+readme = "README.md"
+keywords = ["mcp", "memory", "rag", "knowledge-graph", "agents"]
+categories = ["command-line-utilities", "database"]
+publish = false
 
 [dependencies]
-anyhow = "1"
-chrono = { version = "0.4", features = ["serde"] }
-clap = { version = "4", features = ["derive"] }
-dotenvy = "0.15"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+anyhow = "1.0.104"
+chrono = { version = "0.4.45", features = ["serde"] }
+clap = { version = "4.6", features = ["derive", "env"] }
+dotenvy = "0.15.7"
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls"] }
 rmcp = { version = "3.8", features = ["transport-io"] }
-schemars = { version = "1", features = ["uuid1", "chrono04"] }
+schemars = { version = "1.2", features = ["uuid1", "chrono04", "preserve_order"] }
 serde = { version = "1", features = ["derive"] }
+serde-saphyr = { version = "2.0", default-features = false, features = ["deserialize"] }
 serde_json = "1"
-serde_yaml = "0.9"
-sha2 = "0.10"
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "chrono", "uuid", "json"] }
-tokio = { version = "1", features = ["full"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-uuid = { version = "1", features = ["v4", "v5", "serde"] }
-walkdir = "2"
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls-aws-lc-rs", "postgres", "chrono", "uuid", "json"] }
+thiserror = "2.0.21"
+tokio = { version = "1.54", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+unicode-normalization = "0.1.26"
+uuid = { version = "1.29", features = ["v4", "v5", "serde"] }
+walkdir = "2.5"
 
 [dev-dependencies]
-tempfile = "3"
+proptest = "1.12"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+await_holding_lock = "deny"
+dbg_macro = "warn"
+expect_used = "warn"
+print_stdout = "warn"
+todo = "warn"
+unwrap_used = "warn"
 
 [profile.release]
-strip = true
 lto = "thin"
-
+strip = "debuginfo"

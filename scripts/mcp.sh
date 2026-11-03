@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
+# Start the Kioku MCP server over stdio with this checkout's .env. MCP clients
+# run this script; extra arguments go to `kioku serve`, for example --tools all.
+# Diagnostics go to stderr: stdout carries only MCP messages.
 set -euo pipefail
 PROJECT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-MCP_BIN="$PROJECT_DIR/bin/local-memory-mcp"
+MCP_BIN="${KIOKU_BIN:-$PROJECT_DIR/bin/kioku}"
 if [[ ! -x "$MCP_BIN" ]]; then
-  printf 'Build local-memory-mcp and install its binary into %s/bin first. See README.md.\n' "$PROJECT_DIR" >&2
+  printf 'Kioku is not installed at %s. Run "make install" in %s first.\n' "$MCP_BIN" "$PROJECT_DIR" >&2
   exit 1
 fi
 if [[ ! -f "$PROJECT_DIR/.env" ]]; then
-  printf 'Run %s/scripts/start.sh first to create .env and start the services.\n' "$PROJECT_DIR" >&2
+  printf 'Run "make start" in %s first to create .env and start the services.\n' "$PROJECT_DIR" >&2
   exit 1
 fi
-exec "$MCP_BIN" --env-file "$PROJECT_DIR/.env" serve
+exec "$MCP_BIN" --env-file "$PROJECT_DIR/.env" serve "$@"

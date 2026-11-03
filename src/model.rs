@@ -11,7 +11,7 @@ fn default_confidence() -> f64 {
 }
 
 /// A small, independently useful memory. Related entries resolve by key, title, or alias within its domain.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct NoteInput {
     #[serde(default = "default_domain")]
     pub domain: String,
@@ -34,9 +34,18 @@ pub struct NoteInput {
 
 impl NoteInput {
     pub fn id(&self) -> Uuid {
-        let identity = serde_json::to_vec(&("local-memory-v1", &self.domain, &self.key))
-            .expect("strings serialize");
-        Uuid::new_v5(&Uuid::NAMESPACE_URL, &identity)
+        Self::id_for(&self.domain, &self.key)
+    }
+
+    /// Stable identity for a domain and key. The namespace string is part of
+    /// every stored id, so it must never change.
+    pub fn id_for(domain: &str, key: &str) -> Uuid {
+        let mut identity = String::from("[\"local-memory-v1\",");
+        identity.push_str(&serde_json::Value::from(domain).to_string());
+        identity.push(',');
+        identity.push_str(&serde_json::Value::from(key).to_string());
+        identity.push(']');
+        Uuid::new_v5(&Uuid::NAMESPACE_URL, identity.as_bytes())
     }
     pub fn validate(&self) -> anyhow::Result<()> {
         anyhow::ensure!(
@@ -75,7 +84,58 @@ impl NoteInput {
             self.source.as_ref().is_none_or(|s| s.len() <= 2048),
             "source is too long"
         );
+        // PostgreSQL jsonb rejects NUL, and other control characters are never intended.
+        let fields = [&self.domain, &self.key, &self.title, &self.body]
+            .into_iter()
+            .chain(&self.aliases)
+            .chain(&self.related)
+            .chain(&self.tags)
+            .chain(self.source.as_ref());
+        for field in fields {
+            anyhow::ensure!(
+                !field
+                    .chars()
+                    .any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t')),
+                "text must not contain control characters such as NUL"
+            );
+        }
         Ok(())
+    }
+}
+
+/// Lifecycle state. Legacy notes are kept for history and excluded from
+/// default retrieval; nothing is ever hard-deleted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum Status {
+    Active,
+    Legacy,
+}
+
+impl Status {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Legacy => "legacy",
+        }
+    }
+}
+
+impl std::fmt::Display for Status {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for Status {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> anyhow::Result<Self> {
+        match value {
+            "active" => Ok(Self::Active),
+            "legacy" => Ok(Self::Legacy),
+            other => anyhow::bail!("unknown memory status {other:?}"),
+        }
     }
 }
 
@@ -83,7 +143,7 @@ impl NoteInput {
 pub struct Note {
     pub id: Uuid,
     pub input: NoteInput,
-    pub status: String,
+    pub status: Status,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub last_accessed_at: Option<DateTime<Utc>>,
@@ -132,5 +192,21 @@ mod tests {
         input.domain = "a".into();
         input.key = "b:c".into();
         assert_ne!(first, input.id());
+    }
+
+    #[test]
+    fn identity_matches_the_original_tuple_encoding() {
+        // Stored ids were derived from serde_json's encoding of this tuple.
+        for (domain, key) in [
+            ("local", "memory-stack"),
+            ("demo", "jobs-worker"),
+            ("pt", "ação \"x\""),
+        ] {
+            let original = serde_json::to_vec(&("local-memory-v1", domain, key)).unwrap();
+            assert_eq!(
+                NoteInput::id_for(domain, key),
+                Uuid::new_v5(&Uuid::NAMESPACE_URL, &original)
+            );
+        }
     }
 }

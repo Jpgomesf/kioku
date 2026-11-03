@@ -1,5 +1,5 @@
 //! Rebuildable Qdrant index. Never treat its payload as authoritative note text.
-use crate::model::{Note, VectorHit};
+use crate::model::{Note, Status, VectorHit};
 use anyhow::{Context, Result, ensure};
 use reqwest::{Client, RequestBuilder, StatusCode};
 use serde_json::{Value, json};
@@ -16,18 +16,26 @@ pub struct Qdrant {
 }
 
 impl Qdrant {
-    pub fn new(url: &str, collection: &str, api_key: Option<String>, dimension: usize) -> Self {
-        Self {
+    pub fn new(
+        url: &str,
+        collection: &str,
+        api_key: Option<String>,
+        dimension: usize,
+    ) -> Result<Self> {
+        Ok(Self {
+            // Never route the API key through an environment proxy or a redirect.
             client: Client::builder()
+                .no_proxy()
+                .redirect(reqwest::redirect::Policy::none())
                 .timeout(Duration::from_secs(30))
                 .connect_timeout(Duration::from_secs(5))
                 .build()
-                .expect("valid HTTP client configuration"),
+                .context("cannot build the Qdrant HTTP client")?,
             base_url: url.trim_end_matches('/').into(),
             collection: collection.into(),
             api_key,
             dimension,
-        }
+        })
     }
 
     fn request(&self, method: reqwest::Method, endpoint: &str) -> RequestBuilder {
@@ -119,6 +127,21 @@ impl Qdrant {
         Ok(created)
     }
 
+    /// Delete this collection if it exists. Used only for isolated evaluation storage.
+    pub async fn delete_collection(&self) -> Result<()> {
+        let response = self
+            .request(reqwest::Method::DELETE, &self.collection_path())
+            .send()
+            .await
+            .context("cannot reach Qdrant")?;
+        if response.status() != StatusCode::NOT_FOUND {
+            response
+                .error_for_status()
+                .context("cannot delete the Qdrant collection")?;
+        }
+        Ok(())
+    }
+
     /// Allows recovery if a prior process crashed after collection creation but
     /// before it invalidated PostgreSQL's vector flags.
     pub async fn point_count(&self) -> Result<u64> {
@@ -158,18 +181,30 @@ impl Qdrant {
     }
 
     pub async fn upsert(&self, note: &Note, vector: Vec<f32>) -> Result<()> {
-        self.validate_vector(&vector)?;
-        self.request(
-            reqwest::Method::PUT,
-            &format!("{}/points?wait=true", self.collection_path()),
-        )
-        .json(&json!({"points":[{"id":note.id,"vector":vector,"payload":{
-            "domain":note.input.domain,"status":note.status,"revision":note.revision
-        }}]}))
-        .send()
-        .await?
-        .error_for_status()
-        .context("Could not update Qdrant vector; memory remains safely stored in PostgreSQL")?;
+        self.upsert_many(&[(note.clone(), vector)]).await
+    }
+
+    /// Write points in batches. Payloads carry only what search filters on.
+    pub async fn upsert_many(&self, points: &[(Note, Vec<f32>)]) -> Result<()> {
+        for batch in points.chunks(64) {
+            let mut body = Vec::with_capacity(batch.len());
+            for (note, vector) in batch {
+                self.validate_vector(vector)?;
+                body.push(json!({"id": note.id, "vector": vector, "payload": {
+                    "domain": note.input.domain, "status": note.status.as_str(), "revision": note.revision
+                }}));
+            }
+            self.request(
+                reqwest::Method::PUT,
+                &format!("{}/points?wait=true", self.collection_path()),
+            )
+            .json(&json!({"points": body}))
+            .send()
+            .await
+            .context("cannot reach Qdrant")?
+            .error_for_status()
+            .context("cannot update Qdrant vectors; the notes remain saved in PostgreSQL")?;
+        }
         Ok(())
     }
 
@@ -219,16 +254,12 @@ impl Qdrant {
             .collect()
     }
 
-    pub async fn set_status(&self, id: Uuid, status: &str) -> Result<()> {
-        ensure!(
-            matches!(status, "active" | "legacy"),
-            "Invalid memory status"
-        );
+    pub async fn set_status(&self, id: Uuid, status: Status) -> Result<()> {
         self.request(
             reqwest::Method::POST,
             &format!("{}/points/payload?wait=true", self.collection_path()),
         )
-        .json(&json!({"payload":{"status":status},"points":[id]}))
+        .json(&json!({"payload":{"status":status.as_str()},"points":[id]}))
         .send()
         .await?
         .error_for_status()
@@ -251,7 +282,7 @@ mod tests {
     use super::*;
     #[test]
     fn rejects_invalid_vectors_before_network() {
-        let client = Qdrant::new("http://127.0.0.1:1", "test", None, 2);
+        let client = Qdrant::new("http://127.0.0.1:1", "test", None, 2).unwrap();
         assert!(client.validate_vector(&[1.0, 0.0]).is_ok());
         assert!(client.validate_vector(&[0.0, 0.0]).is_err());
         assert!(client.validate_vector(&[f32::NAN, 1.0]).is_err());
