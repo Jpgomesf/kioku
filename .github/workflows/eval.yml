@@ -1,0 +1,97 @@
+# Retrieval quality against a real embedding model. Runs weekly and on demand,
+# not on every push: it downloads the model and its numbers guard against
+# regressions rather than gate formatting-level changes.
+name: Retrieval eval
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "41 6 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  eval:
+    name: kioku eval (nomic-embed-text)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    services:
+      postgres:
+        image: postgres:17.11-alpine@sha256:266d3c257594e195b309ae9d1805e54c788f1d7b375f56bf6c367aac6c917e7b
+        env:
+          POSTGRES_USER: memory
+          POSTGRES_DB: memory
+          POSTGRES_PASSWORD: ci-only-postgres-password # throwaway: container lives for one job
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U memory -d memory"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      qdrant:
+        image: qdrant/qdrant:v1.20.0@sha256:9bfc89f9914fc14876a88c05270685921a55b8877b254a98bcc1cc2f0a424cd2
+        env:
+          QDRANT__SERVICE__API_KEY: ci-only-qdrant-api-key # throwaway: container lives for one job
+          QDRANT__TELEMETRY_DISABLED: "true"
+        ports:
+          - 6333:6333
+        options: >-
+          --health-cmd "bash -c 'exec 3<>/dev/tcp/127.0.0.1/6333'"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      ollama:
+        image: ollama/ollama:0.40.12@sha256:20d1bbfbabe1c97ba4b16301f08a20d8484bcf77047742a3cb71c613d8e12d0b
+        ports:
+          - 11434:11434
+        options: >-
+          --health-cmd "ollama list"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 30
+    env:
+      DATABASE_URL: postgresql://memory:ci-only-postgres-password@127.0.0.1:5432/memory
+      QDRANT_URL: http://127.0.0.1:6333
+      QDRANT_API_KEY: ci-only-qdrant-api-key
+      QDRANT_COLLECTION: kioku_ci_v1
+      EMBEDDING_PROVIDER: ollama
+      EMBEDDING_URL: http://127.0.0.1:11434
+      EMBEDDING_MODEL: nomic-embed-text
+      EMBEDDING_DIM: "768"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-10-16
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Pull the embedding model
+        run: docker exec "${{ job.services.ollama.id }}" ollama pull nomic-embed-text
+      - name: Build
+        run: cargo build --release --locked
+      - name: Evaluate the bundled dataset in isolated storage
+        # Floors sit a little below the committed baseline (docs/evaluation.md) so
+        # CPU-level embedding noise does not fail the run, while real regressions do.
+        run: |
+          ./target/release/kioku eval --output eval-report.json --min-ndcg 0.90 --min-recall 0.93 | tee eval-report.md
+          cat eval-report.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: eval-report
+          path: |
+            eval-report.json
+            eval-report.md
+          if-no-files-found: ignore

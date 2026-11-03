@@ -1,0 +1,57 @@
+# Commit prefixes follow Conventional Commits: "chore(deps): ..." and "ci(deps): ...".
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: America/Sao_Paulo
+    cooldown:
+      default-days: 7
+    groups:
+      # Dependabot applies Cargo's pre-1.0 rules (0.8 -> 0.9 counts as "major"), so breaking
+      # bumps such as sqlx 0.9 (which needs Rust 1.94) arrive as their own PRs, and the MSRV
+      # job in CI flags anything that raises rust-version.
+      cargo-minor-and-patch:
+        update-types: [minor, patch]
+    commit-message:
+      prefix: chore
+      include: scope
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: America/Sao_Paulo
+    cooldown:
+      default-days: 7
+    groups:
+      github-actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: ci
+      include: scope
+
+  # Scans compose.yaml and updates tag + @sha256 digest together. It does NOT update the
+  # service-container images in .github/workflows/ci.yml; CI fails until those are synced.
+  - package-ecosystem: docker-compose
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: America/Sao_Paulo
+    cooldown:
+      default-days: 7
+    ignore:
+      # A PostgreSQL major upgrade needs pg_upgrade, and the 18+ image moves PGDATA to
+      # /var/lib/postgresql/18/docker (17 uses /var/lib/postgresql/data). Upgrade by hand.
+      - dependency-name: postgres
+        update-types: ["version-update:semver-major"]
+    commit-message:
+      prefix: chore
+      include: scope

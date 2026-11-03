@@ -1,0 +1,239 @@
+# Third-party actions are pinned to full commit SHAs (verified 2026-11-02); Dependabot
+# bumps the SHA and the version comment together.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Weekly run surfaces new RustSec advisories and new stable-toolchain lints without a push.
+    - cron: "23 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: short
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  static:
+    name: rustfmt, shellcheck, compose
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # dtolnay/rust-toolchain publishes no releases; pinned to master. With a SHA pin the
+      # `toolchain` input is required.
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-10-16
+        with:
+          toolchain: stable
+          components: rustfmt
+      - run: cargo fmt --all --check
+      - name: shellcheck (preinstalled on ubuntu-24.04)
+        run: shellcheck -x scripts/*.sh evals/behavior/run_claude.sh
+      - name: compose.yaml is valid
+        env:
+          POSTGRES_PASSWORD: ci-placeholder
+          QDRANT_API_KEY: ci-placeholder
+        run: docker compose -f compose.yaml config --quiet
+      - name: CI service images match the compose.yaml pins
+        # Dependabot updates compose.yaml but not the service images below; this keeps them in step.
+        run: |
+          for image in postgres qdrant/qdrant; do
+            compose_ref=$(grep -oE "image: ${image}:[^[:space:]]+" compose.yaml | head -n1)
+            ci_ref=$(grep -oE "image: ${image}:[^[:space:]]+" .github/workflows/ci.yml | head -n1)
+            if [[ -z "$compose_ref" || "$compose_ref" != "$ci_ref" ]]; then
+              echo "::error::${image}: compose.yaml has '${compose_ref}', ci.yml has '${ci_ref}'"
+              exit 1
+            fi
+          done
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-10-16
+        with:
+          toolchain: stable
+          components: clippy
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: clippy, warnings denied (Cargo >= 1.97; keeps the build cache valid)
+        env:
+          CARGO_BUILD_WARNINGS: deny
+        run: cargo clippy --all-targets --locked
+
+  test:
+    name: unit tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-10-16
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo test --locked
+
+  msrv:
+    name: MSRV (package.rust-version)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Read rust-version from Cargo.toml
+        id: msrv
+        run: |
+          version=$(sed -n 's/^rust-version *= *"\([^"]*\)".*/\1/p' Cargo.toml)
+          if [[ -z "$version" ]]; then
+            echo "::error::Cargo.toml must declare rust-version"
+            exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-10-16
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo check --locked --all-targets
+
+  deny:
+    name: cargo-deny (${{ matrix.checks }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        checks:
+          - advisories
+          - bans licenses sources
+    # A new RustSec advisory should not block unrelated PRs; push and scheduled runs still fail.
+    continue-on-error: ${{ matrix.checks == 'advisories' && github.event_name == 'pull_request' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Checksum-verified prebuilt binary; this install-action SHA resolves cargo-deny to 0.20.2.
+      - uses: taiki-e/install-action@682ce6c3c696a4cd5168a05f98e51aa02b877941 # v2.89.1
+        with:
+          tool: cargo-deny
+      - name: cargo deny check
+        env:
+          CHECKS: ${{ matrix.checks }}
+        # Word splitting of $CHECKS is intended ("bans licenses sources").
+        run: cargo deny --locked check $CHECKS
+
+  integration:
+    # Real PostgreSQL + Qdrant (with API key) and the real stdio MCP binary. Embeddings come
+    # from tests/fake_embedder.py: deterministic hashed bag-of-words vectors served on loopback
+    # in Ollama's /api/embed format. No 3.4 GB Ollama image and no 274 MB model download, and
+    # scores are identical on every run. Retrieval *quality* is measured separately against
+    # real nomic-embed-text (make eval / scheduled eval workflow), not here.
+    name: integration (PostgreSQL, Qdrant, stdio MCP)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:17.11-alpine@sha256:266d3c257594e195b309ae9d1805e54c788f1d7b375f56bf6c367aac6c917e7b
+        env:
+          POSTGRES_USER: memory
+          POSTGRES_DB: kioku_test
+          POSTGRES_PASSWORD: ci-only-postgres-password # throwaway: container lives for one job
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U memory -d kioku_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      qdrant:
+        image: qdrant/qdrant:v1.20.0@sha256:9bfc89f9914fc14876a88c05270685921a55b8877b254a98bcc1cc2f0a424cd2
+        env:
+          QDRANT__SERVICE__API_KEY: ci-only-qdrant-api-key # throwaway: container lives for one job
+          QDRANT__TELEMETRY_DISABLED: "true"
+        ports:
+          - 6333:6333
+        # The image has bash but no curl/wget; a TCP probe is enough for the runner to wait on.
+        options: >-
+          --health-cmd "bash -c 'exec 3<>/dev/tcp/127.0.0.1/6333'"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      MEMORY_TEST_DATABASE_URL: postgresql://memory:ci-only-postgres-password@127.0.0.1:5432/kioku_test
+      QDRANT_API_KEY: ci-only-qdrant-api-key
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-10-16
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - name: Qdrant is ready and enforces its API key
+        # /readyz is exempt from API-key auth in Qdrant; /collections is not (401 without a key).
+        run: |
+          curl -fsS --retry 30 --retry-delay 2 --retry-all-errors http://127.0.0.1:6333/readyz
+          status=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:6333/collections)
+          if [[ "$status" != 401 ]]; then
+            echo "::error::expected 401 without an API key, got ${status}"
+            exit 1
+          fi
+          curl -fsS -H "api-key: ${QDRANT_API_KEY}" http://127.0.0.1:6333/collections > /dev/null
+      - name: Build the server
+        run: cargo build --locked
+      - name: PostgreSQL integration tests (#[ignore]d unit tests; each creates its own database)
+        run: cargo test --locked -- --ignored
+      - name: End-to-end MCP smoke test over stdio
+        run: |
+          python3 tests/fake_embedder.py --host 127.0.0.1 --port 18080 --dim 256 &
+          embedder_pid=$!
+          trap 'kill "$embedder_pid"' EXIT
+          curl -fsS --retry 20 --retry-delay 1 --retry-all-errors \
+            -d '{"model":"ci-hash-embedder","input":"ready"}' \
+            http://127.0.0.1:18080/api/embed > /dev/null
+          # The smoke test refuses to run unless the database and collection names
+          # contain "test" or "smoke".
+          cat > "${RUNNER_TEMP}/smoke.env" <<EOF
+          DATABASE_URL=${MEMORY_TEST_DATABASE_URL}
+          QDRANT_URL=http://127.0.0.1:6333
+          QDRANT_COLLECTION=kioku_smoke_v1
+          QDRANT_API_KEY=${QDRANT_API_KEY}
+          EMBEDDING_PROVIDER=ollama
+          EMBEDDING_URL=http://127.0.0.1:18080
+          EMBEDDING_MODEL=ci-hash-embedder
+          EMBEDDING_DIM=256
+          EOF
+          python3 tests/mcp_smoke.py \
+            --binary "${GITHUB_WORKSPACE}/target/debug/kioku" \
+            --env-file "${RUNNER_TEMP}/smoke.env"

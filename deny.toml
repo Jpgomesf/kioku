@@ -1,0 +1,49 @@
+# cargo-deny configuration. Run: cargo deny --locked check
+# Reference: https://embarkstudios.github.io/cargo-deny/checks/cfg.html
+
+[graph]
+# Platforms Kioku is built and run on: macOS for use, Linux for CI.
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+]
+
+[advisories]
+# The lockfile is committed, so fail on yanked versions.
+yanked = "deny"
+ignore = []
+
+[licenses]
+# Smallest set that satisfies every license expression in the build graph,
+# including aws-lc-sys's compound ISC/Apache-2.0/MIT/BSD-3-Clause expression.
+allow = [
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "ISC",
+    "MIT",
+    "Unicode-3.0",
+    "Zlib",
+]
+exceptions = [
+    # Mozilla's CA bundle is published as data under CDLA-Permissive-2.0.
+    { allow = ["CDLA-Permissive-2.0"], crate = "webpki-roots" },
+    { allow = ["CDLA-Permissive-2.0"], crate = "webpki-root-certs" },
+]
+confidence-threshold = 0.93
+
+[bans]
+# Duplicate versions come from upstream crates; keep them visible without blocking.
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+deny = [
+    { crate = "openssl-sys", reason = "TLS is rustls-only; keep system OpenSSL out of the binary" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
