@@ -1,0 +1,6 @@
+{
+  "name": "demo",
+  "description": "Read-only example over the demo domain created from examples/notes. Copy this file to evaluate your own notes.",
+  "domain": "demo",
+  "queries": "queries.jsonl"
+}

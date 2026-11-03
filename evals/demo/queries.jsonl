@@ -1,0 +1,4 @@
+{"id": "demo-01", "category": "paraphrase", "query": "Which service replaces the old indexing worker?", "relevant": {"jobs-worker": 2, "batch-worker-retirement": 1}, "answer": ["jobs-worker"]}
+{"id": "demo-02", "category": "cross_lingual", "query": "Qual serviço faz a indexação de documentos em segundo plano?", "relevant": {"jobs-worker": 2}}
+{"id": "demo-03", "category": "exact", "query": "batch-worker", "relevant": {"batch-worker-retirement": 2}}
+{"id": "demo-04", "category": "paraphrase", "query": "Which ports does the local stack publish?", "relevant": {"local-stack": 2}, "answer": ["loopback"]}

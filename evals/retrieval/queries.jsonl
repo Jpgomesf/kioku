@@ -1,0 +1,40 @@
+{"id": "exact-01", "category": "exact", "query": "imgproc retirement", "relevant": {"imgproc-retirement": 2, "thumbnailer": 1}}
+{"id": "exact-02", "category": "exact", "query": "billing-api", "relevant": {"assinaturas-cobranca": 2}}
+{"id": "exact-03", "category": "exact", "query": "media-v2", "relevant": {"media-v2-retirement": 2, "search-indexer": 1}}
+{"id": "exact-04", "category": "exact", "query": "dev setup", "relevant": {"local-dev-setup": 2}}
+{"id": "ident-01", "category": "identifier", "query": "TW-4290", "relevant": {"error-codes": 2, "rate-limits": 2}, "answer": ["Retry-After"]}
+{"id": "ident-02", "category": "identifier", "query": "MEDIA_DLQ", "relevant": {"dead-letter-policy": 2}, "answer": ["09:00 UTC"]}
+{"id": "ident-03", "category": "identifier", "query": "twctl cdn purge", "relevant": {"cdn-cache": 2}, "answer": ["platform lead"]}
+{"id": "ident-04", "category": "identifier", "query": "tw-issuer", "relevant": {"auth-tokens": 2}, "answer": ["15 minutes"]}
+{"id": "ident-05", "category": "identifier", "query": "What should a client do on TW-5031?", "relevant": {"error-codes": 2}, "answer": ["backoff"]}
+{"id": "ident-06", "category": "identifier", "query": "max_deliver", "relevant": {"media-queue": 2, "dead-letter-policy": 1}, "answer": ["five"]}
+{"id": "para-01", "category": "paraphrase", "query": "What is the maximum size of a file users can upload?", "relevant": {"ingest-gateway": 2, "error-codes": 1, "mobile-upload-limits": 1}, "answer": ["50 MB"]}
+{"id": "para-02", "category": "paraphrase", "query": "How long do JWTs between internal services stay valid?", "relevant": {"auth-tokens": 2}, "answer": ["15 minutes"]}
+{"id": "para-03", "category": "paraphrase", "query": "On which weekday do we ship releases?", "relevant": {"release-process": 2}, "answer": ["Tuesday"]}
+{"id": "para-04", "category": "paraphrase", "query": "How many requests per minute can one API key make?", "relevant": {"rate-limits": 2}, "answer": ["600"]}
+{"id": "para-05", "category": "paraphrase", "query": "How should I name a new database table?", "relevant": {"postgres-conventions": 2}, "answer": ["snake_case"]}
+{"id": "para-06", "category": "paraphrase", "query": "Where are production credentials stored?", "relevant": {"secrets-management": 2}, "answer": ["AWS Secrets Manager"]}
+{"id": "para-07", "category": "paraphrase", "query": "Which port does Postgres listen on in local development?", "relevant": {"local-dev-setup": 2}, "answer": ["5433"]}
+{"id": "para-08", "category": "paraphrase", "query": "How large may a pull request be?", "relevant": {"code-review-guidelines": 2}, "answer": ["400"]}
+{"id": "para-09", "category": "paraphrase", "query": "When must a fully rolled out feature flag be deleted?", "relevant": {"feature-flags": 2}, "answer": ["30 days"]}
+{"id": "xling-01", "category": "cross_lingual", "query": "Qual é o limite de requisições por minuto da API pública?", "relevant": {"rate-limits": 2}, "answer": ["600"]}
+{"id": "xling-02", "category": "cross_lingual", "query": "Como reinicio o gerador de miniaturas?", "relevant": {"thumbnailer": 2}, "answer": ["twctl restart thumbnailer"], "forbidden": ["imgproc-runbook"]}
+{"id": "xling-03", "category": "cross_lingual", "query": "How many times is a failed subscription charge retried?", "relevant": {"assinaturas-cobranca": 2}, "answer": ["3, 5 e 7"]}
+{"id": "xling-04", "category": "cross_lingual", "query": "Onde ficam os segredos de produção?", "relevant": {"secrets-management": 2}, "answer": ["AWS Secrets Manager"]}
+{"id": "xling-05", "category": "cross_lingual", "query": "What happens to an account after its last failed payment attempt?", "relevant": {"assinaturas-cobranca": 2}, "answer": ["suspensa"]}
+{"id": "hop-01", "category": "multi_hop", "query": "Where do thumbnail jobs end up after failing every delivery attempt?", "relevant": {"dead-letter-policy": 2, "media-queue": 1, "thumbnailer": 1}, "answer": ["MEDIA_DLQ"]}
+{"id": "hop-02", "category": "multi_hop", "query": "A mobile user records a long 4K video. Which resolution does the app upload and what size limit applies?", "relevant": {"mobile-upload-limits": 2, "ingest-gateway": 2}, "answer": ["720p", "50 MB"]}
+{"id": "hop-03", "category": "multi_hop", "query": "Who reviews the dead-letter queue, and on which day do they hand off?", "relevant": {"dead-letter-policy": 2, "oncall-rotation": 2}, "answer": ["09:00 UTC", "Mondays"]}
+{"id": "hop-04", "category": "multi_hop", "query": "How long are generated image previews cached at the edge?", "relevant": {"cdn-cache": 2, "thumbnailer": 1}, "answer": ["30 days"]}
+{"id": "super-01", "category": "supersession", "query": "How do I restart the thumbnail worker?", "relevant": {"thumbnailer": 2, "imgproc-retirement": 1}, "answer": ["twctl restart thumbnailer"], "forbidden": ["imgproc-runbook"]}
+{"id": "super-02", "category": "supersession", "query": "Which OpenSearch index does the media alias point to?", "relevant": {"search-indexer": 2, "media-v2-retirement": 1}, "answer": ["media-v3"]}
+{"id": "super-03", "category": "supersession", "query": "Is the imgproc worker still running?", "relevant": {"imgproc-retirement": 2, "thumbnailer": 1}, "answer": ["decommissioned"], "forbidden": ["imgproc-runbook"]}
+{"id": "legacy-01", "category": "legacy", "query": "old imgproc restart command on media-01", "relevant": {"imgproc-runbook": 2, "imgproc-retirement": 1}, "answer": ["systemctl restart imgproc"], "include_legacy": true}
+{"id": "distr-01", "category": "distractor", "query": "How long does the MEDIA stream keep events?", "relevant": {"media-queue": 2}, "answer": ["seven days"]}
+{"id": "distr-02", "category": "distractor", "query": "What time does the nightly reindex run?", "relevant": {"search-indexer": 2}, "answer": ["02:00 UTC"]}
+{"id": "distr-03", "category": "distractor", "query": "When is API v1 turned off?", "relevant": {"api-versioning": 2}, "answer": ["2026-06-30"]}
+{"id": "distr-04", "category": "distractor", "query": "How long until an unacknowledged page escalates?", "relevant": {"oncall-rotation": 2}, "answer": ["15 minutes"]}
+{"id": "none-01", "category": "abstention", "query": "What is our Kubernetes horizontal pod autoscaling policy?", "relevant": {}}
+{"id": "none-02", "category": "abstention", "query": "Which GraphQL schema registry do we use?", "relevant": {}}
+{"id": "none-03", "category": "abstention", "query": "Qual é a política de férias da empresa?", "relevant": {}}
+{"id": "none-04", "category": "abstention", "query": "How do we train the recommendation model?", "relevant": {}}

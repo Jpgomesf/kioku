@@ -1,0 +1,10 @@
+{
+  "name": "tidewater",
+  "description": "Fictional platform-team notes. Each query category isolates one retrieval capability.",
+  "domain": "tidewater",
+  "corpus": "corpus",
+  "queries": "queries.jsonl",
+  "retire": [
+    "imgproc-runbook"
+  ]
+}
