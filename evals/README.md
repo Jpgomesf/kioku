@@ -17,6 +17,16 @@ make eval                                   # bundled dataset, isolated storage
 | `retrieval/` | 24 fictional platform-team notes and 40 graded queries. Each category isolates one capability: exact labels, identifiers, paraphrase, Portuguese/English, multi-hop links, supersession, legacy history, distractors, and abstention. |
 | `demo/` | A read-only example over the `demo` domain created from `examples/notes`. Copy it to evaluate your own notes. |
 
+## Model harnesses
+
+| Path | What it is |
+|---|---|
+| [`behavior/`](behavior) | Scenarios scored from the server's tool-call trace. It has runners for Claude Code (`run_claude.sh`) and for any OpenAI-compatible endpoint (`run_openai.py`). |
+| [`answers/`](answers) | Answer quality over the retrieval questions, with memory and without it: facts, citations, abstention, leakage, and an optional judge for groundedness. |
+| `lib/` | The shared MCP stdio client and tool-calling loop. |
+
+They run in isolated storage and write their outputs to `evals/runs/`, which is gitignored.
+
 ## Format
 
 `dataset.json`:
