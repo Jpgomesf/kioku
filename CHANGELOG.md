@@ -4,6 +4,37 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- Graph evaluation: shuffled-link and dropped-link ablations (5 seeds each),
+  complete multi-hop support (`required` notes per query), graph-slot
+  precision against the same positions without links, hub exposure per note,
+  link resolution rate, and 95% bootstrap or Wilson intervals on every mean
+  and paired comparison. `kioku eval --max-hub-exposure` and `--no-leaks` gate
+  CI.
+- Access control: `MEMORY_SCOPES` (read, write, admin) and `MEMORY_DOMAINS`
+  (globs or `re:` regexes) give each MCP client its own profile. Tools outside
+  the scopes aren't listed, and calls on other domains are refused.
+- Optional local HTTP transport (`--features http`, `kioku serve --http`):
+  loopback only, bearer tokens hashed in an access file (`kioku token`), Host
+  and Origin checks against DNS rebinding, and `tools/list` per principal.
+- Observability: `tool` and `search` spans with durations (`RUST_LOG=kioku=info`),
+  `MEMORY_LOG_FORMAT=json`, `kioku search --explain` with candidate counts and
+  time per stage, the principal in every trace record, and
+  `MEMORY_TRACE_CONTENT=redacted|hashed`.
+- Evaluation harnesses: `evals/behavior/run_openai.py` runs the behavior
+  scenarios against any OpenAI-compatible model with no client in between, and
+  `evals/answers/` scores answers (fact correctness, citation validity and
+  support, abstention, groundedness with a pluggable judge) against a
+  no-memory baseline.
+
+### Changed
+
+- Source split into focused modules (`app/`, `mcp/`, `eval/`, `rank/`,
+  `store/`, `markdown`, `lifecycle`, `text`) with no behavior change.
+
 ## [0.2.0] - 2026-11-03
 
 ### Added

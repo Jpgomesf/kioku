@@ -40,6 +40,8 @@ CONFIG_ENV = {
     "EMBEDDING_API_KEY", "ALLOW_REMOTE_EMBEDDINGS", "MEMORY_HALF_LIFE_DAYS",
     "MEMORY_LEGACY_THRESHOLD", "MEMORY_DEFAULT_DOMAIN", "MEMORY_NOTES_ROOT", "MEMORY_TOOLS",
     "MEMORY_TRACE_FILE", "MEMORY_TRACE_RUN", "MEMORY_BACKGROUND_UPKEEP", "KIOKU_ENV_FILE", "RUST_LOG",
+    "MEMORY_PRINCIPAL", "MEMORY_SCOPES", "MEMORY_DOMAINS", "MEMORY_TRACE_CONTENT", "MEMORY_TRACE_SALT",
+    "MEMORY_ACCESS_FILE", "MEMORY_LOG_FORMAT",
 }
 # `--env-file` values override the process environment, so per-trial settings
 # are removed from the derived file and passed as environment variables.
