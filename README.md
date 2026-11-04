@@ -196,7 +196,48 @@ the file named by `--env-file` win over inherited variables.
 | `MEMORY_TOOLS` | `core` | `core`, `all`, or a comma-separated list |
 | `MEMORY_HALF_LIFE_DAYS`, `MEMORY_LEGACY_THRESHOLD` | `90`, `0.2` | Aging policy |
 | `MEMORY_BACKGROUND_UPKEEP` | `true` | Daily index repair and aging while serving |
-| `MEMORY_TRACE_FILE`, `MEMORY_TRACE_RUN` | unset | Record every tool call as JSONL (contains note text) |
+| `MEMORY_TRACE_FILE`, `MEMORY_TRACE_RUN` | unset | Record every tool call as JSONL |
+| `MEMORY_TRACE_CONTENT`, `MEMORY_TRACE_SALT` | `full`, random | `redacted` or `hashed` keep keys, domains, and timing but drop query and note text |
+| `MEMORY_PRINCIPAL`, `MEMORY_SCOPES`, `MEMORY_DOMAINS` | `local`, `read,write,admin`, `*` | Access profile for a stdio server ([Access control](#access-control)) |
+| `MEMORY_ACCESS_FILE` | unset | Who may connect to `serve --http` |
+| `MEMORY_LOG_FORMAT` | `text` | `json` for one JSON object per log line; filter with `RUST_LOG` |
+
+## Access control
+
+Each MCP client starts its own `kioku serve`, so a client's MCP config can give
+it a narrower profile. Scopes gate tools (`read`: search, get, inspect, stats;
+`write`: save, feedback; `admin`: retire, restore, import, maintenance), and
+domain patterns gate every read and write. Tools outside the scopes aren't
+listed at all.
+
+```jsonc
+// Kilo with a local model: read and save, personal domains only
+"env": { "MEMORY_SCOPES": "read,write", "MEMORY_DOMAINS": "personal-*,kioku", "MEMORY_DEFAULT_DOMAIN": "kioku" }
+```
+
+Patterns are globs (`work-*`) or anchored regexes (`re:client-(acme|globex)`),
+matched in linear time. A bad pattern, or a default domain outside the
+patterns, stops the server at startup.
+
+### Local HTTP
+
+Clients that can't spawn a process, or that should share one server, can use
+MCP Streamable HTTP. It's a cargo feature, so default builds open no port:
+
+```sh
+cargo build --release --features http
+./target/release/kioku token kilo-qwen --scopes read,write --domains 'personal-*,kioku'
+# prints the token once, plus a [[principal]] entry with its SHA-256 for the access file
+./target/release/kioku serve --http 127.0.0.1:7373 --access-file ~/.config/kioku/access.toml
+```
+
+The server binds only to loopback addresses and requires a bearer token on
+every request, even from 127.0.0.1. It rejects foreign `Host` headers and any
+browser `Origin` that isn't allowed with `--allowed-origin`, which blocks DNS
+rebinding from web pages. Tokens resolve to a principal before any tool runs,
+and `tools/list` differs per principal. That token check is the only code that
+knows about credentials, so an OAuth provider can replace it later without
+changing tools.
 
 ## Operations
 
@@ -217,16 +258,17 @@ server repairs the index and applies aging in the background while it runs.
 
 ```sh
 make check   # fmt, clippy with warnings denied, unit and contract tests
-make smoke   # 67 end-to-end checks over stdio; SMOKE_ENV must name test storage
+make smoke   # 73 checks over stdio and 15 over HTTP; SMOKE_ENV must name test storage
 make eval    # retrieval quality in isolated storage
 ```
 
 The model-facing contract (tool names, schemas, descriptions, annotations,
 instructions) is snapshot-tested in `tests/snapshots/`; changing it is a
-deliberate `KIOKU_BLESS=1 cargo test`. CI runs formatting, clippy, tests, the
-minimum Rust version, cargo-deny, and the stdio smoke test against real
-PostgreSQL and Qdrant; a weekly workflow runs the retrieval eval with a real
-embedding model.
+deliberate `KIOKU_BLESS=1 cargo test`. CI runs formatting, clippy and tests
+with and without the HTTP feature, the minimum Rust version, cargo-deny, and
+the stdio and HTTP smoke tests against real PostgreSQL and Qdrant; a weekly
+workflow runs the retrieval eval with a real embedding model and fails on
+hub-note exposure or superseded-note leaks.
 
 ## Security
 

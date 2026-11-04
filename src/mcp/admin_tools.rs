@@ -6,6 +6,7 @@ use rmcp::{tool, tool_router};
 use serde_json::{Value, json};
 
 use super::args::{EmptyArgs, FeedbackArgs, ImportArgs, KeyArgs, MaintenanceArgs, parse};
+use crate::error::UserError;
 use crate::lifecycle;
 
 use super::output::{error_text, ok, render_error, round};
@@ -58,7 +59,7 @@ impl MemoryServer {
             Err(text) => return error_text(text),
         };
         let result = async {
-            let domain = self.domain(args.domain.as_deref());
+            let domain = self.domain(args.domain.as_deref())?;
             let id = self
                 .resolve_one("memory_feedback", &domain, &args.key)
                 .await?;
@@ -123,7 +124,10 @@ impl MemoryServer {
             Ok(args) => args,
             Err(text) => return error_text(text),
         };
-        let domain = self.domain(args.domain.as_deref());
+        let domain = match self.domain(args.domain.as_deref()) {
+            Ok(domain) => domain,
+            Err(error) => return error_text(render_error("memory_import", &error)),
+        };
         match self.app.hydrate(args.path.as_deref(), Some(&domain)).await {
             Ok(report) => ok(json!({
                 "domain": domain,
@@ -155,6 +159,15 @@ impl MemoryServer {
             Ok(args) => args,
             Err(text) => return error_text(text),
         };
+        let caller = self.caller();
+        if !caller.sees_all_domains() {
+            let error = anyhow::Error::from(UserError::Refused(format!(
+                "memory_maintenance ages every domain, and this connection ({}) may use only {}",
+                caller.subject,
+                caller.describe_domains()
+            )));
+            return error_text(render_error("memory_maintenance", &error));
+        }
         match self.app.maintenance(args.dry_run.unwrap_or(true)).await {
             Ok(value) => ok(value),
             Err(error) => error_text(render_error("memory_maintenance", &error)),
@@ -172,16 +185,22 @@ impl MemoryServer {
         if let Err(text) = parse::<EmptyArgs>("memory_stats", raw, &schema::empty(), &[], "{}") {
             return error_text(text);
         }
+        let caller = self.caller();
         let result = async {
-            let mut stats = self.app.store.stats().await?;
             let by_domain: serde_json::Map<String, Value> = self
                 .app
                 .store
                 .domain_counts()
                 .await?
                 .into_iter()
+                .filter(|(domain, _)| caller.allows_domain(domain))
                 .map(|(domain, count)| (domain, json!(count)))
                 .collect();
+            if !caller.sees_all_domains() {
+                // Store-wide totals would reveal domains this caller can't see.
+                return anyhow::Ok(json!({"by_domain": by_domain}));
+            }
+            let mut stats = self.app.store.stats().await?;
             stats["by_domain"] = Value::Object(by_domain);
             anyhow::Ok(stats)
         };
@@ -194,7 +213,7 @@ impl MemoryServer {
 
 impl MemoryServer {
     async fn inspect(&self, args: KeyArgs) -> anyhow::Result<Value> {
-        let domain = self.domain(args.domain.as_deref());
+        let domain = self.domain(args.domain.as_deref())?;
         let id = self
             .resolve_one("memory_inspect", &domain, &args.key)
             .await?;
@@ -242,7 +261,7 @@ impl MemoryServer {
             Err(text) => return error_text(text),
         };
         let result = async {
-            let domain = self.domain(args.domain.as_deref());
+            let domain = self.domain(args.domain.as_deref())?;
             let id = self.resolve_one(tool, &domain, &args.key).await?;
             let outcome = self.app.set_legacy(id, retire, Some(&domain)).await?;
             anyhow::Ok(

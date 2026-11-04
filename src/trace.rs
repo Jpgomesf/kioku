@@ -3,17 +3,19 @@
 //!
 //! Each line holds the tool, its arguments, the outcome, the ids it returned,
 //! and timing. Arguments include queries and note text, so the file is created
-//! with owner-only permissions and should stay private.
+//! with owner-only permissions and should stay private. `MEMORY_TRACE_CONTENT`
+//! can drop or pseudonymize that text while keeping keys, domains, and timing.
 
 use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 /// Upper bound on ids recorded per call.
@@ -32,10 +34,90 @@ pub struct ClientInfo {
     pub version: String,
 }
 
+/// How much free text (queries, titles, bodies) a trace keeps.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TraceContent {
+    /// Everything, as the client sent it. Behavior checks need this.
+    #[default]
+    Full,
+    /// Free text replaced by its length, such as `[redacted: 312 chars]`.
+    Redacted,
+    /// Free text replaced by a salted SHA-256 prefix, so identical queries can
+    /// still be matched across records without storing them.
+    Hashed,
+}
+
+impl TraceContent {
+    pub fn parse(text: &str) -> Result<Self> {
+        match text.trim().to_ascii_lowercase().as_str() {
+            "full" => Ok(Self::Full),
+            "redacted" => Ok(Self::Redacted),
+            "hashed" => Ok(Self::Hashed),
+            other => bail!("MEMORY_TRACE_CONTENT must be full, redacted, or hashed, got {other:?}"),
+        }
+    }
+}
+
+/// Argument fields holding free text. Keys, domains, and numbers stay as sent.
+const FREE_TEXT: [&str; 8] = [
+    "query", "body", "title", "topic", "text", "source", "aliases", "tags",
+];
+
+/// Apply `mode` to the free-text fields of a tool call's arguments.
+pub fn scrub(arguments: Value, mode: TraceContent, salt: &str) -> Value {
+    fn text(value: Value, mode: TraceContent, salt: &str) -> Value {
+        match value {
+            Value::String(s) => Value::String(match mode {
+                TraceContent::Full => s,
+                TraceContent::Redacted => format!("[redacted: {} chars]", s.chars().count()),
+                TraceContent::Hashed => {
+                    let digest = Sha256::new()
+                        .chain_update(salt.as_bytes())
+                        .chain_update([0u8])
+                        .chain_update(s.as_bytes())
+                        .finalize();
+                    let hex: String = digest[..8].iter().map(|b| format!("{b:02x}")).collect();
+                    format!("sha256:{hex}")
+                }
+            }),
+            Value::Array(items) => {
+                Value::Array(items.into_iter().map(|v| text(v, mode, salt)).collect())
+            }
+            other => other,
+        }
+    }
+    fn walk(value: Value, mode: TraceContent, salt: &str) -> Value {
+        match value {
+            Value::Object(map) => Value::Object(
+                map.into_iter()
+                    .map(|(name, item)| {
+                        let item = if FREE_TEXT.contains(&name.as_str()) {
+                            text(item, mode, salt)
+                        } else {
+                            walk(item, mode, salt)
+                        };
+                        (name, item)
+                    })
+                    .collect(),
+            ),
+            Value::Array(items) => {
+                Value::Array(items.into_iter().map(|v| walk(v, mode, salt)).collect())
+            }
+            other => other,
+        }
+    }
+    if mode == TraceContent::Full {
+        return arguments;
+    }
+    walk(arguments, mode, salt)
+}
+
 #[derive(Debug, Serialize)]
 pub struct ToolCall<'a> {
     pub ts: DateTime<Utc>,
     pub session: Uuid,
+    /// Who made the call: `local` over stdio, or an access-file subject.
+    pub principal: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -204,6 +286,7 @@ mod tests {
                 .record(&ToolCall {
                     ts: Utc::now(),
                     session: tracer.session(),
+                    principal: "local",
                     run: None,
                     client: None,
                     called: None,
@@ -234,5 +317,30 @@ mod tests {
             );
         }
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn scrubbing_keeps_keys_and_drops_free_text() {
+        let args = serde_json::json!({
+            "query": "webhook retry policy", "domain": "relay", "keys": ["webhook-retries"],
+            "note": {"key": "k", "body": "secret-ish detail", "aliases": ["a", "b"]}, "limit": 3
+        });
+        let full = scrub(args.clone(), TraceContent::Full, "s");
+        assert_eq!(full, args);
+        let redacted = scrub(args.clone(), TraceContent::Redacted, "s");
+        assert_eq!(redacted["query"], "[redacted: 20 chars]");
+        assert_eq!(redacted["domain"], "relay");
+        assert_eq!(redacted["keys"][0], "webhook-retries");
+        assert_eq!(redacted["note"]["key"], "k");
+        assert_eq!(redacted["note"]["body"], "[redacted: 17 chars]");
+        assert_eq!(redacted["note"]["aliases"][1], "[redacted: 1 chars]");
+        assert_eq!(redacted["limit"], 3);
+        let hashed = scrub(args.clone(), TraceContent::Hashed, "s");
+        let again = scrub(args.clone(), TraceContent::Hashed, "s");
+        let other_salt = scrub(args, TraceContent::Hashed, "t");
+        assert_eq!(hashed["query"], again["query"]);
+        assert_ne!(hashed["query"], other_salt["query"]);
+        assert!(hashed["query"].as_str().unwrap().starts_with("sha256:"));
+        assert!(TraceContent::parse("nope").is_err());
     }
 }

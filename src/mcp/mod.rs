@@ -25,16 +25,20 @@ mod schema;
 pub use profile::{ALL_TOOLS, CORE_TOOLS};
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use rmcp::handler::server::router::prompt::PromptRouter;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResponse, Implementation, ServerCapabilities, ServerConfig,
+    CacheScope, CallToolRequestParams, CallToolResponse, Implementation, ListToolsResult,
+    PaginatedRequestParams, ProtocolVersion, ResultType, ServerCapabilities, ServerConfig,
 };
 use rmcp::service::RequestContext;
 use rmcp::{ErrorData, RoleServer, ServerHandler, prompt_handler, tool_handler};
 
+use crate::access::Principal;
 use crate::app::App;
+use crate::error::UserError;
 use crate::trace::Tracer;
 use legacy::upgrade_legacy;
 use output::error_text;
@@ -56,13 +60,32 @@ pub struct MemoryServer {
     prompt_router: PromptRouter<Self>,
     tracer: Option<Tracer>,
     instructions: String,
+    /// The process's own principal: the stdio profile, or over HTTP one with
+    /// no scopes, so a request the HTTP layer didn't authenticate gets nothing.
+    principal: Arc<Principal>,
 }
 
 impl MemoryServer {
-    /// Build the server with the tools selected by `spec`: `core` (default),
-    /// `all`, or a comma-separated list mixing those with tool names.
+    /// Build a stdio server with the tools selected by `spec`: `core`
+    /// (default), `all`, or a comma-separated list mixing those with tool
+    /// names. Tools outside the process principal's scopes are not listed.
     pub fn new(app: App, spec: Option<&str>) -> anyhow::Result<Self> {
-        let selected = select_tools(spec.unwrap_or(&app.config.tools))?;
+        let principal = Arc::new(app.config.principal.clone());
+        Self::build(app, spec, principal)
+    }
+
+    /// Build a server for the HTTP transport. Each request carries its own
+    /// principal, so every selected tool is routed and `tools/list` is
+    /// filtered per request.
+    pub fn new_http(app: App, spec: Option<&str>) -> anyhow::Result<Self> {
+        Self::build(app, spec, Arc::new(Principal::nobody()))
+    }
+
+    fn build(app: App, spec: Option<&str>, principal: Arc<Principal>) -> anyhow::Result<Self> {
+        let mut selected = select_tools(spec.unwrap_or(&app.config.tools))?;
+        if !principal.scopes.is_empty() {
+            selected.retain(|tool| principal.allows_tool(tool));
+        }
         let tool_router = Self::router_for(&selected, app.config.notes_root.is_some());
         let instructions = instructions_for(&selected);
         let tracer = app
@@ -77,6 +100,7 @@ impl MemoryServer {
             prompt_router: Self::prompt_router(),
             tracer,
             instructions,
+            principal,
         })
     }
 
@@ -100,10 +124,28 @@ impl MemoryServer {
             .collect()
     }
 
-    fn domain(&self, domain: Option<&str>) -> String {
-        self.app
+    /// The requested domain, or the default one, if the caller may use it.
+    fn domain(&self, domain: Option<&str>) -> anyhow::Result<String> {
+        let domain = self
+            .app
             .domain(domain.map(str::trim).filter(|d| !d.is_empty()))
-            .to_owned()
+            .to_owned();
+        self.authorize_domain(&domain)?;
+        Ok(domain)
+    }
+
+    /// Refuse a domain outside the caller's patterns.
+    fn authorize_domain(&self, domain: &str) -> anyhow::Result<()> {
+        let caller = self.caller();
+        if caller.allows_domain(domain) {
+            return Ok(());
+        }
+        Err(UserError::Refused(format!(
+            "domain {domain:?} is outside what this connection ({}) may use: {}. Use one of those domains",
+            caller.subject,
+            caller.describe_domains()
+        ))
+        .into())
     }
 }
 
@@ -118,6 +160,32 @@ impl ServerHandler for MemoryServer {
                     .with_description("Curated long-term project memory for coding agents: hybrid search over notes with an explicit link graph"),
             )
             .with_instructions(self.instructions.clone())
+    }
+
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, ErrorData> {
+        let caller = self.principal_for(&context);
+        let supports_cache_hints = context
+            .protocol_version()
+            .is_some_and(|version| version >= ProtocolVersion::V_2026_07_28);
+        let tools = self
+            .tool_router
+            .list_all()
+            .into_iter()
+            .filter(|tool| caller.allows_tool(&tool.name))
+            .collect();
+        Ok(ListToolsResult {
+            result_type: Some(ResultType::COMPLETE),
+            tools,
+            meta: None,
+            next_cursor: None,
+            ttl_ms: supports_cache_hints.then_some(0),
+            // The list depends on who asks, so shared caches must not reuse it.
+            cache_scope: supports_cache_hints.then_some(CacheScope::Private),
+        })
     }
 
     async fn call_tool(

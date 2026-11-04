@@ -33,6 +33,8 @@ CONFIG_ENV = {
     "EMBEDDING_API_KEY", "ALLOW_REMOTE_EMBEDDINGS", "MEMORY_HALF_LIFE_DAYS",
     "MEMORY_LEGACY_THRESHOLD", "MEMORY_DEFAULT_DOMAIN", "MEMORY_NOTES_ROOT", "MEMORY_TOOLS",
     "MEMORY_TRACE_FILE", "MEMORY_TRACE_RUN", "MEMORY_BACKGROUND_UPKEEP", "KIOKU_ENV_FILE", "RUST_LOG",
+    "MEMORY_PRINCIPAL", "MEMORY_SCOPES", "MEMORY_DOMAINS", "MEMORY_TRACE_CONTENT", "MEMORY_TRACE_SALT",
+    "MEMORY_ACCESS_FILE", "MEMORY_LOG_FORMAT",
 }
 
 
@@ -426,6 +428,33 @@ def run(client: StdioClient, checks: Checks, notes_root: Path, hydration_key: st
                  and all(r.get("client", {}).get("name") == "kioku-smoke-test" for r in records))
 
 
+def run_restricted(client: StdioClient, checks: Checks, trace_path: Path) -> None:
+    """A read-only profile limited to the smoke domain, as a client config would set it."""
+    client.request("initialize", {
+        "protocolVersion": "2025-11-25", "capabilities": {},
+        "clientInfo": {"name": "kioku-smoke-reader", "version": "1.0.0"},
+    })
+    client.send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+    listed = {tool["name"] for tool in client.request("tools/list", {}).get("tools", [])}
+    checks.check("a read-only profile lists only read tools",
+                 listed == {"memory_search", "memory_get", "memory_inspect", "memory_stats"})
+    _, text, error = client.call_raw("memory_save", {
+        "key": "reader-write", "title": "Write", "body": "A reader must not write.", "domain": "smoke"})
+    checks.check("a read-only profile cannot save", error and text.startswith("refused") and "write scope" in text)
+    found = client.call("memory_search", {"query": "checkout-memory-smoke", "domain": "smoke", "limit": 3})
+    checks.check("a restricted profile reads its own domain", len(found["results"]) >= 1)
+    _, text, error = client.call_raw("memory_search", {"query": "anything", "domain": "smoke-foreign"})
+    checks.check("a restricted profile cannot read other domains", error and text.startswith("refused") and "smoke-foreign" in text)
+    stats = client.call("memory_stats")
+    checks.check("stats show only allowed domains", set(stats.get("by_domain", {})) <= {"smoke"} and "total" not in stats)
+    records = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
+    searches = [r for r in records if r.get("tool") == "memory_search"]
+    checks.check("traces name the principal and redact free text when asked",
+                 all(r.get("principal") == "smoke-reader" for r in records) and searches
+                 and all(r["arguments"].get("query", "").startswith("[redacted:") for r in searches)
+                 and searches[0]["arguments"].get("domain") == "smoke")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path, required=True)
@@ -471,6 +500,17 @@ def main() -> int:
         write_env(values, server_env)
         client = StdioClient(binary, server_env, args.timeout)
         run(client, checks, notes_root, hydration_key, trace_path)
+        client.close()
+        reader_trace = fixture_root / "reader-trace.jsonl"
+        values.update({
+            "MEMORY_PRINCIPAL": "smoke-reader", "MEMORY_SCOPES": "read", "MEMORY_DOMAINS": "smoke",
+            "MEMORY_DEFAULT_DOMAIN": "smoke", "MEMORY_TRACE_FILE": str(reader_trace),
+            "MEMORY_TRACE_CONTENT": "redacted",
+        })
+        reader_env = fixture_root / "reader.env"
+        write_env(values, reader_env)
+        client = StdioClient(binary, reader_env, args.timeout)
+        run_restricted(client, checks, reader_trace)
     except (SmokeFailure, OSError, KeyError, TypeError, ValueError, IndexError) as error:
         # Never print arbitrary exceptions or server payloads; they can hold connection strings.
         message = str(error) if isinstance(error, SmokeFailure) else type(error).__name__

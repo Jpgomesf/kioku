@@ -359,3 +359,30 @@ fn instructions_stay_within_client_limits() {
         );
     }
 }
+
+#[test]
+fn read_scope_matches_read_only_annotations() {
+    use crate::access::{Scope, required_scope};
+    for tool in profile("all") {
+        let read_only = tool
+            .annotations
+            .as_ref()
+            .and_then(|a| a.read_only_hint)
+            .unwrap_or(false);
+        assert_eq!(
+            required_scope(&tool.name) == Scope::Read,
+            read_only,
+            "{}: scope and readOnlyHint disagree",
+            tool.name
+        );
+    }
+    for legacy in ["rag_search", "task_route", "rag_context", "memory_hydrate"] {
+        let mut request = CallToolRequestParams::new(legacy);
+        let _ = upgrade_legacy(&mut request);
+        assert_ne!(
+            request.name.as_ref(),
+            legacy,
+            "{legacy} is upgraded before the scope check"
+        );
+    }
+}

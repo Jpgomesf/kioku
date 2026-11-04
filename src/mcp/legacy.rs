@@ -16,11 +16,14 @@ impl MemoryServer {
             .get("query")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        let domain = self.domain(
+        let domain = match self.domain(
             args.get("domain")
                 .or_else(|| args.get("domain_filter"))
                 .and_then(Value::as_str),
-        );
+        ) {
+            Ok(domain) => domain,
+            Err(error) => return error_text(render_error("rag_context", &error)),
+        };
         let budget = args
             .get("token_budget")
             .or_else(|| args.get("max_bytes"))

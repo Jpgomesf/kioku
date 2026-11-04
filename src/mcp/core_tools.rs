@@ -106,7 +106,7 @@ impl MemoryServer {
 impl MemoryServer {
     pub(super) async fn search(&self, args: SearchArgs) -> anyhow::Result<Value> {
         let mut notes = Vec::new();
-        let domain = self.domain(args.domain.as_deref());
+        let domain = self.domain(args.domain.as_deref())?;
         let limit = clamp(args.limit.unwrap_or(5), 1, 20, "limit", &mut notes);
         let ranking = if args.graph_mode == Some(GraphMode::Off) {
             RankOptions::HYBRID
@@ -201,7 +201,7 @@ impl MemoryServer {
 
     pub(super) async fn get(&self, args: GetArgs) -> anyhow::Result<Value> {
         let mut notes = Vec::new();
-        let domain = self.domain(args.domain.as_deref());
+        let domain = self.domain(args.domain.as_deref())?;
         let budget = clamp(
             args.max_bytes.unwrap_or(2000),
             256,
@@ -317,6 +317,7 @@ impl MemoryServer {
 
     async fn save(&self, args: SaveArgs, client: Option<String>) -> anyhow::Result<Value> {
         let domain = args.domain.trim().to_owned();
+        self.authorize_domain(&domain)?;
         let key = args.key.trim().to_owned();
         let existing = self.app.store.get(NoteInput::id_for(&domain, &key)).await?;
         let today = Utc::now().format("%Y-%m-%d");
