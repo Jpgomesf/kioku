@@ -32,6 +32,13 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- Context packs fill their budget in three passes: the query-matching
+  sentences of the strongest notes and the notes they link to, then those notes
+  in full, then the rest. Left-out text shows as `…`. Packs drop the UUID, the
+  default `active` status, and absolute source paths, cutting metadata per note
+  from about 314 to about 180 bytes. At 1,500 bytes, packs now hold every expected
+  fact for 31/32 queries (was 29/32), and for 27/32 at 800 bytes (was 21/32).
+  `kioku eval --context-budget` takes several budgets (default 800,1500,3000).
 - Source split into focused modules (`app/`, `mcp/`, `eval/`, `rank/`,
   `store/`, `markdown`, `lifecycle`, `text`) with no behavior change.
 

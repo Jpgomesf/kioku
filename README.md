@@ -170,10 +170,10 @@ answer. With `nomic-embed-text` (k = 5):
 | Previous release (linear score with PageRank) | 0.773 | 0.544 | 0.541 | 0.222 | 14/32 |
 | Vector only | 0.884 | 0.894 | 0.865 | 0.861 | |
 | Hybrid (vector + BM25) | 0.935 | 0.958 | 0.919 | 0.861 | |
-| **Hybrid + graph expansion (current)** | **0.958** | **0.958** | **0.928** | **0.861** | **29/32** |
+| **Hybrid + graph expansion (current)** | **0.958** | **0.958** | **0.928** | **0.861** | **31/32** |
 
 The same run with `qwen3-embedding:0.6b` reaches recall 1.000, nDCG 0.975, and
-31/32, mostly from better Portuguese/English matching. Compare models on your
+32/32, mostly from better Portuguese/English matching. Compare models on your
 own notes and switch with `kioku reindex` when one wins. The dataset is small
 and synthetic, so treat these as regression guards rather than general claims;
 [docs/evaluation.md](docs/evaluation.md) has the method, the caveats, and the

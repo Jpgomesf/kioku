@@ -181,9 +181,10 @@ struct EvalArgs {
     /// Results scored per query.
     #[arg(long, default_value_t = 5)]
     k: usize,
-    /// Context pack budget in UTF-8 bytes.
-    #[arg(long, default_value_t = 1500)]
-    context_budget: usize,
+    /// Context pack budgets in UTF-8 bytes, comma-separated. Each is checked
+    /// for whether its packs hold every expected fact.
+    #[arg(long, value_delimiter = ',', default_values_t = [800, 1500, 3000])]
+    context_budget: Vec<usize>,
     /// Isolated database for datasets with a corpus. It is dropped and
     /// recreated on every run. Defaults to <database>_eval_<model>.
     #[arg(long)]
@@ -445,7 +446,13 @@ async fn run_eval(mut config: Config, args: &EvalArgs) -> Result<()> {
         config.embedding_dim = dim;
         config.embedding_prompts = kioku::config::EmbeddingPrompts::for_model(model);
     }
-    if dataset.corpus.is_some() {
+    if let Some(corpus) = &dataset.corpus {
+        // The corpus plays the notes folder, so sources show as relative paths
+        // and packs spend their bytes the way they do in a real deployment.
+        config.notes_root = Some(
+            std::fs::canonicalize(corpus)
+                .with_context(|| format!("cannot read corpus {}", corpus.display()))?,
+        );
         let database = match &args.database {
             Some(database) => database.clone(),
             None => eval::isolated_name(&config.database_name()?, &config.embedding_model, 63),
@@ -468,7 +475,7 @@ async fn run_eval(mut config: Config, args: &EvalArgs) -> Result<()> {
         &dataset,
         &EvalOptions {
             k: args.k,
-            context_budget: args.context_budget,
+            context_budgets: args.context_budget.clone(),
         },
     )
     .await?;

@@ -282,20 +282,8 @@ impl MemoryServer {
         missing: &[Value],
         notes: &[String],
     ) -> anyhow::Result<Value> {
+        // Sources and statuses are already shaped for models by the app.
         let mut out = serde_json::to_value(pack).context("cannot serialize the context pack")?;
-        if let Some(memories) = out["memories"].as_array_mut() {
-            for memory in memories {
-                let source = memory["source"].as_str().map(str::to_owned);
-                if let Some(display) = self.display_source(source.as_deref()) {
-                    memory["source"] = json!(display);
-                }
-                if memory["status"] == "active"
-                    && let Some(map) = memory.as_object_mut()
-                {
-                    map.remove("status");
-                }
-            }
-        }
         if let Some(map) = out.as_object_mut() {
             map.remove("budget_utf8_bytes");
             map.remove("skipped");

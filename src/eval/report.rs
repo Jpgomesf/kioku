@@ -164,20 +164,21 @@ pub fn render_markdown(report: &Report) -> String {
             signed(&c.delta)
         );
     }
-    let ctx = &report.context;
-    let _ = writeln!(
-        out,
-        "- Context packs ({} bytes, `{}`) contained every expected fact for {}/{} queries{}",
-        ctx.budget_utf8_bytes,
-        ctx.variant,
-        ctx.sufficient,
-        ctx.checked,
-        if ctx.failures.is_empty() {
-            String::new()
-        } else {
-            format!("; missing: {}", ctx.failures.join(", "))
-        }
-    );
+    for ctx in &report.context {
+        let _ = writeln!(
+            out,
+            "- Context packs ({} bytes, `{}`) contained every expected fact for {}/{} queries{}",
+            ctx.budget_utf8_bytes,
+            ctx.variant,
+            ctx.sufficient,
+            ctx.checked,
+            if ctx.failures.is_empty() {
+                String::new()
+            } else {
+                format!("; missing: {}", ctx.failures.join(", "))
+            }
+        );
+    }
     if let Some(cal) = &report.abstention_calibration {
         let _ = writeln!(
             out,
