@@ -1,6 +1,12 @@
 //! Contract tests for the model-facing surface. They need no services.
 
-use super::args::{FeedbackArgs, ImportArgs, KeyArgs, MaintenanceArgs};
+use rmcp::model::JsonObject;
+use serde_json::{Value, json};
+
+use super::args::{
+    FeedbackArgs, GetArgs, ImportArgs, KeyArgs, MaintenanceArgs, SaveArgs, SearchArgs, parse,
+};
+use super::resolve::{levenshtein, suggest};
 use super::*;
 
 fn profile(spec: &str) -> Vec<rmcp::model::Tool> {

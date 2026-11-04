@@ -1,0 +1,257 @@
+//! Tools for curating memory, enabled by the `all` profile or by name.
+
+use chrono::Utc;
+use rmcp::model::{CallToolResult, JsonObject};
+use rmcp::{tool, tool_router};
+use serde_json::{Value, json};
+
+use super::args::{EmptyArgs, FeedbackArgs, ImportArgs, KeyArgs, MaintenanceArgs, parse};
+use crate::lifecycle;
+
+use super::output::{error_text, ok, render_error, round};
+use super::{
+    FEEDBACK_EXAMPLE, IMPORT_EXAMPLE, KEY_EXAMPLE, MAINTENANCE_EXAMPLE, MemoryServer, schema,
+};
+
+#[tool_router(router = admin_router, vis = "pub(super)")]
+impl MemoryServer {
+    #[tool(
+        name = "memory_inspect",
+        title = "Inspect a memory",
+        description = "Show one memory's metadata and explicit links without its text: source, status, dates, confidence, pin, usage and feedback counts, retention score, index state, and linked memories with direction. Use for provenance, freshness, or dependency questions; use memory_get to read the text. Read-only.",
+        input_schema = schema::input::<KeyArgs>(),
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    async fn memory_inspect(&self, raw: JsonObject) -> CallToolResult {
+        let args: KeyArgs = match parse(
+            "memory_inspect",
+            raw,
+            &schema::input::<KeyArgs>(),
+            &[],
+            KEY_EXAMPLE,
+        ) {
+            Ok(args) => args,
+            Err(text) => return error_text(text),
+        };
+        match self.inspect(args).await {
+            Ok(value) => ok(value),
+            Err(error) => error_text(render_error("memory_inspect", &error)),
+        }
+    }
+
+    #[tool(
+        name = "memory_feedback",
+        title = "Rate a memory",
+        description = "Record that a memory proved correct and helpful (positive=true) or wrong or outdated (positive=false). Use only after explicit user feedback or a verified outcome, never just because you retrieved it. To fix wrong content, update it with memory_save. Repeats with the same request_id, or on the same day, count once.",
+        input_schema = schema::input::<FeedbackArgs>(),
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn memory_feedback(&self, raw: JsonObject) -> CallToolResult {
+        let args: FeedbackArgs = match parse(
+            "memory_feedback",
+            raw,
+            &schema::input::<FeedbackArgs>(),
+            &[],
+            FEEDBACK_EXAMPLE,
+        ) {
+            Ok(args) => args,
+            Err(text) => return error_text(text),
+        };
+        let result = async {
+            let domain = self.domain(args.domain.as_deref());
+            let id = self
+                .resolve_one("memory_feedback", &domain, &args.key)
+                .await?;
+            let request_id = args.request_id.unwrap_or_else(|| {
+                format!(
+                    "auto:{id}:{}:{}",
+                    args.positive,
+                    Utc::now().format("%Y-%m-%d")
+                )
+            });
+            let outcome = self
+                .app
+                .feedback(id, args.positive, &request_id, Some(&domain))
+                .await?;
+            anyhow::Ok(
+                json!({"key": args.key, "domain": domain, "positive": args.positive, "applied": outcome["applied"]}),
+            )
+        };
+        match result.await {
+            Ok(value) => ok(value),
+            Err(error) => error_text(render_error("memory_feedback", &error)),
+        }
+    }
+
+    #[tool(
+        name = "memory_retire",
+        title = "Retire a memory",
+        description = "Retire a memory confirmed obsolete with no replacement: it leaves default search, and memory_get still returns it marked legacy. Nothing is deleted; memory_restore reverses it. If the fact changed, update it with memory_save instead. Use only when the user asks or the obsolescence is verified.",
+        input_schema = schema::input::<KeyArgs>(),
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn memory_retire(&self, raw: JsonObject) -> CallToolResult {
+        self.set_status("memory_retire", raw, true).await
+    }
+
+    #[tool(
+        name = "memory_restore",
+        title = "Restore a memory",
+        description = "Return a retired (legacy) memory to default search after verifying it is still correct. Find retired memories with memory_search and include_legacy=true.",
+        input_schema = schema::input::<KeyArgs>(),
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn memory_restore(&self, raw: JsonObject) -> CallToolResult {
+        self.set_status("memory_restore", raw, false).await
+    }
+
+    #[tool(
+        name = "memory_import",
+        title = "Import Markdown notes",
+        description = "Import or re-index Markdown notes (YAML frontmatter: key, title, domain, aliases, related, tags) from the configured notes folder after you create or edit them. File content replaces the stored copy; unchanged files are skipped. Paths are relative to the notes folder and cannot leave it. Returns counts and unresolved links. Does not watch files.",
+        input_schema = schema::input::<ImportArgs>(),
+        annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn memory_import(&self, raw: JsonObject) -> CallToolResult {
+        let args: ImportArgs = match parse(
+            "memory_import",
+            raw,
+            &schema::input::<ImportArgs>(),
+            &[],
+            IMPORT_EXAMPLE,
+        ) {
+            Ok(args) => args,
+            Err(text) => return error_text(text),
+        };
+        let domain = self.domain(args.domain.as_deref());
+        match self.app.hydrate(args.path.as_deref(), Some(&domain)).await {
+            Ok(report) => ok(json!({
+                "domain": domain,
+                "imported": report.imported,
+                "notes": report.notes.iter().map(|n| json!({"key": n.key, "revision": n.revision})).collect::<Vec<_>>(),
+                "truncated": report.truncated,
+                "unresolved_related": report.unresolved_relationships.iter().take(20).map(|u| json!({"ref": u.reference, "reason": u.reason})).collect::<Vec<_>>(),
+                "unresolved_count": report.unresolved_count,
+            })),
+            Err(error) => error_text(render_error("memory_import", &error)),
+        }
+    }
+
+    #[tool(
+        name = "memory_maintenance",
+        title = "Age memories",
+        description = "Preview (default) or apply the monthly aging pass: active, unpinned memories whose retention score fell below the threshold move to legacy. Nothing is deleted and memory_restore reverses it. The server already runs it daily, so use it to preview, or apply only when the user asks.",
+        input_schema = schema::input::<MaintenanceArgs>(),
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn memory_maintenance(&self, raw: JsonObject) -> CallToolResult {
+        let args: MaintenanceArgs = match parse(
+            "memory_maintenance",
+            raw,
+            &schema::input::<MaintenanceArgs>(),
+            &[],
+            MAINTENANCE_EXAMPLE,
+        ) {
+            Ok(args) => args,
+            Err(text) => return error_text(text),
+        };
+        match self.app.maintenance(args.dry_run.unwrap_or(true)).await {
+            Ok(value) => ok(value),
+            Err(error) => error_text(render_error("memory_maintenance", &error)),
+        }
+    }
+
+    #[tool(
+        name = "memory_stats",
+        title = "Memory statistics",
+        description = "Count memories by status and by domain, plus pending index work, links, and feedback events. Use to check store health or find which domains exist. Reads no memory text.",
+        input_schema = schema::empty(),
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    async fn memory_stats(&self, raw: JsonObject) -> CallToolResult {
+        if let Err(text) = parse::<EmptyArgs>("memory_stats", raw, &schema::empty(), &[], "{}") {
+            return error_text(text);
+        }
+        let result = async {
+            let mut stats = self.app.store.stats().await?;
+            let by_domain: serde_json::Map<String, Value> = self
+                .app
+                .store
+                .domain_counts()
+                .await?
+                .into_iter()
+                .map(|(domain, count)| (domain, json!(count)))
+                .collect();
+            stats["by_domain"] = Value::Object(by_domain);
+            anyhow::Ok(stats)
+        };
+        match result.await {
+            Ok(value) => ok(value),
+            Err(error) => error_text(render_error("memory_stats", &error)),
+        }
+    }
+}
+
+impl MemoryServer {
+    async fn inspect(&self, args: KeyArgs) -> anyhow::Result<Value> {
+        let domain = self.domain(args.domain.as_deref());
+        let id = self
+            .resolve_one("memory_inspect", &domain, &args.key)
+            .await?;
+        let note = self.app.require_note(id, Some(&domain)).await?;
+        let graph = self.app.graph_context(id, Some(&domain), true).await?;
+        let retention = lifecycle::retention(&note, Utc::now(), self.app.config.half_life_days);
+        let source = self.display_source(note.input.source.as_deref());
+        let origin = if note
+            .input
+            .source
+            .as_deref()
+            .is_some_and(|s| std::path::Path::new(s).is_absolute())
+        {
+            "file"
+        } else {
+            "agent"
+        };
+        Ok(json!({
+            "key": note.input.key,
+            "id": note.id,
+            "domain": note.input.domain,
+            "title": note.input.title,
+            "status": note.status,
+            "pinned": note.input.pinned,
+            "confidence": note.input.confidence,
+            "source": source,
+            "origin": origin,
+            "created_at": note.created_at,
+            "updated_at": note.updated_at,
+            "last_used_at": note.last_accessed_at,
+            "access_count": note.access_count,
+            "feedback": {"positive": note.positive_feedback, "negative": note.negative_feedback},
+            "retention": round(retention),
+            "revision": note.revision,
+            "indexed": note.vector_synced,
+            "links": graph["neighbors"],
+            "links_total": graph["total_neighbors"],
+            "truncated": graph["truncated"],
+        }))
+    }
+
+    async fn set_status(&self, tool: &str, raw: JsonObject, retire: bool) -> CallToolResult {
+        let args: KeyArgs = match parse(tool, raw, &schema::input::<KeyArgs>(), &[], KEY_EXAMPLE) {
+            Ok(args) => args,
+            Err(text) => return error_text(text),
+        };
+        let result = async {
+            let domain = self.domain(args.domain.as_deref());
+            let id = self.resolve_one(tool, &domain, &args.key).await?;
+            let outcome = self.app.set_legacy(id, retire, Some(&domain)).await?;
+            anyhow::Ok(
+                json!({"key": outcome["key"], "domain": domain, "status": outcome["status"], "changed": outcome["changed"]}),
+            )
+        };
+        match result.await {
+            Ok(value) => ok(value),
+            Err(error) => error_text(render_error(tool, &error)),
+        }
+    }
+}
