@@ -4,6 +4,67 @@ use std::collections::BTreeMap;
 
 use serde::Serialize;
 
+use super::graph::Rng;
+
+/// Bootstrap resamples per interval. 2,000 keeps the 2.5% tails stable to
+/// about ±0.005 on these dataset sizes.
+const BOOTSTRAP_RESAMPLES: usize = 2000;
+
+/// A point estimate with a 95% interval.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq)]
+pub struct Interval {
+    pub mean: f64,
+    pub low: f64,
+    pub high: f64,
+}
+
+impl Interval {
+    /// Wilson score interval for `successes` out of `n` (n > 0).
+    pub fn wilson(successes: usize, n: usize) -> Self {
+        let n_f = n as f64;
+        let p = successes as f64 / n_f;
+        let z = 1.959_963_984_540_054_f64;
+        let denominator = 1.0 + z * z / n_f;
+        let centre = (p + z * z / (2.0 * n_f)) / denominator;
+        let half = z * (p * (1.0 - p) / n_f + z * z / (4.0 * n_f * n_f)).sqrt() / denominator;
+        Self {
+            mean: p,
+            low: (centre - half).max(0.0),
+            high: (centre + half).min(1.0),
+        }
+    }
+
+    /// Percentile bootstrap of the mean. For paired comparisons pass the
+    /// per-query differences. The seed makes reports reproducible.
+    pub fn bootstrap_mean(values: &[f64], seed: u64) -> Self {
+        if values.is_empty() {
+            return Self {
+                mean: 0.0,
+                low: 0.0,
+                high: 0.0,
+            };
+        }
+        let n = values.len();
+        let mean = values.iter().sum::<f64>() / n as f64;
+        let mut rng = Rng::new(seed);
+        let mut means: Vec<f64> = (0..BOOTSTRAP_RESAMPLES)
+            .map(|_| (0..n).map(|_| values[rng.below(n)]).sum::<f64>() / n as f64)
+            .collect();
+        means.sort_by(f64::total_cmp);
+        let at = |q: f64| means[((means.len() - 1) as f64 * q).round() as usize];
+        Self {
+            mean,
+            low: at(0.025),
+            high: at(0.975),
+        }
+    }
+
+    /// Whether the interval excludes zero, i.e. a difference is unlikely to be noise.
+    pub fn excludes_zero(&self) -> bool {
+        self.low > 0.0 || self.high < 0.0
+    }
+}
+
 /// Recall@k: the fraction of relevant notes that appear in the top k.
 pub fn recall_at_k(ranked: &[String], relevant: &BTreeMap<String, u8>, k: usize) -> f64 {
     if relevant.is_empty() {
@@ -53,6 +114,9 @@ pub struct QueryResult {
     pub id: String,
     pub category: String,
     pub ranked: Vec<String>,
+    /// Keys that entered through an explicit link (graph slots).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub linked: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub recall: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -61,6 +125,9 @@ pub struct QueryResult {
     pub ndcg: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hit_at_1: Option<bool>,
+    /// Whether every note in the query's `required` set reached the top k.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub complete_support: Option<bool>,
     pub leaked: Vec<String>,
     /// Highest dense similarity among the results, for abstention calibration.
     pub top_dense: Option<f64>,
@@ -75,6 +142,9 @@ pub struct Summary {
     pub ndcg: f64,
     pub hit_at_1: f64,
     pub leaks: usize,
+    /// Queries with a `required` set, and how many had all of it in the top k.
+    pub support_queries: usize,
+    pub complete_support: usize,
     pub abstention_queries: usize,
     pub abstained: usize,
     pub p50_ms: f64,
@@ -108,6 +178,14 @@ impl Summary {
             ndcg: mean(&|r| r.ndcg.unwrap_or(0.0)),
             hit_at_1: mean(&|r| f64::from(u8::from(r.hit_at_1.unwrap_or(false)))),
             leaks: results.iter().filter(|r| !r.leaked.is_empty()).count(),
+            support_queries: results
+                .iter()
+                .filter(|r| r.complete_support.is_some())
+                .count(),
+            complete_support: results
+                .iter()
+                .filter(|r| r.complete_support == Some(true))
+                .count(),
             abstention_queries: abstention.len(),
             abstained: abstention.iter().filter(|r| r.ranked.is_empty()).count(),
             p50_ms: percentile(0.5),
@@ -165,10 +243,12 @@ mod tests {
             id: "q1".into(),
             category: "c".into(),
             ranked: keys(&["a"]),
+            linked: Vec::new(),
             recall: Some(1.0),
             reciprocal_rank: Some(1.0),
             ndcg: Some(1.0),
             hit_at_1: Some(true),
+            complete_support: Some(true),
             leaked: Vec::new(),
             top_dense: Some(0.8),
             latency_ms: 2.0,
@@ -188,5 +268,30 @@ mod tests {
         assert_eq!(summary.abstention_queries, 1);
         assert_eq!(summary.abstained, 1);
         assert_eq!(summary.ndcg, 1.0);
+        assert_eq!((summary.support_queries, summary.complete_support), (2, 2));
+    }
+
+    #[test]
+    fn wilson_matches_published_values() {
+        // 5/5 and 1/1 are the intervals quoted in evals/behavior/README.md.
+        let five = Interval::wilson(5, 5);
+        assert!(
+            (five.low - 0.566).abs() < 1e-3 && five.high == 1.0,
+            "{five:?}"
+        );
+        let one = Interval::wilson(1, 1);
+        assert!((one.low - 0.207).abs() < 1e-3, "{one:?}");
+        let half = Interval::wilson(10, 20);
+        assert!((half.low - 0.299).abs() < 1e-3 && (half.high - 0.701).abs() < 1e-3);
+    }
+
+    #[test]
+    fn bootstrap_is_reproducible_and_brackets_the_mean() {
+        let values: Vec<f64> = (0..40).map(|i| f64::from(i % 5) / 4.0).collect();
+        let a = Interval::bootstrap_mean(&values, 11);
+        assert_eq!(a, Interval::bootstrap_mean(&values, 11));
+        assert!(a.low < a.mean && a.mean < a.high, "{a:?}");
+        assert!(!Interval::bootstrap_mean(&[0.0; 10], 1).excludes_zero());
+        assert!(Interval::bootstrap_mean(&[0.2; 10], 1).excludes_zero());
     }
 }

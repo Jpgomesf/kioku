@@ -122,6 +122,7 @@ impl MemoryServer {
                 limit,
                 include_legacy: args.include_legacy.unwrap_or(false),
                 ranking,
+                edges: None,
             })
             .await?;
         let hits: Vec<Value> = results

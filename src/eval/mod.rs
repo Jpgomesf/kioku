@@ -8,14 +8,21 @@
 //! change the state it measures.
 
 mod dataset;
+mod graph;
 mod metrics;
 mod report;
 mod run;
 mod storage;
 
 pub use dataset::{Dataset, Query};
-pub use metrics::{QueryResult, Summary, hit_at_1, ndcg_at_k, recall_at_k, reciprocal_rank};
-pub use report::{check_thresholds, render_markdown};
+pub use graph::{
+    Ablation, GraphReport, HubExposure, LinkStats, NoteExposure, SlotPrecision, dropped_links,
+    link_stats, shuffled_links,
+};
+pub use metrics::{
+    Interval, QueryResult, Summary, hit_at_1, ndcg_at_k, recall_at_k, reciprocal_rank,
+};
+pub use report::{Gates, check_thresholds, render_markdown};
 pub use run::{
     Calibration, Comparison, ContextReport, EvalOptions, Report, VariantReport, prepare, run,
 };

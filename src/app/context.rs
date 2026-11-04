@@ -100,6 +100,7 @@ impl App {
                 limit: 8,
                 include_legacy: request.include_legacy,
                 ranking: request.ranking,
+                edges: None,
             })
             .await?
             .hits

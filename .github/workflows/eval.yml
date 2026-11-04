@@ -85,7 +85,7 @@ jobs:
         # Floors sit a little below the committed baseline (docs/evaluation.md) so
         # CPU-level embedding noise does not fail the run, while real regressions do.
         run: |
-          ./target/release/kioku eval --output eval-report.json --min-ndcg 0.90 --min-recall 0.93 | tee eval-report.md
+          ./target/release/kioku eval --output eval-report.json --min-ndcg 0.90 --min-recall 0.93 --max-hub-exposure 3 --no-leaks | tee eval-report.md
           cat eval-report.md >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()

@@ -71,6 +71,10 @@ enum Command {
         /// Skip graph expansion through explicit links.
         #[arg(long)]
         no_graph: bool,
+        /// Also print candidate counts and time per stage. Each result always
+        /// carries its match kind, the note that linked to it, and its signals.
+        #[arg(long)]
+        explain: bool,
     },
     /// Build a bounded evidence pack for a query, like the rag_context tool.
     Context {
@@ -174,6 +178,13 @@ struct EvalArgs {
     /// Exit with an error if recall@k of the default ranking is below this value.
     #[arg(long)]
     min_recall: Option<f64>,
+    /// Exit with an error if one note appears in unrelated results more than
+    /// this many times as often as a uniform pick would (for example 3).
+    #[arg(long)]
+    max_hub_exposure: Option<f64>,
+    /// Exit with an error if any query returns a forbidden (superseded) note.
+    #[arg(long)]
+    no_leaks: bool,
     /// Evaluate another embedding model (for example qwen3-embedding:0.6b) without editing the env file.
     #[arg(long, requires = "embedding_dim")]
     embedding_model: Option<String>,
@@ -250,6 +261,7 @@ async fn main() -> Result<()> {
             limit,
             include_legacy,
             no_graph,
+            explain,
         } => {
             let results = app
                 .search(&SearchRequest {
@@ -262,9 +274,14 @@ async fn main() -> Result<()> {
                     } else {
                         RankOptions::HYBRID_GRAPH
                     },
+                    edges: None,
                 })
                 .await?;
-            json!({"results": results.hits, "warnings": results.warnings})
+            if explain {
+                json!({"results": results.hits, "warnings": results.warnings, "stats": results.stats})
+            } else {
+                json!({"results": results.hits, "warnings": results.warnings})
+            }
         }
         Command::Context {
             query,
@@ -419,5 +436,13 @@ async fn run_eval(mut config: Config, args: &EvalArgs) -> Result<()> {
     if let Some(path) = &args.output {
         std::fs::write(path, serde_json::to_vec_pretty(&report)?)?;
     }
-    eval::check_thresholds(&report, args.min_ndcg, args.min_recall)
+    eval::check_thresholds(
+        &report,
+        eval::Gates {
+            min_ndcg: args.min_ndcg,
+            min_recall: args.min_recall,
+            max_hub_exposure: args.max_hub_exposure,
+            no_leaks: args.no_leaks,
+        },
+    )
 }

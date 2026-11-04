@@ -39,6 +39,10 @@ pub struct Query {
     /// Keys that must never appear in the top k, such as a retired runbook.
     #[serde(default)]
     pub forbidden: Vec<String>,
+    /// Notes an answer needs together, such as every hop of a multi-hop
+    /// question. Complete support means all of them reached the top k.
+    #[serde(default)]
+    pub required: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -70,6 +74,14 @@ impl Dataset {
             ensure!(
                 query.relevant.values().all(|grade| (1..=3).contains(grade)),
                 "query {} has a relevance grade outside 1..=3",
+                query.id
+            );
+            ensure!(
+                query
+                    .required
+                    .iter()
+                    .all(|key| query.relevant.contains_key(key)),
+                "query {}: every required key must also be graded in relevant",
                 query.id
             );
             queries.push(query);
