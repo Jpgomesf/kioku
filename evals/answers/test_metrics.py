@@ -216,8 +216,8 @@ class JudgeSpec(unittest.TestCase):
     def test_specs(self):
         self.assertEqual(metrics.parse_judge_spec("none"), {"kind": "none"})
         self.assertEqual(metrics.parse_judge_spec("claude:sonnet"), {"kind": "claude", "model": "sonnet"})
-        self.assertEqual(metrics.parse_judge_spec("openai:http://127.0.0.1:47831/v1:Qwen3.8-Strata"),
-                         {"kind": "openai", "base_url": "http://127.0.0.1:47831/v1", "model": "Qwen3.8-Strata"})
+        self.assertEqual(metrics.parse_judge_spec("openai:http://127.0.0.1:8080/v1:qwen3-8b"),
+                         {"kind": "openai", "base_url": "http://127.0.0.1:8080/v1", "model": "qwen3-8b"})
         self.assertEqual(metrics.parse_judge_spec("openai:http://localhost:11434/v1:qwen3:8b"),
                          {"kind": "openai", "base_url": "http://localhost:11434/v1", "model": "qwen3:8b"})
         self.assertEqual(metrics.parse_judge_spec("openai:https://api.example.com:gpt-x"),
