@@ -67,7 +67,8 @@ pub struct Report {
     pub embedding_model: String,
     pub variants: Vec<VariantReport>,
     pub comparisons: Vec<Comparison>,
-    pub context: ContextReport,
+    /// Whether context packs hold every expected fact, per budget.
+    pub context: Vec<ContextReport>,
     pub graph: GraphReport,
     /// Highest dense similarity for unanswerable queries versus the lowest
     /// top-1 similarity for answerable ones. Overlap means a similarity
@@ -94,7 +95,7 @@ impl Report {
 
 pub struct EvalOptions {
     pub k: usize,
-    pub context_budget: usize,
+    pub context_budgets: Vec<usize>,
 }
 
 /// Prepare the dataset's domain: import the corpus and retire the listed keys.
@@ -132,7 +133,10 @@ pub async fn run(app: &App, dataset: &Dataset, options: &EvalOptions) -> Result<
         Some(compare(variant, baseline))
     })
     .collect();
-    let context = context_sufficiency(app, dataset, options).await?;
+    let mut context = Vec::new();
+    for budget in &options.context_budgets {
+        context.push(context_sufficiency(app, dataset, *budget).await?);
+    }
     let calibration = calibrate(variants.iter().find(|v| v.name == "vector"));
     let graph = graph_report(app, dataset, options, &variants).await?;
     Ok(Report {
@@ -384,11 +388,7 @@ fn calibrate(vector: Option<&VariantReport>) -> Option<Calibration> {
     })
 }
 
-async fn context_sufficiency(
-    app: &App,
-    dataset: &Dataset,
-    options: &EvalOptions,
-) -> Result<ContextReport> {
+async fn context_sufficiency(app: &App, dataset: &Dataset, budget: usize) -> Result<ContextReport> {
     let mut checked = 0;
     let mut failures = Vec::new();
     for query in dataset.queries.iter().filter(|q| !q.answer.is_empty()) {
@@ -398,7 +398,7 @@ async fn context_sufficiency(
                 query: Some(&query.query),
                 ids: None,
                 domain: Some(&dataset.domain),
-                budget: options.context_budget,
+                budget,
                 include_legacy: query.include_legacy,
                 ranking: RankOptions::HYBRID_GRAPH,
                 record_access: false,
@@ -416,7 +416,7 @@ async fn context_sufficiency(
     }
     Ok(ContextReport {
         variant: DEFAULT_VARIANT.to_owned(),
-        budget_utf8_bytes: options.context_budget,
+        budget_utf8_bytes: budget,
         sufficient: checked - failures.len(),
         checked,
         failures,

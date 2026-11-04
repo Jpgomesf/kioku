@@ -113,6 +113,10 @@ pub enum Status {
 }
 
 impl Status {
+    pub fn is_active(&self) -> bool {
+        *self == Self::Active
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Active => "active",

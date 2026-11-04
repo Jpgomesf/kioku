@@ -31,7 +31,7 @@ isolates one capability. All results are at k = 5, measured on 2026-11-02.
 | Previous release: 0.55 cosine + 0.30 PageRank + 0.15 retention | 0.773 | 0.544 | 0.541 | 0.222 | 14/32 |
 | Vector only | 0.884 | 0.894 | 0.865 | 0.861 | |
 | Hybrid: vector + BM25, RRF | 0.935 | 0.958 | 0.919 | 0.861 | |
-| **Hybrid + graph expansion (default)** | **0.958** | **0.958** | **0.928** | **0.861** | **29/32** |
+| **Hybrid + graph expansion (default)** | **0.958** | **0.958** | **0.928** | **0.861** | **31/32** |
 
 nDCG@5 by category:
 
@@ -53,8 +53,8 @@ on 27.
 
 | Model | Recall@5 | MRR | nDCG@5 | Hit@1 | Cross-lingual nDCG | Packs with the answer |
 |---|---|---|---|---|---|---|
-| `nomic-embed-text` (137M, 768-d) | 0.958 | 0.958 | 0.928 | 0.861 | 0.726 | 29/32 |
-| `qwen3-embedding:0.6b` (596M, 1024-d) | 1.000 | 1.000 | 0.975 | 0.917 | 1.000 | 31/32 |
+| `nomic-embed-text` (137M, 768-d) | 0.958 | 0.958 | 0.928 | 0.861 | 0.726 | 31/32 |
+| `qwen3-embedding:0.6b` (596M, 1024-d) | 1.000 | 1.000 | 0.975 | 0.917 | 1.000 | 32/32 |
 
 Switch an existing install with `kioku reindex`, which keeps the old
 collection for rollback.
@@ -116,6 +116,37 @@ retired notes, latency, per-category scores, per-query rankings, paired
 comparisons, context-pack sufficiency, and abstention calibration.
 [`evals/README.md`](../evals/README.md) documents the format and how to build
 a set from your own questions.
+
+## Context packs
+
+A context pack is the best notes for a query fitted to a byte budget, which is
+what a model gets in one call. The eval checks whether each pack holds every
+expected fact at 800, 1,500, and 3,000 bytes (`--context-budget`).
+
+The first packer filled the budget with whole notes in rank order and cut the
+first one that didn't fit. Two things made that lose facts the ranking had
+found. Each note carried about 314 bytes of metadata (a UUID, an absolute
+source path, `"status":"active"`), so 1,500 bytes held only two notes. And a
+multi-hop question's second note usually ranks low, behind notes that merely
+resemble the query.
+
+Packs now spend their budget in three passes. Priority notes (those matched by
+both meaning and words, then the notes they link to) first get the sentences
+that share a term with the query, or their opening sentence. Then they grow in
+order. Only then do the other notes get room. Text that was left out shows as
+`…`. Metadata is down to about 180 bytes per note: no UUID (models use keys),
+no status unless legacy, and sources relative to `MEMORY_NOTES_ROOT`.
+
+| Budget | Whole notes in rank order | Evidence, depth, then breadth |
+|---|---|---|
+| 800 bytes | 21/32 | 27/32 |
+| 1,500 bytes | 29/32 | 31/32 |
+| 3,000 bytes | 30/32 | 31/32 |
+
+No query that passed before fails now. The one left at 1,500 bytes,
+`xling-05`, is a retrieval miss: the Portuguese note isn't in the top 8 with
+`nomic-embed-text`. With `qwen3-embedding:0.6b` every pack holds its facts at
+1,500 bytes.
 
 ## Graph contribution
 

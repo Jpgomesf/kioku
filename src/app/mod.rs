@@ -7,6 +7,7 @@
 //! leaves a half-saved note behind.
 
 mod context;
+mod excerpt;
 mod import;
 mod search;
 mod upkeep;
@@ -104,6 +105,19 @@ impl App {
 
     pub fn domain<'a>(&'a self, domain: Option<&'a str>) -> &'a str {
         domain.unwrap_or(&self.config.default_domain)
+    }
+
+    /// A note's source as shown to models: relative to `MEMORY_NOTES_ROOT` for
+    /// notes imported from there, otherwise as stored.
+    pub fn display_source(&self, source: Option<&str>) -> Option<String> {
+        let source = source?;
+        let relative = self
+            .config
+            .notes_root
+            .as_ref()
+            .and_then(|root| Path::new(source).strip_prefix(root).ok())
+            .map(|path| path.to_string_lossy().into_owned());
+        Some(relative.unwrap_or_else(|| source.to_owned()))
     }
 
     async fn embed_note(&self, input: &NoteInput) -> Result<Vec<f32>> {

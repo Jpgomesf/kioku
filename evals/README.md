@@ -57,7 +57,8 @@ They run in isolated storage and write their outputs to `evals/runs/`, which is 
 | Field | Meaning |
 |---|---|
 | `relevant` | Note keys and grades: 2 answers the question, 1 is useful context. Empty means nothing should answer it (abstention). |
-| `answer` | Facts a 1,500-byte context pack must contain (case-insensitive). |
+| `answer` | Facts a context pack must contain (case-insensitive), checked at each `--context-budget`. |
+| `required` | Notes an answer needs together, such as every hop of a multi-hop question. |
 | `include_legacy` | Search retired notes too. |
 | `forbidden` | Keys that must not appear in the top k, such as a retired runbook. |
 

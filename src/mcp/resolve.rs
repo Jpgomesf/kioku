@@ -18,15 +18,7 @@ pub(super) enum Resolved {
 impl MemoryServer {
     /// Show file-backed sources relative to the notes folder.
     pub(super) fn display_source(&self, source: Option<&str>) -> Option<String> {
-        let source = source?;
-        let relative = self
-            .app
-            .config
-            .notes_root
-            .as_ref()
-            .and_then(|root| std::path::Path::new(source).strip_prefix(root).ok())
-            .map(|path| path.to_string_lossy().into_owned());
-        Some(relative.unwrap_or_else(|| source.to_owned()))
+        self.app.display_source(source)
     }
 
     /// Find the memory a key refers to: an exact key, then an id, then a unique
