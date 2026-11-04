@@ -117,6 +117,45 @@ comparisons, context-pack sufficiency, and abstention calibration.
 [`evals/README.md`](../evals/README.md) documents the format and how to build
 a set from your own questions.
 
+## Graph contribution
+
+Since links can only fill reserved slots, an overall nDCG gain says little
+about whether the links themselves carry information. Each report adds:
+
+- **Ablations.** The default ranking is rerun with the stored links replaced by
+  degree-preserving shuffles (directed double edge swaps, 5 seeds) and with
+  half of them dropped (5 seeds). If real links don't beat shuffled ones, the
+  graph only adds noise.
+- **Complete support.** Queries list `required` notes (all hops of a multi-hop
+  question); a query counts only when every one reaches the top k.
+- **Graph-slot precision.** How many linked results were relevant, against
+  what the same positions held without links.
+- **Hub exposure.** For each note, how often it appears in results it isn't
+  relevant to, divided by the rate a uniform pick would have (k / notes). The
+  v0.1.0 ranking let one pinned hub win almost every query; CI now fails above
+  3×.
+- **Link resolution.** Share of written `related` references that resolve.
+- **Intervals.** Every mean has a 95% bootstrap interval (2,000 resamples,
+  fixed seed), and comparisons are paired per query. A difference whose
+  interval includes zero is reported as within noise.
+
+On the bundled set with `nomic-embed-text` (k = 5):
+
+| links | nDCG@5 (95% CI) | complete support | change vs stored links |
+|---|---|---|---|
+| stored | 0.928 [0.854, 0.977] | 4/4 | |
+| none (`hybrid`) | 0.919 [0.842, 0.973] | 3/4 | −0.009 [−0.026, −0.000] |
+| shuffled (5 seeds) | 0.919 [0.842, 0.973] | 75% | −0.009 [−0.026, +0.000] |
+| half dropped (5 seeds) | 0.927 [0.854, 0.976] | 95% | −0.001 [−0.005, +0.000] |
+
+Links help exactly two multi-hop queries, and shuffled links help none, so the
+signal comes from the real links. With 4 multi-hop queries the interval still
+touches zero. The graph slot held 2 relevant notes in 40 results, while the
+same positions without links held none. All 38 references resolve. The most
+exposed note, `error-codes`, appears in unrelated results at 1.9× the uniform
+rate, and slightly more often without links (2.1× for vector only), so its
+reach comes from content similarity, not from the graph.
+
 ## Reading small samples
 
 - With n queries, one query moves an average by 1/n. Report counts per
@@ -142,6 +181,9 @@ a set from your own questions.
   relevance score; add it only if the eval shows a gain.
 - Links are untyped. `supersedes` and validity dates, as in Graphiti, would let
   retrieval prefer current facts explicitly.
+- Four multi-hop queries can't show a graph gain outside noise. More multi-hop
+  questions with `required` sets, ideally from real sessions, are the cheapest
+  way to make the graph measurements decisive.
 - Search ranks over the whole domain in memory, which is fine for hundreds of
   notes. Measure latency at 1k-10k notes before relying on larger domains.
 - The query set should grow with real questions, split into tuning and test

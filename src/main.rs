@@ -32,6 +32,30 @@ enum Command {
         /// list such as core,memory_import. Overrides MEMORY_TOOLS.
         #[arg(long)]
         tools: Option<String>,
+        /// Serve MCP over HTTP at this loopback address (for example
+        /// 127.0.0.1:7373) instead of stdio. Needs a build with `--features http`.
+        #[arg(long, value_name = "ADDR")]
+        http: Option<std::net::SocketAddr>,
+        /// Access file listing who may connect over HTTP (see `kioku token`).
+        #[arg(long, env = "MEMORY_ACCESS_FILE", requires = "http")]
+        access_file: Option<PathBuf>,
+        /// Browser origin allowed to call the HTTP server, such as
+        /// http://localhost:5173. Repeat for several; by default none is.
+        #[arg(long = "allowed-origin", requires = "http")]
+        allowed_origins: Vec<String>,
+    },
+    /// Create a bearer token for the HTTP transport and print the access-file
+    /// entry for it. Only the hash goes in the file; store the token in the
+    /// client's configuration.
+    Token {
+        /// Name for this client, shown in traces and errors.
+        subject: String,
+        /// Comma-separated scopes: read, write, admin.
+        #[arg(long, default_value = "read,write")]
+        scopes: String,
+        /// Comma-separated domain globs, or `re:<regex>`.
+        #[arg(long, default_value = "*")]
+        domains: String,
     },
     /// Print the tool list a client sees, as JSON (no services needed beyond startup).
     Tools {
@@ -71,6 +95,10 @@ enum Command {
         /// Skip graph expansion through explicit links.
         #[arg(long)]
         no_graph: bool,
+        /// Also print candidate counts and time per stage. Each result always
+        /// carries its match kind, the note that linked to it, and its signals.
+        #[arg(long)]
+        explain: bool,
     },
     /// Build a bounded evidence pack for a query, like the rag_context tool.
     Context {
@@ -174,6 +202,13 @@ struct EvalArgs {
     /// Exit with an error if recall@k of the default ranking is below this value.
     #[arg(long)]
     min_recall: Option<f64>,
+    /// Exit with an error if one note appears in unrelated results more than
+    /// this many times as often as a uniform pick would (for example 3).
+    #[arg(long)]
+    max_hub_exposure: Option<f64>,
+    /// Exit with an error if any query returns a forbidden (superseded) note.
+    #[arg(long)]
+    no_leaks: bool,
     /// Evaluate another embedding model (for example qwen3-embedding:0.6b) without editing the env file.
     #[arg(long, requires = "embedding_dim")]
     embedding_model: Option<String>,
@@ -201,19 +236,33 @@ async fn main() -> Result<()> {
         // projects, whose own .env files must never configure Kioku.
         dotenvy::from_path_override(".env").context("cannot read ./.env")?;
     }
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
-        )
-        .with_writer(std::io::stderr)
-        .init();
+    init_logging()?;
+    if let Command::Token {
+        subject,
+        scopes,
+        domains,
+    } = &cli.command
+    {
+        let principal = kioku::access::Principal::new(subject, scopes, domains)?;
+        let token = kioku::access::new_token();
+        return emit(&serde_json::to_string_pretty(&json!({
+            "token": token,
+            "access_file_entry": kioku::access::access_entry(&principal, &token),
+            "note": "Shown once. Add the entry to the access file and give the token to the client as `Authorization: Bearer <token>`.",
+        }))?);
+    }
     let config = Config::from_env()?;
     if let Command::Eval(args) = &cli.command {
         return run_eval(config, args).await;
     }
     let app = App::connect(config).await?;
     let output: Value = match cli.command {
-        Command::Serve { tools } => {
+        Command::Serve {
+            tools,
+            http,
+            access_file,
+            allowed_origins,
+        } => {
             let upkeep = app.config.background_upkeep.then(|| {
                 let app = app.clone();
                 tokio::spawn(async move {
@@ -226,15 +275,20 @@ async fn main() -> Result<()> {
                     }
                 })
             });
-            let served = async {
-                MemoryServer::new(app, tools.as_deref())?
-                    .serve(rmcp::transport::stdio())
-                    .await?
-                    .waiting()
-                    .await?;
-                anyhow::Ok(())
-            }
-            .await;
+            let served = match http {
+                Some(addr) => serve_http(app, addr, access_file, tools, allowed_origins).await,
+                None => {
+                    async {
+                        MemoryServer::new(app, tools.as_deref())?
+                            .serve(rmcp::transport::stdio())
+                            .await?
+                            .waiting()
+                            .await?;
+                        anyhow::Ok(())
+                    }
+                    .await
+                }
+            };
             if let Some(task) = upkeep {
                 task.abort();
             }
@@ -250,6 +304,7 @@ async fn main() -> Result<()> {
             limit,
             include_legacy,
             no_graph,
+            explain,
         } => {
             let results = app
                 .search(&SearchRequest {
@@ -262,9 +317,14 @@ async fn main() -> Result<()> {
                     } else {
                         RankOptions::HYBRID_GRAPH
                     },
+                    edges: None,
                 })
                 .await?;
-            json!({"results": results.hits, "warnings": results.warnings})
+            if explain {
+                json!({"results": results.hits, "warnings": results.warnings, "stats": results.stats})
+            } else {
+                json!({"results": results.hits, "warnings": results.warnings})
+            }
         }
         Command::Context {
             query,
@@ -345,7 +405,7 @@ async fn main() -> Result<()> {
                 ),
             })
         }
-        Command::Eval(_) => unreachable!("handled before connecting"),
+        Command::Eval(_) | Command::Token { .. } => unreachable!("handled before connecting"),
     };
     emit(&serde_json::to_string_pretty(&output)?)
 }
@@ -419,5 +479,69 @@ async fn run_eval(mut config: Config, args: &EvalArgs) -> Result<()> {
     if let Some(path) = &args.output {
         std::fs::write(path, serde_json::to_vec_pretty(&report)?)?;
     }
-    eval::check_thresholds(&report, args.min_ndcg, args.min_recall)
+    eval::check_thresholds(
+        &report,
+        eval::Gates {
+            min_ndcg: args.min_ndcg,
+            min_recall: args.min_recall,
+            max_hub_exposure: args.max_hub_exposure,
+            no_leaks: args.no_leaks,
+        },
+    )
+}
+
+/// Logs go to stderr (stdout carries the protocol). `RUST_LOG` filters them;
+/// at `kioku=info` every tool call and search logs a span with its duration.
+/// `MEMORY_LOG_FORMAT=json` emits one JSON object per line.
+fn init_logging() -> Result<()> {
+    use tracing_subscriber::fmt::format::FmtSpan;
+    let filter =
+        tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into());
+    let builder = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_span_events(FmtSpan::CLOSE)
+        .with_writer(std::io::stderr);
+    match std::env::var("MEMORY_LOG_FORMAT").as_deref() {
+        Ok("json") => builder.json().init(),
+        Ok("text") | Err(_) => builder.init(),
+        Ok(other) => anyhow::bail!("MEMORY_LOG_FORMAT must be text or json, got {other:?}"),
+    }
+    Ok(())
+}
+
+#[cfg(feature = "http")]
+async fn serve_http(
+    app: App,
+    addr: std::net::SocketAddr,
+    access_file: Option<PathBuf>,
+    tools: Option<String>,
+    allowed_origins: Vec<String>,
+) -> Result<()> {
+    let path = access_file.context(
+        "serving over HTTP needs an access file (--access-file or MEMORY_ACCESS_FILE); create entries with `kioku token`",
+    )?;
+    let access = kioku::access::AccessFile::load(&path)?;
+    kioku::http::serve(
+        app,
+        kioku::http::HttpOptions {
+            addr,
+            access,
+            tools,
+            allowed_origins,
+        },
+    )
+    .await
+}
+
+#[cfg(not(feature = "http"))]
+async fn serve_http(
+    _app: App,
+    _addr: std::net::SocketAddr,
+    _access_file: Option<PathBuf>,
+    _tools: Option<String>,
+    _allowed_origins: Vec<String>,
+) -> Result<()> {
+    anyhow::bail!(
+        "this build has no HTTP transport; rebuild with `cargo build --release --features http`"
+    )
 }

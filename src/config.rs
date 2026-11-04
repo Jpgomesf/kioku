@@ -5,6 +5,9 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
 
+use crate::access::Principal;
+use crate::trace::TraceContent;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum EmbeddingProvider {
@@ -93,6 +96,15 @@ pub struct Config {
     pub trace_run: Option<String>,
     /// Tools the MCP server lists: `core` (default), `all`, or a comma-separated list.
     pub tools: String,
+    /// Who a stdio server acts for, from `MEMORY_PRINCIPAL`, `MEMORY_SCOPES`, and
+    /// `MEMORY_DOMAINS`. Each MCP client starts its own process, so each client's
+    /// config can grant a different profile.
+    pub principal: Principal,
+    /// How much free text the tool-call trace keeps (`MEMORY_TRACE_CONTENT`).
+    pub trace_content: TraceContent,
+    /// Salt for `MEMORY_TRACE_CONTENT=hashed`. Set `MEMORY_TRACE_SALT` to compare
+    /// hashes across runs; otherwise each process picks its own.
+    pub trace_salt: String,
 }
 
 /// Field order is the serialized order. It must stay alphabetical so the
@@ -171,6 +183,15 @@ impl Config {
             trace_file: optional("MEMORY_TRACE_FILE").map(PathBuf::from),
             trace_run: optional("MEMORY_TRACE_RUN"),
             tools: value("MEMORY_TOOLS", "core"),
+            principal: Principal::new(
+                &value("MEMORY_PRINCIPAL", "local"),
+                &value("MEMORY_SCOPES", "read,write,admin"),
+                &value("MEMORY_DOMAINS", "*"),
+            )
+            .context("invalid MEMORY_PRINCIPAL, MEMORY_SCOPES, or MEMORY_DOMAINS")?,
+            trace_content: TraceContent::parse(&value("MEMORY_TRACE_CONTENT", "full"))?,
+            trace_salt: optional("MEMORY_TRACE_SALT")
+                .unwrap_or_else(|| uuid::Uuid::new_v4().simple().to_string()),
         };
         ensure!(
             (1..=8192).contains(&cfg.embedding_dim),
@@ -187,6 +208,12 @@ impl Config {
         ensure!(
             !cfg.default_domain.trim().is_empty(),
             "MEMORY_DEFAULT_DOMAIN cannot be empty"
+        );
+        ensure!(
+            cfg.principal.allows_domain(&cfg.default_domain),
+            "MEMORY_DEFAULT_DOMAIN {:?} is outside MEMORY_DOMAINS ({}); set it to a domain this profile may use",
+            cfg.default_domain,
+            cfg.principal.describe_domains()
         );
         ensure!(
             cfg.notes_root

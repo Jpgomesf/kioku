@@ -29,8 +29,21 @@ that machine's trust; stdio is not a sandbox.
 - **Configuration is explicit.** Values in the file named by `--env-file` win
   over inherited variables, and `serve` never reads a `.env` from the client's
   working directory, so another project's `DATABASE_URL` cannot redirect it.
-- **Traces contain note text.** `MEMORY_TRACE_FILE` is off by default and
-  created with mode 0600.
+- **Traces contain note text unless told otherwise.** `MEMORY_TRACE_FILE` is off
+  by default and created with mode 0600. `MEMORY_TRACE_CONTENT=redacted` or
+  `hashed` drops queries, titles, and bodies while keeping keys and timing.
+- **Clients can be scoped.** `MEMORY_SCOPES` and `MEMORY_DOMAINS` in a client's
+  MCP config limit that client's process to some tools and domains. The checks
+  run on the server for every call, including through older tool names, and
+  `memory_stats` hides domains outside the profile.
+- **HTTP is opt-in and local.** `serve --http` exists only in builds with the
+  `http` feature, binds only to loopback addresses, and requires a bearer token
+  on every request. Only SHA-256 hashes of tokens are stored, and they are
+  compared in constant time. Host and Origin headers are validated against DNS
+  rebinding, and request bodies are capped at 1 MiB. A request that reaches a
+  tool without an authenticated principal gets a principal with no scopes, so
+  a wiring mistake fails closed. There is no OAuth yet; the transport is meant
+  for one machine.
 
 ## Supply chain
 

@@ -49,6 +49,13 @@ with `scripts/mcp.sh --tools ...`. The list is fixed for the life of the
 server process, as MCP requires. Everything outside `core` is also available
 from the CLI.
 
+To give one client less, set `MEMORY_SCOPES` and `MEMORY_DOMAINS` in that
+client's MCP config, for example a local model that may read and save only in
+`personal-*` domains. Tools outside the scopes disappear from its list, and
+calls on other domains return a `refused` error naming the allowed patterns.
+See [Access control](../README.md#access-control); the same principals apply
+to the optional HTTP transport.
+
 ## Why the surface looks like this
 
 Each rule below addresses a failure seen in real clients or models.

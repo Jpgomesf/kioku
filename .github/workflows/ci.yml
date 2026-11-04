@@ -80,6 +80,10 @@ jobs:
         env:
           CARGO_BUILD_WARNINGS: deny
         run: cargo clippy --all-targets --locked
+      - name: clippy with the HTTP transport
+        env:
+          CARGO_BUILD_WARNINGS: deny
+        run: cargo clippy --all-targets --locked --features http
 
   test:
     name: unit tests
@@ -96,6 +100,7 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo test --locked
+      - run: cargo test --locked --features http
 
   msrv:
     name: MSRV (package.rust-version)
@@ -120,7 +125,7 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: cargo check --locked --all-targets
+      - run: cargo check --locked --all-targets --all-features
 
   deny:
     name: cargo-deny (${{ matrix.checks }})
@@ -154,7 +159,7 @@ jobs:
     # in Ollama's /api/embed format. No 3.4 GB Ollama image and no 274 MB model download, and
     # scores are identical on every run. Retrieval *quality* is measured separately against
     # real nomic-embed-text (make eval / scheduled eval workflow), not here.
-    name: integration (PostgreSQL, Qdrant, stdio MCP)
+    name: integration (PostgreSQL, Qdrant, stdio and HTTP MCP)
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     services:
@@ -210,8 +215,8 @@ jobs:
             exit 1
           fi
           curl -fsS -H "api-key: ${QDRANT_API_KEY}" http://127.0.0.1:6333/collections > /dev/null
-      - name: Build the server
-        run: cargo build --locked
+      - name: Build the server (with the HTTP transport)
+        run: cargo build --locked --features http
       - name: PostgreSQL integration tests (#[ignore]d unit tests; each creates its own database)
         run: cargo test --locked -- --ignored
       - name: End-to-end MCP smoke test over stdio
@@ -235,5 +240,8 @@ jobs:
           EMBEDDING_DIM=256
           EOF
           python3 tests/mcp_smoke.py \
+            --binary "${GITHUB_WORKSPACE}/target/debug/kioku" \
+            --env-file "${RUNNER_TEMP}/smoke.env"
+          python3 tests/http_smoke.py \
             --binary "${GITHUB_WORKSPACE}/target/debug/kioku" \
             --env-file "${RUNNER_TEMP}/smoke.env"

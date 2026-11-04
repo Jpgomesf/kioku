@@ -92,6 +92,8 @@ CRUSH.md
 /evals/private/
 # Server-side tool-call traces (contain queries and note text)
 *.trace.jsonl
+# Harness runs: transcripts, traces, and a 0600 env copy with credentials
+/evals/runs/
 
 # ---------------------------------------------------------------------------
 # Python (tests and tools are stdlib-only)

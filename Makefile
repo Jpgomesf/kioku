@@ -16,18 +16,21 @@ fmt: ## Format the code
 fmt-check:
 	$(CARGO) fmt --check
 
-lint: ## Clippy on all targets with warnings denied
+lint: ## Clippy on all targets, with and without the HTTP transport, warnings denied
 	CARGO_BUILD_WARNINGS=deny $(CARGO) clippy --all-targets --locked
+	CARGO_BUILD_WARNINGS=deny $(CARGO) clippy --all-targets --locked --features http
 
-test: ## Unit tests (no services needed)
+test: ## Unit tests (no services needed), with and without the HTTP transport
 	$(CARGO) test --locked
+	$(CARGO) test --locked --features http
 
 test-db: ## PostgreSQL integration tests; MEMORY_TEST_DATABASE_URL must allow CREATE DATABASE
 	$(CARGO) test --locked -- --ignored
 
-smoke: ## End-to-end MCP checks over stdio; SMOKE_ENV must name test storage
-	$(CARGO) build --locked
+smoke: ## End-to-end MCP checks over stdio and HTTP; SMOKE_ENV must name test storage
+	$(CARGO) build --locked --features http
 	python3 tests/mcp_smoke.py --binary "$(CURDIR)/target/debug/kioku" --env-file "$(SMOKE_ENV)"
+	python3 tests/http_smoke.py --binary "$(CURDIR)/target/debug/kioku" --env-file "$(SMOKE_ENV)"
 
 eval: ## Retrieval quality on the bundled dataset, in isolated storage
 	$(CARGO) run --release --locked -- --env-file "$(ENV_FILE)" eval
