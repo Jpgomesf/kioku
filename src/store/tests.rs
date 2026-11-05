@@ -228,14 +228,14 @@ async fn lifecycle_checks(store: &Store) -> Result<()> {
     );
     assert!(store.neighbor_keys(&[note.id], |_| false).await?.is_empty());
     // Each domain's distinct note locks, without loading the notes.
-    store
+    let sealed = store
         .upsert(&NoteInput {
             key: "sealed".into(),
             lock: vec!["local".into()],
             ..other.clone()
         })
         .await?;
-    let mut locks = store.domain_locks().await?;
+    let mut locks = store.domain_locks(false).await?;
     locks.sort();
     assert_eq!(
         locks,
@@ -245,6 +245,20 @@ async fn lifecycle_checks(store: &Store) -> Result<()> {
             (other.domain.clone(), vec!["local".to_owned()]),
         ]
     );
+    // A retired note counts only when legacy notes are asked for.
+    store
+        .set_retention(sealed.id, 0.1, Status::Legacy, Utc::now())
+        .await?;
+    let mut active = store.domain_locks(false).await?;
+    active.sort();
+    assert_eq!(
+        active,
+        [(domain.clone(), vec![]), (other.domain.clone(), vec![])]
+    );
+    let mut all = store.domain_locks(true).await?;
+    all.sort();
+    assert_eq!(all, locks);
+    store.restore(sealed.id).await?;
     // Concurrent retries must record exactly one event, not merely avoid
     // duplicate rows while incrementing the counter twice.
     let concurrent_id = Uuid::new_v4().to_string();

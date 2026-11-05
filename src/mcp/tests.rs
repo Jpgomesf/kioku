@@ -28,7 +28,7 @@ fn contract(spec: &str) -> Value {
         .into_iter()
         .map(|tool| serde_json::to_value(tool).unwrap())
         .collect();
-    json!({"instructions": instructions_for(&selected), "tools": tools})
+    json!({"instructions": instructions_for(&selected, &Session::Open), "tools": tools})
 }
 
 /// Compare with the committed snapshot; KIOKU_BLESS=1 rewrites it.
@@ -344,8 +344,8 @@ fn suggestions_find_near_misses() {
 
 #[test]
 fn instructions_stay_within_client_limits() {
-    let core = instructions_for(&select_tools("core").unwrap());
-    let all = instructions_for(&select_tools("all").unwrap());
+    let core = instructions_for(&select_tools("core").unwrap(), &Session::Open);
+    let all = instructions_for(&select_tools("all").unwrap(), &Session::Open);
     assert!(
         all.len() < 4096,
         "Claude Code truncates instructions at 4096 characters"
@@ -383,6 +383,68 @@ fn read_scope_matches_read_only_annotations() {
             request.name.as_ref(),
             legacy,
             "{legacy} is upgraded before the scope check"
+        );
+    }
+}
+
+/// With vaults, a search without a domain covers the session's vault or area,
+/// so the policy says to leave the domain out instead of guessing one from
+/// the folder name.
+#[test]
+fn vault_instructions_say_to_search_without_a_domain() {
+    let root = std::env::temp_dir().join(format!("kioku-instructions-{}", std::process::id()));
+    for dir in ["work/web", "work/api/src"] {
+        std::fs::create_dir_all(root.join(dir)).unwrap();
+    }
+    let text = format!(
+        r#"
+        [[vault]]
+        name = "work"
+        paths = ["{0}/work"]
+        domains = ["work", "work/*"]
+        providers = ["anthropic"]
+        default_domain = "work"
+
+        [[area]]
+        domain = "work/api"
+        paths = ["{0}/work/api"]
+        "#,
+        root.display()
+    );
+    let vaults = std::sync::Arc::new(
+        crate::vault::Vaults::parse(&text, std::path::Path::new("/cfg/vaults.toml"), None).unwrap(),
+    );
+    let place =
+        |dir: &str| Session::for_folder(Some(&vaults), Some("anthropic"), Some(&root.join(dir)));
+    let all = select_tools("all").unwrap();
+    let open = instructions_for(&all, &Session::Open);
+    let at_root = instructions_for(&all, &place("work/web"));
+    let in_area = instructions_for(&all, &place("work/api/src"));
+    let refused = instructions_for(&all, &Session::Refused("no vault".into()));
+    std::fs::remove_dir_all(&root).unwrap();
+
+    assert!(open.contains("else the repository folder name") && open.contains("\"local\""));
+    assert!(
+        at_root.contains("call memory_search without a domain: this session is in vault \"work\"")
+            && at_root.contains("every domain of the vault")
+            && at_root.contains("else \"work\".")
+    );
+    assert!(
+        in_area.contains("in area \"work/api\" of vault \"work\"")
+            && in_area.contains("Save with domain \"work/api\".")
+    );
+    assert!(refused.contains("without a domain"));
+    for text in [&at_root, &in_area, &refused] {
+        assert!(!text.contains("repository folder name") && !text.contains("\"local\""));
+        assert!(
+            text.len() < 4096,
+            "Claude Code truncates instructions at 4096 characters"
+        );
+        let head: String = text.chars().take(512).collect();
+        assert!(
+            head.contains("memory_search")
+                && head.contains("memory_get")
+                && head.contains("untrusted")
         );
     }
 }

@@ -102,6 +102,9 @@ Then tell agents which memory domain belongs to each project, in its
 The Kioku memory domain for this project is `my-project`.
 ```
 
+With vaults, skip that line: the instructions name the session's vault
+instead (see [Vaults and locks](#vaults-and-locks)).
+
 The server's instructions carry the usage policy to every client, so no
 client-specific prompt files are needed. [docs/clients.md](docs/clients.md)
 covers more clients, tool profiles, and tuning for small local models.
@@ -375,6 +378,9 @@ the client started Kioku in.
   vault's root they use `default_domain`, and `memory_search` without a domain
   searches every domain of the vault at once. Each result then names its
   domain.
+- The server's instructions name the session's vault, or its area, and tell
+  the agent to search without a domain, so it doesn't guess one from the
+  folder name. A project's `AGENTS.md` needs no domain line.
 - A session that no vault covers gets no memories. Every tool returns a
   `refused` error that names its folder and the vaults file.
 
@@ -399,7 +405,8 @@ lock in frontmatter (`lock: local`, or `lock: [local, anthropic]`);
   candidates.
 - Domain lists (a vault-wide search's `domains`, the hint when a domain has
   no memories, `memory_stats`) name only domains that hold a note the session
-  may see.
+  may see. A vault-wide search also leaves out domains whose notes are all
+  retired, unless it sets `include_legacy`.
 - `memory_save` and `memory_import` may write only to visible domains.
 - `memory_import` reads only files whose frontmatter names their `domain`.
   One notes folder serves every vault, so a file without one could belong to
@@ -451,7 +458,7 @@ never retires them: only `kioku maintenance` or `memory_maintenance` with
 ```sh
 make check   # fmt, clippy with warnings denied, unit and contract tests
 make test-db # PostgreSQL tests (history, aging, store); MEMORY_TEST_DATABASE_URL must allow CREATE DATABASE
-make smoke   # 125 checks over stdio and 20 over HTTP; SMOKE_ENV must name test storage
+make smoke   # 143 checks over stdio and 20 over HTTP; SMOKE_ENV must name test storage
 make eval    # retrieval quality in isolated storage
 ```
 

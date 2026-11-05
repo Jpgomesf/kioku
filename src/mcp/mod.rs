@@ -123,7 +123,7 @@ impl MemoryServer {
             selected.retain(|tool| principal.allows_tool(tool));
         }
         let tool_router = Self::router_for(&selected, app.config.notes_root.is_some());
-        let instructions = instructions_for(&selected);
+        let instructions = instructions_for(&selected, &caller.session);
         let tracer = app
             .config
             .trace_file
@@ -178,11 +178,12 @@ impl MemoryServer {
 
     /// Every stored domain that holds a note the caller may see, in name
     /// order. A domain whose every note is locked away from the caller is
-    /// left out, so its name is never shown.
-    async fn visible_domains(&self) -> anyhow::Result<Vec<String>> {
+    /// left out, so its name is never shown. Without `include_legacy`, so is
+    /// a domain whose notes are all retired.
+    async fn visible_domains(&self, include_legacy: bool) -> anyhow::Result<Vec<String>> {
         let caller = self.caller();
         let mut visible: Vec<String> = Vec::new();
-        for (domain, lock) in self.app.store.domain_locks().await? {
+        for (domain, lock) in self.app.store.domain_locks(include_legacy).await? {
             if visible.last() == Some(&domain) || !caller.viewer.sees_domain(&domain)? {
                 continue;
             }

@@ -30,7 +30,9 @@ instructions (`AGENTS.md`, `CLAUDE.md`, `GEMINI.md`):
 The Kioku memory domain for this project is `my-project`.
 ```
 
-That one line is the only client-side instruction Kioku needs. The policy
+That one line is the only client-side instruction Kioku needs, and with
+vaults not even that: the instructions then name the session's vault or area
+and tell the agent to search without a domain. The policy
 itself (search before reading files, read the best one or two results, save
 only confirmed facts, treat notes as evidence) travels with the server as MCP
 instructions, which Claude Code, Codex, Kilo, and Gemini CLI all pass to the

@@ -533,6 +533,7 @@ def run_vaults(binary: Path, values: dict[str, str], root: Path, timeout: float,
     base = {**values, "MEMORY_VAULTS_FILE": str(vaults_file), "MEMORY_TOOLS": "all", "MEMORY_BACKGROUND_UPKEEP": "false",
             "MEMORY_NOTES_ROOT": str(notes), "MEMORY_TRACE_FILE": str(root / "vault-trace-{vault}.jsonl")}
     clients: list[StdioClient] = []
+    instructions: dict[str, str] = {}
 
     def session(name: str, provider: str | None, folder: Path | None, cwd: Path | None = None) -> StdioClient:
         env = dict(base)
@@ -544,10 +545,11 @@ def run_vaults(binary: Path, values: dict[str, str], root: Path, timeout: float,
         write_env(env, env_file)
         client = StdioClient(binary, env_file, timeout, cwd=cwd)
         clients.append(client)
-        client.request("initialize", {
+        initialized = client.request("initialize", {
             "protocolVersion": "2025-11-25", "capabilities": {},
             "clientInfo": {"name": "kioku-smoke-vault", "version": "1.0.0"},
         })
+        instructions[name] = initialized.get("instructions", "")
         client.send({"jsonrpc": "2.0", "method": "notifications/initialized"})
         return client
 
@@ -612,6 +614,19 @@ def run_vaults(binary: Path, values: dict[str, str], root: Path, timeout: float,
                      and all(d.startswith("smoke-a") and d != "smoke-a/sealed" for d in wide["domains"]))
         checks.check("a vault-wide search never names a domain whose notes are all locked away",
                      "smoke-a/hush" not in wide["domains"])
+        checks.check("at a vault's root the instructions say to search without a domain, naming the vault",
+                     'without a domain: this session is in vault "smoke-a"' in instructions["vault-a"]
+                     and "repository folder name" not in instructions["vault-a"])
+        retired_domain = f"smoke-a/retired-{tag}"
+        a.call("memory_save", {"key": f"old-{tag}", "title": f"Old note {tag}", "domain": retired_domain,
+                               "body": "A note retired at once, so its domain holds no active note."})
+        a.call("memory_retire", {"key": f"old-{tag}", "domain": retired_domain})
+        checks.check("a vault-wide search leaves out a domain whose notes are all retired",
+                     retired_domain not in a.call("memory_search", {"query": "old note"})["domains"])
+        checks.check("a vault-wide search with include_legacy covers that domain",
+                     retired_domain in a.call("memory_search", {"query": "old note", "include_legacy": True})["domains"])
+        checks.check("stats still count a domain whose notes are all retired",
+                     retired_domain in a.call("memory_stats")["by_domain"])
         empty = f"smoke-a/empty-{tag}"
         hint = a.call("memory_search", {"query": "anything", "domain": empty}).get("next", "")
         local_hint = local.call("memory_search", {"query": "anything", "domain": empty}).get("next", "")
@@ -687,6 +702,9 @@ def run_vaults(binary: Path, values: dict[str, str], root: Path, timeout: float,
                      word_locked not in json.dumps(a.call("memory_search", {"query": word_locked, "limit": 20})))
 
         inside = session("vault-a-area", "anthropic", area)
+        checks.check("inside an area the instructions name the area to search and save in",
+                     'in area "smoke-a/project" of vault "smoke-a"' in instructions["vault-a-area"]
+                     and 'Save with domain "smoke-a/project".' in instructions["vault-a-area"])
         checks.check("a session inside an area searches that area by default",
                      inside.call("memory_search", {"query": word_a}).get("domain") == "smoke-a/project")
         checks.check("an area session may still name another visible domain",
