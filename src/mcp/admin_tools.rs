@@ -139,6 +139,8 @@ impl MemoryServer {
                 "truncated": report.truncated,
                 "unresolved_related": report.unresolved_relationships.iter().take(20).map(|u| json!({"ref": u.reference, "reason": u.reason})).collect::<Vec<_>>(),
                 "unresolved_count": report.unresolved_count,
+                "failed": report.failed.iter().take(20).collect::<Vec<_>>(),
+                "failed_count": report.failed.len(),
             })),
             Err(error) => error_text(render_error("memory_import", &error)),
         }

@@ -412,6 +412,17 @@ def run(client: StdioClient, checks: Checks, notes_root: Path, hydration_key: st
     total = client.call("memory_stats")["total"]
     checks.check("import rejects frontmatter for another domain", client.call_raw("memory_import", {"path": "wrong-domain.md", "domain": domain})[2])
     checks.check("a rejected import writes nothing", client.call("memory_stats")["total"] == total)
+    mixed = notes_root / "mixed"
+    mixed.mkdir()
+    mixed_key = hydration_key + "-mixed"
+    (mixed / "good.md").write_text(
+        "---\nkey: " + mixed_key + "\ndomain: " + domain + "\ntitle: Mixed import survivor\n---\n"
+        "A valid note imports even when a sibling file is broken.\n", encoding="utf-8")
+    (mixed / "broken.md").write_text("---\nkey: [unclosed\n---\nBroken frontmatter.\n", encoding="utf-8")
+    partial = client.call("memory_import", {"path": "mixed", "domain": domain})
+    checks.check("a mixed import imports the good file and lists the bad one",
+                 partial["imported"] == 1 and [n["key"] for n in partial["notes"]] == [mixed_key]
+                 and [f["path"] for f in partial["failed"]] == ["mixed/broken.md"])
 
     legacy_search = client.call("rag_search", {"query": "checkout-memory-smoke", "domain_filter": domain, "limit": 3})
     checks.check("older tool and argument names still work", checkout["key"] in keys(legacy_search["results"]))

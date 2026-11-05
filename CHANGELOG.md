@@ -37,6 +37,12 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- Imports skip the files they can't import (unreadable, invalid frontmatter
+  or content, another domain, a duplicate or owned key, too long to embed)
+  and list them under `failed` with a reason and a path relative to the import
+  root; the other files import as before. An import in which every file fails
+  is still an `invalid_argument` error that writes nothing. Ownership is now
+  checked for every file before any is written.
 - Background upkeep no longer retires notes. It still repairs the index
   daily, but only logs the notes whose retention fell below
   `MEMORY_LEGACY_THRESHOLD`; `kioku maintenance` and `memory_maintenance` with

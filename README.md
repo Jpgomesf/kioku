@@ -138,9 +138,13 @@ It replaces the retired batch-worker.
 - Import with `memory_import` (paths stay inside `MEMORY_NOTES_ROOT`) or
   `kioku ingest --path DIR --domain DOMAIN`. A file's path is its provenance;
   agents can't overwrite file-backed notes through `memory_save`.
+- A file that can't be imported (unreadable, bad frontmatter, another domain,
+  a key another file or source owns, too long to embed) is skipped and listed
+  under `failed` with the reason; the other files import. Only when every
+  file fails is the import an error, and then nothing is written.
 - Each note must fit the embedding model's context window (about 6 KB of
-  English text for `nomic-embed-text`); longer notes are rejected before
-  anything is saved, with a request to split them.
+  English text for `nomic-embed-text`); `memory_save` rejects a longer note
+  before anything is saved, with a request to split it.
 
 ## How retrieval works
 
@@ -265,7 +269,7 @@ only `kioku maintenance` or `memory_maintenance` with `dry_run: false` does.
 
 ```sh
 make check   # fmt, clippy with warnings denied, unit and contract tests
-make smoke   # 73 checks over stdio and 15 over HTTP; SMOKE_ENV must name test storage
+make smoke   # 74 checks over stdio and 15 over HTTP; SMOKE_ENV must name test storage
 make eval    # retrieval quality in isolated storage
 ```
 
