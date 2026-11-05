@@ -57,6 +57,25 @@ never evaluates it as shell code. The services bind to 127.0.0.1 only:
 `make stop` stops them and keeps the volumes. Back up PostgreSQL together with
 your notes; the Qdrant index is derived data that `kioku repair --all` rebuilds.
 
+### Embeddings on the Apple GPU
+
+Docker on macOS can't use the GPU, so the bundled Ollama container embeds on
+the CPU. That's fine for everyday saves, but importing thousands of notes keeps
+every core busy for minutes. An Ollama installed on the Mac itself runs on the
+GPU:
+
+```sh
+brew install ollama && brew services start ollama
+# in .env:
+EMBEDDING_URL=http://127.0.0.1:11434
+make start               # now starts only PostgreSQL and Qdrant, and pulls the model natively
+make stop-docker-ollama  # the container is no longer used
+```
+
+`ollama ps` should show `100% GPU`. The vector index stays valid: it depends
+on the model and prompts, not on where they run, and the same model gives the
+same vectors (cosine similarity above 0.9999 between the two runtimes).
+
 ## Connect a client
 
 Every client launches [`scripts/mcp.sh`](scripts/mcp.sh), which runs
@@ -153,6 +172,45 @@ It replaces the retired batch-worker.
 - Each note must fit the embedding model's context window (about 6 KB of
   English text for `nomic-embed-text`); `memory_save` rejects a longer note
   before anything is saved, with a request to split it.
+
+### Open Knowledge Format bundles
+
+`kioku ingest` reads an [Open Knowledge Format](https://github.com/GoogleCloudPlatform/open-knowledge-format)
+(OKF v0.2) bundle as it is, with no converted copy. A folder whose `index.md`
+declares `okf_version` is read as a bundle (`--format okf` forces it):
+
+```sh
+kioku ingest --path ~/work/company-kb --domain company/kb
+```
+
+- **Keys.** Each concept becomes a note keyed by its concept ID, the file's
+  path in the bundle without `.md` (`kb/decisions/DEC-350-links`). A
+  producer `id` and `aliases` become aliases, so `memory_get DEC-350` works.
+  The source is the concept's own file, so a re-import after `git pull`
+  re-embeds only what changed.
+- **Links.** Bundle-relative (`/kb/x.md`) and relative links become `related`
+  links. In the stored text a link keeps its words, plus the target's id when
+  they lack it. A list item that is only links becomes a list of ids. Links to
+  concepts the bundle lacks are kept as words and counted, as the spec asks.
+  `index.md` and `log.md` are skipped: the graph replaces them.
+- **Long concepts.** A concept over 4,000 bytes becomes a hub note and one note
+  per section, keyed `<concept ID>#<anchor>` with GitHub's heading anchor, so
+  a link to `/kb/architecture.md#router` reaches the section about the router.
+  Sections split at their headings, then by paragraph and table row (tables
+  keep their header).
+- **Facts line.** Every note opens with the concept's type and id, its
+  lifecycle, the trust tier `verified` gives (unverified, machine-confirmed,
+  human-reviewed), `stale_after`, the producer's other plain fields (a
+  decision's status and who made it, say), who wrote it, and its `resource`.
+  Trust also sets the note's confidence. Profile fields need no setup in
+  Kioku.
+- **Lifecycle.** The bundle decides: concepts with `status: deprecated` are
+  legacy notes, the rest are active, and a note whose concept or section left
+  the bundle is retired, never deleted. The report's `okf` part counts what
+  was read, retired, restored, and removed.
+- A bundle names no domain of its own, so only the command line imports one;
+  `memory_import` on a bundle explains how. A `lock` in a concept's
+  frontmatter works as in any note.
 
 ## How retrieval works
 
