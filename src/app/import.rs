@@ -24,6 +24,7 @@ use crate::error::{UserError, invalid, not_found};
 use crate::graph::{self, UnresolvedRelation};
 use crate::markdown;
 use crate::model::{NoteInput, Status};
+use crate::okf;
 use crate::vault::Viewer;
 
 use super::write::{WriteOrigin, check_ownership};
@@ -88,6 +89,34 @@ pub struct ImportReport {
     /// Skipped files whose notes the viewer may not see, left out of `failed`.
     #[serde(skip)]
     pub hidden_failures: usize,
+    /// What an OKF bundle import read and changed; absent for Markdown notes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub okf: Option<OkfImport>,
+}
+
+/// How an import reads its path.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ImportFormat {
+    /// An OKF bundle when the folder's `index.md` declares `okf_version`,
+    /// focused Markdown notes otherwise.
+    #[default]
+    Auto,
+    Markdown,
+    /// An OKF bundle, even one whose `index.md` declares no version.
+    Okf,
+}
+
+/// The OKF part of an import report.
+#[derive(Clone, Debug, Serialize)]
+pub struct OkfImport {
+    #[serde(flatten)]
+    pub read: okf::Summary,
+    /// Notes made legacy because their concept is deprecated.
+    pub retired: usize,
+    /// Legacy notes made active again because their concept no longer is.
+    pub restored: usize,
+    /// Notes made legacy because their concept or section left the bundle.
+    pub removed: usize,
 }
 
 impl ImportReport {
@@ -126,7 +155,128 @@ struct MarkdownTree {
 
 impl App {
     pub async fn ingest(&self, root: &Path, domain: &str) -> Result<ImportReport> {
-        self.ingest_scoped(root, domain, false, None, None).await
+        self.ingest_as(root, domain, ImportFormat::Auto).await
+    }
+
+    /// Import `root` as `format` says. Only the command line imports OKF
+    /// bundles: they carry no domain of their own.
+    pub async fn ingest_as(
+        &self,
+        root: &Path,
+        domain: &str,
+        format: ImportFormat,
+    ) -> Result<ImportReport> {
+        let bundle = match format {
+            ImportFormat::Okf => true,
+            ImportFormat::Markdown => false,
+            ImportFormat::Auto => {
+                let dir = root.to_path_buf();
+                tokio::task::spawn_blocking(move || okf::bundle_version(&dir))
+                    .await
+                    .context("note import task failed")??
+                    .is_some()
+            }
+        };
+        if bundle {
+            self.ingest_okf(root, domain).await
+        } else {
+            self.ingest_scoped(root, domain, false, None, None).await
+        }
+    }
+
+    /// Import an OKF bundle into `domain`, then bring each note's lifecycle
+    /// in line with the bundle: deprecated concepts are legacy, others active,
+    /// and notes whose concept or section left the bundle are retired.
+    async fn ingest_okf(&self, root: &Path, domain: &str) -> Result<ImportReport> {
+        let dir = root.to_path_buf();
+        let owned_domain = domain.to_owned();
+        let (bundle, conversion) = tokio::task::spawn_blocking(move || -> Result<_> {
+            let bundle = okf::Bundle::read(&dir)?;
+            let conversion = okf::convert(&bundle, &owned_domain);
+            Ok((bundle, conversion))
+        })
+        .await
+        .context("bundle import task failed")??;
+        if bundle.paths().next().is_none() {
+            not_found!("no OKF concepts found there");
+        }
+        let mut failed: Vec<ImportFailure> = conversion
+            .failed
+            .iter()
+            .map(|(path, reason)| ImportFailure::new(path.clone(), reason.clone(), false))
+            .collect();
+        let failed_files: HashSet<String> = conversion
+            .failed
+            .into_iter()
+            .map(|(path, _)| path)
+            .collect();
+        let made: HashSet<String> = conversion
+            .notes
+            .iter()
+            .map(|n| n.input.key.clone())
+            .collect();
+        let deprecated: HashMap<String, bool> = conversion
+            .notes
+            .iter()
+            .map(|n| (n.input.key.clone(), n.deprecated))
+            .collect();
+        let mut candidates = Vec::with_capacity(conversion.notes.len());
+        for note in conversion.notes {
+            match note.input.validate() {
+                Ok(()) => candidates.push(Candidate {
+                    path: note.path,
+                    input: note.input,
+                }),
+                Err(error) => {
+                    failed.push(ImportFailure::new(note.path, format!("{error:#}"), false))
+                }
+            }
+        }
+        let mut report = self.import_candidates(candidates, failed, None).await?;
+
+        let mut okf_report = OkfImport {
+            read: conversion.summary,
+            retired: 0,
+            restored: 0,
+            removed: 0,
+        };
+        for note in &mut report.notes {
+            let legacy = deprecated.get(&note.key).copied().unwrap_or(false);
+            match (legacy, note.status) {
+                (true, Status::Active) => okf_report.retired += 1,
+                (false, Status::Legacy) => okf_report.restored += 1,
+                _ => continue,
+            }
+            self.set_legacy(note.id, legacy, Some(domain)).await?;
+            note.status = if legacy {
+                Status::Legacy
+            } else {
+                Status::Active
+            };
+        }
+        let prefix = format!("{}/", bundle.root.to_string_lossy());
+        let present: HashSet<&str> = bundle.paths().collect();
+        for note in self.store.notes(Some(domain), true).await? {
+            let Some(file) = note
+                .input
+                .source
+                .as_deref()
+                .and_then(|source| source.strip_prefix(&prefix))
+                .map(|rest| rest.split_once('#').map_or(rest, |(file, _)| file))
+            else {
+                continue;
+            };
+            let gone = !present.contains(file)
+                || (!failed_files.contains(file) && !made.contains(&note.input.key));
+            if gone && note.status == Status::Active {
+                self.set_legacy(note.id, true, Some(domain)).await?;
+                okf_report.removed += 1;
+            }
+        }
+        report.okf = Some(okf_report);
+        report.truncated = report.notes.len() > 20;
+        report.notes.truncate(20);
+        Ok(report)
     }
 
     /// Import every Markdown file under `root`. With `strict_domain`, files
@@ -150,8 +300,19 @@ impl App {
             not_found!("no Markdown notes found there");
         }
         let base = base.map_or(tree.base, Path::to_path_buf);
-        let (candidates, mut failed) = prepare(tree.files, &base, domain, strict_domain, viewer);
+        let (candidates, failed) = prepare(tree.files, &base, domain, strict_domain, viewer);
+        self.import_candidates(candidates, failed, viewer).await
+    }
 
+    /// Write `candidates`, valid notes in import order, adding to `failed`
+    /// those that can't be owned or embedded. With a viewer, the report names
+    /// only notes it may see.
+    async fn import_candidates(
+        &self,
+        candidates: Vec<Candidate>,
+        mut failed: Vec<ImportFailure>,
+        viewer: Option<&Viewer>,
+    ) -> Result<ImportReport> {
         // Check ownership and embed changed notes before writing anything.
         let mut owned = Vec::with_capacity(candidates.len());
         let mut changed = Vec::new();
@@ -274,6 +435,7 @@ impl App {
             unresolved_count,
             failed,
             hidden_failures,
+            okf: None,
         })
     }
 
@@ -312,6 +474,12 @@ impl App {
         if !selected.starts_with(&root) {
             invalid!(
                 "path {:?} resolves outside the notes folder",
+                relative.display().to_string()
+            );
+        }
+        if okf::bundle_version(&selected)?.is_some() {
+            invalid!(
+                "{:?} is an OKF bundle; import it from the command line, which names its domain: kioku ingest --path <bundle> --domain <domain>",
                 relative.display().to_string()
             );
         }
@@ -709,6 +877,7 @@ mod tests {
             unresolved_count: 0,
             failed: Vec::new(),
             hidden_failures,
+            okf: None,
         };
         assert_eq!(report(0).unnamed_failures(), None);
         let hint = report(2).unnamed_failures().unwrap();

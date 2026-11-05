@@ -13,6 +13,7 @@ pub mod lifecycle;
 pub mod markdown;
 pub mod mcp;
 pub mod model;
+pub mod okf;
 pub mod rank;
 pub mod secrets;
 pub mod store;

@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, ensure};
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use kioku::app::{App, ContextRequest, SearchRequest};
+use kioku::app::{App, ContextRequest, ImportFormat, SearchRequest};
 use kioku::config::Config;
 use kioku::eval::{self, EvalOptions};
 use kioku::mcp::MemoryServer;
@@ -82,13 +82,19 @@ enum Command {
         #[arg(long)]
         domain: Option<String>,
     },
-    /// Import focused Markdown notes with YAML frontmatter. Repeated input is idempotent.
+    /// Import focused Markdown notes with YAML frontmatter, or an Open Knowledge
+    /// Format (OKF) bundle. Repeated input is idempotent.
     Ingest {
         #[arg(long)]
         path: PathBuf,
-        /// Domain for notes without one in their frontmatter; defaults to MEMORY_DEFAULT_DOMAIN.
+        /// Domain for notes without one in their frontmatter, and for every
+        /// concept of an OKF bundle; defaults to MEMORY_DEFAULT_DOMAIN.
         #[arg(long)]
         domain: Option<String>,
+        /// auto reads a folder whose index.md declares okf_version as an OKF
+        /// bundle, and anything else as Markdown notes.
+        #[arg(long, value_enum, default_value_t = NotesFormat::Auto)]
+        format: NotesFormat,
     },
     /// Rank memories for a query.
     Search {
@@ -231,6 +237,14 @@ enum Format {
     Json,
 }
 
+/// How `kioku ingest` reads its path.
+#[derive(Clone, Copy, ValueEnum)]
+enum NotesFormat {
+    Auto,
+    Markdown,
+    Okf,
+}
+
 /// Variables each MCP client sets for itself. Values in `--env-file` win over
 /// inherited ones, so setting these there would give every client the same.
 const PER_CLIENT: [&str; 2] = ["MEMORY_PROVIDER", "KIOKU_SESSION_DIR"];
@@ -323,9 +337,18 @@ async fn main() -> Result<()> {
             }
             return served;
         }
-        Command::Ingest { path, domain } => {
+        Command::Ingest {
+            path,
+            domain,
+            format,
+        } => {
             let domain = domain.unwrap_or_else(|| app.config.default_domain.clone());
-            serde_json::to_value(app.ingest(&path, &domain).await?)?
+            let format = match format {
+                NotesFormat::Auto => ImportFormat::Auto,
+                NotesFormat::Markdown => ImportFormat::Markdown,
+                NotesFormat::Okf => ImportFormat::Okf,
+            };
+            serde_json::to_value(app.ingest_as(&path, &domain, format).await?)?
         }
         Command::Search {
             query,

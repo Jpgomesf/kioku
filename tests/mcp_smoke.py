@@ -719,6 +719,97 @@ def run_vaults(binary: Path, values: dict[str, str], root: Path, timeout: float,
                  all(canary_b not in r["result_keys"] and canary_b_id not in r["result_ids"] for r in traces["smoke-a"]))
 
 
+def okf_concept(kind: str, producer_id: str, title: str, body: str, status: str = "stable") -> str:
+    return (f"---\ntype: {kind}\nid: {producer_id}\ntitle: {title}\nstatus: {status}\n"
+            f"generated: {{ by: \"human:smoke\", at: 2026-11-04T10:00:00-03:00 }}\n---\n{body}\n")
+
+
+def run_okf(binary: Path, values: dict[str, str], root: Path, timeout: float, checks: Checks) -> None:
+    """An OKF bundle imported from the command line: concepts keyed by concept
+    ID and found by their ids, links in the graph, long concepts split, and a
+    re-import that follows the bundle's lifecycle changes."""
+    domain = "smoke-okf"
+    notes = Path(values["MEMORY_NOTES_ROOT"])
+    bundle = notes / "okf-bundle"
+    kb = bundle / "kb"
+    (kb / "decisions").mkdir(parents=True)
+    (kb / "questions").mkdir()
+    word = "OKFWORD" + uuid.uuid4().hex[:8].upper()
+    (bundle / "index.md").write_text("---\nokf_version: \"0.2\"\n---\n# Knowledge bases\n\n* [KB](/kb/) - smoke\n", encoding="utf-8")
+    (bundle / "log.md").write_text("# Log\n\n## 2026-11-04\n* **Creation**: smoke bundle\n", encoding="utf-8")
+    (kb / "decisions" / "DEC-1-current.md").write_text(okf_concept(
+        "Decision", "DEC-1", "The current smoke decision",
+        "# Decision\nThe smoke pipeline replays dead letters by hand. It replaces [DEC-0](/kb/decisions/DEC-0-old.md)."), encoding="utf-8")
+    (kb / "decisions" / "DEC-0-old.md").write_text(okf_concept(
+        "Decision", "DEC-0", "The old smoke decision", "# Decision\nDead letters were dropped.", "deprecated"), encoding="utf-8")
+    (kb / "questions" / "Q-1.md").write_text(okf_concept(
+        "Question", "Q-1", "Who replays dead letters", "Who replays them? See [the rule](../decisions/DEC-1-current.md) and [nothing](/kb/missing.md)."),
+        encoding="utf-8")
+    sections = "".join(
+        f"## Part {n}\n\n" + f"Part {n} of the architecture explains one rule of the smoke pipeline at length. " * 18 + "\n\n"
+        for n in range(1, 5))
+    (kb / "architecture.md").write_text(okf_concept(
+        "Architecture", "ARCH", "Smoke architecture",
+        f"# Parts\n\n{sections}## Replay\n\nThe replay tool is called {word}; it follows [DEC-1](/kb/decisions/DEC-1-current.md).\n"),
+        encoding="utf-8")
+
+    env_file = root / "okf.env"
+    write_env({**values, "MEMORY_TOOLS": "all", "MEMORY_BACKGROUND_UPKEEP": "false"}, env_file)
+    cli_env = {key: value for key, value in os.environ.items() if key not in CONFIG_ENV}
+    cli_env["RUST_LOG"] = "error"
+
+    def ingest() -> dict:
+        done = subprocess.run([str(binary), "--env-file", str(env_file), "ingest", "--path", str(bundle), "--domain", domain],
+                              capture_output=True, env=cli_env, timeout=timeout, check=False)
+        if done.returncode != 0:
+            raise SmokeFailure(f"kioku ingest of an OKF bundle exited with {done.returncode}")
+        return json.loads(done.stdout)
+
+    first = ingest()
+    read = first.get("okf", {})
+    checks.check("an OKF bundle is recognized by its index.md and every concept imports",
+                 read.get("okf_version") == "0.2" and read.get("concepts") == 4 and not first["failed"])
+    checks.check("a long concept is split into a hub and sections", read.get("split") == 1 and read.get("sections", 0) >= 2)
+    checks.check("links reach concepts, and a link to a missing concept is tolerated",
+                 read.get("links") == 3 and read.get("broken_links") == 1 and first["unresolved_count"] == 0)
+
+    client = StdioClient(binary, env_file, timeout)
+    try:
+        client.request("initialize", {"protocolVersion": "2025-11-25", "capabilities": {},
+                                      "clientInfo": {"name": "kioku-smoke-okf", "version": "1.0.0"}})
+        client.send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+        by_id = client.call("memory_get", {"keys": ["DEC-1"], "domain": domain})["memories"]
+        checks.check("a concept is keyed by its concept ID and found by its producer id",
+                     len(by_id) == 1 and by_id[0]["key"] == "kb/decisions/DEC-1-current")
+        checks.check("its note opens with the facts line and links the active concepts around it",
+                     by_id[0]["text"].startswith("Decision DEC-1 · unverified")
+                     and {"kb/questions/Q-1", "kb/architecture#replay"} <= set(by_id[0].get("links", [])))
+        checks.check("its source is the concept's own file in the bundle",
+                     str(by_id[0].get("source", "")).endswith("okf-bundle/kb/decisions/DEC-1-current.md"))
+        found = client.call("memory_search", {"query": word, "domain": domain})["results"]
+        checks.check("search finds the section that holds a fact, keyed by its anchor",
+                     bool(found) and found[0]["key"] == "kb/architecture#replay")
+        status = lambda key: client.call("memory_inspect", {"key": key, "domain": domain})["status"]
+        checks.check("a deprecated concept's note is legacy", status("kb/decisions/DEC-0-old") == "legacy")
+        _, text, error = client.call_raw("memory_import", {"path": "okf-bundle", "domain": domain})
+        checks.check("memory_import refuses an OKF bundle and points to kioku ingest",
+                     error and "OKF bundle" in text and "kioku ingest" in text)
+
+        (kb / "questions" / "Q-1.md").unlink()
+        for name, old, new in (("DEC-0-old.md", "status: deprecated", "status: stable"),
+                               ("DEC-1-current.md", "status: stable", "status: deprecated")):
+            path = kb / "decisions" / name
+            path.write_text(path.read_text(encoding="utf-8").replace(old, new), encoding="utf-8")
+        second = ingest().get("okf", {})
+        checks.check("a re-import follows the bundle: one restored, one retired, one removed",
+                     (second.get("restored"), second.get("retired"), second.get("removed")) == (1, 1, 1))
+        checks.check("the statuses match the bundle after the re-import",
+                     (status("kb/decisions/DEC-0-old"), status("kb/decisions/DEC-1-current"), status("kb/questions/Q-1"))
+                     == ("active", "legacy", "legacy"))
+    finally:
+        client.close()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path, required=True)
@@ -784,6 +875,7 @@ def main() -> int:
                      "MEMORY_TRACE_CONTENT", "MEMORY_TRACE_FILE"):
             values.pop(name, None)
         run_vaults(binary, values, fixture_root, args.timeout, checks)
+        run_okf(binary, values, fixture_root, args.timeout, checks)
     except (SmokeFailure, OSError, KeyError, TypeError, ValueError, IndexError) as error:
         # Never print arbitrary exceptions or server payloads; they can hold connection strings.
         message = str(error) if isinstance(error, SmokeFailure) else type(error).__name__

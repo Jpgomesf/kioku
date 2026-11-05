@@ -284,11 +284,7 @@ fn parse(text_in: &str, source: &str, default_domain: Option<&str>) -> Result<No
                 serde_saphyr::options! { strict_booleans: true },
             )
             .context("invalid YAML frontmatter (quote [[wiki links]] inside lists, for example related: ['[[Note]]'])")?;
-            if let Some(key) = misspelled_lock(yaml) {
-                bail!(
-                    "frontmatter key {key:?} is not read; write it as `lock` (lowercase) to limit which models may read this note, or rename it"
-                );
-            }
+            reject_misspelled_lock(yaml)?;
             meta
         }
         _ => Frontmatter::default(),
@@ -300,18 +296,7 @@ fn parse(text_in: &str, source: &str, default_domain: Option<&str>) -> Result<No
             "the frontmatter names no domain; with vaults, every imported file must say which domain it belongs to (domain: ...)"
         ),
     };
-    let lock = match meta.lock {
-        None => Vec::new(),
-        Some(providers) => {
-            let lock = list(Some(providers));
-            ensure!(
-                !lock.is_empty(),
-                "lock lists no providers; list at least one ({}), or remove the key",
-                Provider::names()
-            );
-            deduplicate_strings(lock.into_iter().map(|p| p.to_lowercase()).collect())
-        }
-    };
+    let lock = lock_providers(meta.lock)?;
 
     let fallback_key = Path::new(source)
         .file_stem()
@@ -343,8 +328,55 @@ fn parse(text_in: &str, source: &str, default_domain: Option<&str>) -> Result<No
     Ok(note)
 }
 
+/// The providers a frontmatter `lock` lists, lowercased. A `lock` key that
+/// lists none is an error, never "no lock".
+fn lock_providers(lock: Option<OneOrMany>) -> Result<Vec<String>> {
+    let Some(providers) = lock else {
+        return Ok(Vec::new());
+    };
+    let lock = list(Some(providers));
+    ensure!(
+        !lock.is_empty(),
+        "lock lists no providers; list at least one ({}), or remove the key",
+        Provider::names()
+    );
+    Ok(deduplicate_strings(
+        lock.into_iter().map(|p| p.to_lowercase()).collect(),
+    ))
+}
+
+fn reject_misspelled_lock(yaml: &str) -> Result<()> {
+    if let Some(key) = misspelled_lock(yaml) {
+        bail!(
+            "frontmatter key {key:?} is not read; write it as `lock` (lowercase) to limit which models may read this note, or rename it"
+        );
+    }
+    Ok(())
+}
+
+/// The `lock` of a frontmatter block written in another note format (an OKF
+/// concept), under the same fail-closed rules as a Markdown note.
+pub(crate) fn frontmatter_lock(yaml: &str) -> Result<Vec<String>> {
+    #[derive(Default, Deserialize)]
+    #[serde(default)]
+    struct LockOnly {
+        #[serde(deserialize_with = "present")]
+        lock: Option<OneOrMany>,
+    }
+    let meta: LockOnly =
+        serde_saphyr::from_str_with_options(yaml, serde_saphyr::options! { strict_booleans: true })
+            .context("invalid YAML frontmatter")?;
+    reject_misspelled_lock(yaml)?;
+    lock_providers(meta.lock)
+}
+
+/// Split `---` frontmatter from a note's text, for readers of other formats.
+pub(crate) fn frontmatter(text: &str) -> Result<(Option<&str>, &str)> {
+    split_frontmatter(text)
+}
+
 /// The first `# ` heading outside fenced code blocks.
-fn first_heading(body: &str) -> Option<String> {
+pub(crate) fn first_heading(body: &str) -> Option<String> {
     let mut fence: Option<&str> = None;
     for line in body.lines() {
         let trimmed = line.trim_start();
