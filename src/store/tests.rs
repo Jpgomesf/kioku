@@ -1,48 +1,5 @@
 use super::*;
-
-/// A database created for one test run and dropped afterwards, so tests
-/// never touch data they did not create.
-struct ScratchDatabase {
-    admin_url: String,
-    name: String,
-    url: String,
-}
-
-impl ScratchDatabase {
-    async fn create() -> Result<Self> {
-        use sqlx::Connection;
-        let admin_url = std::env::var("MEMORY_TEST_DATABASE_URL").context(
-            "set MEMORY_TEST_DATABASE_URL to a PostgreSQL URL that may create databases",
-        )?;
-        let name = format!("kioku_test_{}", Uuid::new_v4().simple());
-        let mut admin = sqlx::PgConnection::connect(&admin_url).await?;
-        // Audited: the name is generated from a UUID.
-        sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE DATABASE \"{name}\"")))
-            .execute(&mut admin)
-            .await?;
-        admin.close().await?;
-        let mut url = reqwest::Url::parse(&admin_url)?;
-        url.set_path(&format!("/{name}"));
-        Ok(Self {
-            admin_url,
-            name,
-            url: url.to_string(),
-        })
-    }
-
-    async fn drop_database(self) -> Result<()> {
-        use sqlx::Connection;
-        let mut admin = sqlx::PgConnection::connect(&self.admin_url).await?;
-        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
-            "DROP DATABASE IF EXISTS \"{}\" WITH (FORCE)",
-            self.name
-        )))
-        .execute(&mut admin)
-        .await?;
-        admin.close().await?;
-        Ok(())
-    }
-}
+use crate::testing::ScratchDatabase;
 
 /// Creates and drops its own database on the server in MEMORY_TEST_DATABASE_URL.
 #[tokio::test]

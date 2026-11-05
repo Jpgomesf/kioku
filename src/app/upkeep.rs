@@ -219,7 +219,9 @@ impl App {
                     .count();
                 if total > 0 {
                     let candidates = retirement_candidates(&changes, LOGGED_CANDIDATES);
-                    tracing::info!(
+                    // A warning, so the default log filter shows it: nothing
+                    // retires these notes until someone runs maintenance.
+                    tracing::warn!(
                         total,
                         ?candidates,
                         "memories fell below the legacy threshold and were left active; run `kioku maintenance` or memory_maintenance with dry_run=false to retire them"
@@ -304,6 +306,9 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::NoteInput;
+    use crate::store::Store;
+    use crate::testing::ScratchDatabase;
 
     fn change(key: &str, status: Status) -> AgingChange {
         AgingChange {
@@ -336,5 +341,75 @@ mod tests {
             value,
             json!({"id": Uuid::nil(), "domain": "local", "key": "stale", "score": 0.1, "status": "legacy"})
         );
+    }
+
+    /// Creates and drops its own database on the server in MEMORY_TEST_DATABASE_URL.
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL; set MEMORY_TEST_DATABASE_URL"]
+    async fn background_upkeep_leaves_stale_notes_active() -> Result<()> {
+        let scratch = ScratchDatabase::create().await?;
+        let outcome = upkeep_checks(&scratch.url).await;
+        scratch.drop_database().await?;
+        outcome
+    }
+
+    async fn upkeep_checks(url: &str) -> Result<()> {
+        use anyhow::Context as _;
+        let config = Config::from_lookup(|name| match name {
+            "DATABASE_URL" => Some(url.to_owned()),
+            // Nothing listens there: leaving notes alone must not need the index.
+            "QDRANT_URL" | "EMBEDDING_URL" => Some("http://127.0.0.1:9".to_owned()),
+            "MEMORY_LEGACY_THRESHOLD" => Some("0.95".to_owned()),
+            _ => None,
+        })?;
+        let store = Store::connect(url).await?;
+        store.migrate().await?;
+        let app = App {
+            vector: Qdrant::new(
+                &config.qdrant_url,
+                &config.collection,
+                None,
+                config.embedding_dim,
+            )?,
+            embedder: Embedder::new(&config)?,
+            store,
+            config,
+        };
+        let input = NoteInput {
+            domain: "upkeep".into(),
+            key: "stale".into(),
+            title: "Stale".into(),
+            body: "A note nobody has read in months.".into(),
+            aliases: vec![],
+            related: vec![],
+            tags: vec![],
+            source: None,
+            confidence: 0.8,
+            pinned: false,
+            lock: vec![],
+        };
+        let note = app.store.upsert(&input).await?;
+        // Last aged two months ago, so this month's pass evaluates it.
+        let aged = Utc::now() - chrono::Duration::days(62);
+        app.store
+            .set_retention(note.id, 0.8, Status::Active, aged)
+            .await?;
+        let preview = app.maintenance(true).await?;
+        assert_eq!(preview["legacy"], 1, "the note is below the threshold");
+
+        app.upkeep().await;
+        let kept = app.store.get(note.id).await?.context("note disappeared")?;
+        assert_eq!(kept.status, Status::Active, "upkeep must not retire notes");
+        assert_eq!(kept.retention_score, 0.8, "upkeep only previews");
+        assert_eq!(
+            kept.last_decay_at.timestamp_micros(),
+            aged.timestamp_micros()
+        );
+
+        // Explicit maintenance does retire it, so the checks above can fail.
+        app.maintenance(false).await?;
+        let retired = app.store.get(note.id).await?.context("note disappeared")?;
+        assert_eq!(retired.status, Status::Legacy);
+        Ok(())
     }
 }
