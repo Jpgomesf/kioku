@@ -88,7 +88,8 @@ pub struct Config {
     pub legacy_threshold: f64,
     pub default_domain: String,
     pub notes_root: Option<PathBuf>,
-    /// Run aging and index repair in the background while serving MCP.
+    /// Repair the index and log aging candidates in the background while
+    /// serving MCP. Aging itself is applied only by explicit maintenance.
     pub background_upkeep: bool,
     /// Append every MCP tool call to this JSONL file (opt-in; contains note text).
     pub trace_file: Option<PathBuf>,

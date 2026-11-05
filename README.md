@@ -155,8 +155,9 @@ It replaces the retired batch-worker.
    restart probability, fills the last result slot with a linked note, marked
    `linked_from`. It never displaces direct matches.
 4. **Lifecycle.** Retention (confidence, feedback, usage, and age) breaks near
-   ties. Monthly maintenance moves stale, unpinned notes to a reversible
-   `legacy` status that default search skips.
+   ties. Nothing ages out on its own: maintenance, when you run it, moves
+   stale, unpinned notes to a reversible `legacy` status that default search
+   skips.
 
 The design follows measurements, summarized in the next section.
 
@@ -198,7 +199,7 @@ the file named by `--env-file` win over inherited variables.
 | `MEMORY_NOTES_ROOT` | unset | Absolute folder `memory_import` may read |
 | `MEMORY_TOOLS` | `core` | `core`, `all`, or a comma-separated list |
 | `MEMORY_HALF_LIFE_DAYS`, `MEMORY_LEGACY_THRESHOLD` | `90`, `0.2` | Aging policy |
-| `MEMORY_BACKGROUND_UPKEEP` | `true` | Daily index repair and aging while serving |
+| `MEMORY_BACKGROUND_UPKEEP` | `true` | Daily index repair while serving, and a log of notes aging would retire |
 | `MEMORY_TRACE_FILE`, `MEMORY_TRACE_RUN` | unset | Record every tool call as JSONL |
 | `MEMORY_TRACE_CONTENT`, `MEMORY_TRACE_SALT` | `full`, random | `redacted` or `hashed` keep keys, domains, and timing but drop query and note text |
 | `MEMORY_PRINCIPAL`, `MEMORY_SCOPES`, `MEMORY_DOMAINS` | `local`, `read,write,admin`, `*` | Access profile for a stdio server ([Access control](#access-control)) |
@@ -249,13 +250,16 @@ changing tools.
 ./bin/kioku stats                  # counts and pending index work
 ./bin/kioku repair [--all]         # re-index missing (or all) vectors
 ./bin/kioku maintenance --dry-run  # preview monthly aging
+./bin/kioku maintenance            # apply it: stale, unpinned notes move to legacy
 ./bin/kioku pin KEY --domain D     # protect a memory from aging
 ./bin/kioku reindex --embedding-model qwen3-embedding:0.6b --embedding-dim 1024 --collection local_memory_v2
 ```
 
 `reindex` embeds every memory into a new collection, switches the database to
-it, and prints the settings to put in `.env`; close MCP clients first. The
-server repairs the index and applies aging in the background while it runs.
+it, and prints the settings to put in `.env`; close MCP clients first. While
+it runs, the server repairs the index in the background and logs the notes
+whose retention fell below `MEMORY_LEGACY_THRESHOLD`, but never retires them:
+only `kioku maintenance` or `memory_maintenance` with `dry_run: false` does.
 
 ## Development
 

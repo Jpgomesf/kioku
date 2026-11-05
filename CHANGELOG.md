@@ -37,6 +37,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- Background upkeep no longer retires notes. It still repairs the index
+  daily, but only logs the notes whose retention fell below
+  `MEMORY_LEGACY_THRESHOLD`; `kioku maintenance` and `memory_maintenance` with
+  `dry_run: false` still apply aging. Retention stays a ranking prior.
 - Context packs fill their budget in three passes: the query-matching
   sentences of the strongest notes and the notes they link to, then those notes
   in full, then the rest. Left-out text shows as `…`. Packs drop the UUID, the

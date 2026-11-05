@@ -1,4 +1,8 @@
 //! Keeping the derived vector index and retention scores in step with PostgreSQL.
+//!
+//! Background upkeep only repairs the index and reports aging: retention is a
+//! ranking prior, and memories move to legacy only when maintenance is run
+//! explicitly (`kioku maintenance`, or `memory_maintenance` with `dry_run: false`).
 
 use std::collections::HashMap;
 
@@ -20,6 +24,8 @@ use super::{App, document_text, too_long_context};
 
 /// Notes re-indexed per locked batch during repair.
 const REPAIR_BATCH: usize = 32;
+/// Aging candidates named in the background upkeep log.
+const LOGGED_CANDIDATES: usize = 20;
 
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct RepairReport {
@@ -43,6 +49,26 @@ pub struct RepairFailure {
     pub domain: String,
     pub key: String,
     pub error: String,
+}
+
+/// The aging policy's verdict on one active note.
+#[derive(Clone, Debug, Serialize)]
+struct AgingChange {
+    id: Uuid,
+    domain: String,
+    key: String,
+    score: f64,
+    status: Status,
+}
+
+/// `domain/key` of the notes aging would retire, at most `limit` of them.
+fn retirement_candidates(changes: &[AgingChange], limit: usize) -> Vec<String> {
+    changes
+        .iter()
+        .filter(|change| change.status == Status::Legacy)
+        .take(limit)
+        .map(|change| format!("{}/{}", change.domain, change.key))
+        .collect()
 }
 
 impl App {
@@ -171,8 +197,9 @@ impl App {
         })
     }
 
-    /// Repair the vector index and apply monthly aging. Runs when the MCP
-    /// server starts and then daily; problems are logged, never sent to tools.
+    /// Repair the vector index and log which memories aging would retire,
+    /// without retiring them. Runs when the MCP server starts and then daily;
+    /// problems are logged, never sent to tools.
     pub async fn upkeep(&self) {
         match self.repair(false).await {
             Ok(report) if !report.failures.is_empty() => {
@@ -184,17 +211,61 @@ impl App {
             Ok(_) => {}
             Err(error) => tracing::warn!(error = format!("{error:#}"), "index repair failed"),
         }
-        if let Err(error) = self.maintenance(false).await {
-            tracing::warn!(error = format!("{error:#}"), "maintenance failed");
+        match self.age(true).await {
+            Ok(changes) => {
+                let total = changes
+                    .iter()
+                    .filter(|c| c.status == Status::Legacy)
+                    .count();
+                if total > 0 {
+                    let candidates = retirement_candidates(&changes, LOGGED_CANDIDATES);
+                    tracing::info!(
+                        total,
+                        ?candidates,
+                        "memories fell below the legacy threshold and were left active; run `kioku maintenance` or memory_maintenance with dry_run=false to retire them"
+                    );
+                }
+            }
+            Err(error) => tracing::warn!(error = format!("{error:#}"), "aging preview failed"),
         }
     }
 
-    /// Apply monthly aging, one domain at a time.
+    /// Preview (`dry_run`) or apply monthly aging, one domain at a time.
     pub async fn maintenance(&self, dry_run: bool) -> Result<Value> {
+        let mut changes = self.age(dry_run).await?;
+        let total = changes.len();
+        let legacy_count = changes
+            .iter()
+            .filter(|change| change.status == Status::Legacy)
+            .count();
+        changes.truncate(100);
+        Ok(json!({
+            "dry_run": dry_run,
+            "evaluated": total,
+            "legacy": legacy_count,
+            "changes": changes,
+            "truncated": total > 100,
+            "policy": {
+                "half_life_days": self.config.half_life_days,
+                "legacy_threshold": self.config.legacy_threshold,
+                "schedule": "calendar-month checks, completed 30-day aging periods",
+                "permanent_deletion": false,
+            },
+        }))
+    }
+
+    /// Score every active note not yet aged this month, and with `dry_run`
+    /// false persist the scores and move notes below the threshold to legacy.
+    async fn age(&self, dry_run: bool) -> Result<Vec<AgingChange>> {
         let now = Utc::now();
         let mut changes = Vec::new();
         for domain in self.store.domains().await? {
-            let _guard = self.store.mutation_lock().await?;
+            // A preview writes nothing, so it need not wait for writers.
+            let _guard = if dry_run {
+                None
+            } else {
+                Some(self.store.mutation_lock().await?)
+            };
             let notes = self.store.notes(Some(&domain), false).await?;
             for note in &notes {
                 if (note.last_decay_at.year(), note.last_decay_at.month())
@@ -217,24 +288,53 @@ impl App {
                         self.store.mark_synced(note.id, note.revision).await?;
                     }
                 }
-                changes.push(json!({"id": note.id, "domain": note.input.domain, "key": note.input.key, "score": score, "status": status}));
+                changes.push(AgingChange {
+                    id: note.id,
+                    domain: note.input.domain.clone(),
+                    key: note.input.key.clone(),
+                    score,
+                    status,
+                });
             }
         }
-        let total = changes.len();
-        let legacy_count = changes.iter().filter(|n| n["status"] == "legacy").count();
-        changes.truncate(100);
-        Ok(json!({
-            "dry_run": dry_run,
-            "evaluated": total,
-            "legacy": legacy_count,
-            "changes": changes,
-            "truncated": total > 100,
-            "policy": {
-                "half_life_days": self.config.half_life_days,
-                "legacy_threshold": self.config.legacy_threshold,
-                "schedule": "calendar-month checks, completed 30-day aging periods",
-                "permanent_deletion": false,
-            },
-        }))
+        Ok(changes)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn change(key: &str, status: Status) -> AgingChange {
+        AgingChange {
+            id: Uuid::nil(),
+            domain: "local".into(),
+            key: key.into(),
+            score: 0.1,
+            status,
+        }
+    }
+
+    #[test]
+    fn upkeep_names_only_notes_aging_would_retire() {
+        let changes = [
+            change("kept", Status::Active),
+            change("stale", Status::Legacy),
+            change("older", Status::Legacy),
+        ];
+        assert_eq!(
+            retirement_candidates(&changes, 20),
+            ["local/stale", "local/older"]
+        );
+        assert_eq!(retirement_candidates(&changes, 1), ["local/stale"]);
+    }
+
+    #[test]
+    fn aging_changes_keep_their_reported_shape() {
+        let value = serde_json::to_value(change("stale", Status::Legacy)).unwrap();
+        assert_eq!(
+            value,
+            json!({"id": Uuid::nil(), "domain": "local", "key": "stale", "score": 0.1, "status": "legacy"})
+        );
     }
 }
