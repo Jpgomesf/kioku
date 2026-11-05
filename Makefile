@@ -3,7 +3,7 @@ CARGO ?= cargo
 ENV_FILE ?= .env
 SMOKE_ENV ?= .env.smoke
 
-.PHONY: help check fmt fmt-check lint test test-db smoke eval build install start stop doctor deny
+.PHONY: help check fmt fmt-check lint test test-db smoke eval build install start stop stop-docker-ollama doctor deny
 
 help: ## List targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-10s %s\n", $$1, $$2}'
@@ -42,11 +42,14 @@ install: build ## Install the server binary into bin/ (used by scripts/mcp.sh)
 	mkdir -p bin
 	install -m 755 target/release/kioku bin/kioku
 
-start: ## Start PostgreSQL, Qdrant, and Ollama
+start: ## Start PostgreSQL, Qdrant, and the Ollama container unless EMBEDDING_URL points elsewhere
 	./scripts/start.sh
 
 stop: ## Stop the services; volumes are kept
 	./scripts/stop.sh
+
+stop-docker-ollama: ## Stop only the Ollama container, after switching to a native Ollama
+	./scripts/stop.sh ollama
 
 doctor: ## Check the services and embeddings
 	./bin/kioku --env-file "$(ENV_FILE)" doctor

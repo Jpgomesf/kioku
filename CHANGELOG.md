@@ -8,6 +8,26 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Open Knowledge Format (OKF v0.2) bundles. `kioku ingest` reads a folder
+  whose `index.md` declares `okf_version` as a bundle (`--format okf` forces
+  it): each concept becomes a note keyed by its concept ID, with its producer
+  `id` and `aliases` as aliases and its own file as the source. Links between
+  concepts become `related` links, and concepts over 4,000 bytes become a hub
+  plus one note per section keyed by GitHub's heading anchor. Each note opens
+  with a facts line built from the spec's fields (type, lifecycle, trust tier,
+  `stale_after`, `generated`, `resource`) and the producer's other plain
+  fields. Deprecated concepts become legacy, and so do notes whose concept
+  left the bundle, so a re-import follows the bundle. `memory_import` refuses
+  a path in a bundle and points to the command line, and a Markdown import
+  lists a bundle it meets under `failed` instead of reading it.
+- An imported note whose source is a section (`file.md#anchor`) belongs to its
+  file while the file exists, as other file-backed notes do.
+- Embeddings on the Apple GPU. `make start` starts the Ollama container only
+  when `EMBEDDING_URL` points at it (`127.0.0.1:11435`). With a native Ollama
+  (`brew install ollama`, `EMBEDDING_URL=http://127.0.0.1:11434`) it starts
+  only PostgreSQL and Qdrant and pulls the model natively, and
+  `make stop-docker-ollama` stops the unused container. The vector index
+  stays valid, since it depends on the model, not where it runs.
 - Vaults and locks. A vaults file (`MEMORY_VAULTS_FILE`, default
   `~/.config/kioku/vaults.toml`) groups domains into vaults that never see
   each other. A stdio session is placed by the git remote of its repository,

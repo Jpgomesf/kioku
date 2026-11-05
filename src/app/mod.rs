@@ -14,7 +14,7 @@ mod upkeep;
 mod write;
 
 pub use context::{ContextMemory, ContextPack, ContextRequest, SkippedMemory};
-pub use import::{ImportFailure, ImportReport, ImportedNote};
+pub use import::{ImportFailure, ImportFormat, ImportReport, ImportedNote, OkfImport};
 pub use search::{SearchHit, SearchRequest, SearchResults, SearchStats, Signals};
 pub use upkeep::{ReindexReport, RepairFailure, RepairReport};
 pub use write::{UpsertOutcome, WriteOrigin};
