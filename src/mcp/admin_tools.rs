@@ -139,16 +139,23 @@ impl MemoryServer {
             .app
             .hydrate(args.path.as_deref(), Some(&domain), Some(&caller.viewer));
         match imported.await {
-            Ok(report) => ok(json!({
-                "domain": domain,
-                "imported": report.imported,
-                "notes": report.notes.iter().map(|n| json!({"key": n.key, "revision": n.revision})).collect::<Vec<_>>(),
-                "truncated": report.truncated,
-                "unresolved_related": report.unresolved_relationships.iter().take(20).map(|u| json!({"ref": u.reference, "reason": u.reason})).collect::<Vec<_>>(),
-                "unresolved_count": report.unresolved_count,
-                "failed": report.failed.iter().take(20).collect::<Vec<_>>(),
-                "failed_count": report.failed.len() + report.hidden_failures,
-            })),
+            Ok(report) => {
+                let mut out = json!({
+                    "domain": domain,
+                    "imported": report.imported,
+                    "notes": report.notes.iter().map(|n| json!({"key": n.key, "revision": n.revision})).collect::<Vec<_>>(),
+                    "truncated": report.truncated,
+                    "unresolved_related": report.unresolved_relationships.iter().take(20).map(|u| json!({"ref": u.reference, "reason": u.reason})).collect::<Vec<_>>(),
+                    "unresolved_count": report.unresolved_count,
+                    "failed": report.failed.iter().take(20).collect::<Vec<_>>(),
+                    "failed_count": report.failed.len() + report.hidden_failures,
+                });
+                // Only vault sessions have failures they aren't told about.
+                if let Some(hint) = report.unnamed_failures() {
+                    out["hint"] = json!(hint);
+                }
+                ok(out)
+            }
             Err(error) => error_text(render_error("memory_import", &error)),
         }
     }

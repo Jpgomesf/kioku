@@ -134,7 +134,9 @@ It replaces the retired batch-worker.
   `[[wiki links]]` work. Missing or ambiguous references are reported.
 - `lock: local` (or a list of providers) limits which models may read the
   note. It takes effect with a vaults file; see
-  [Vaults and locks](#vaults-and-locks).
+  [Vaults and locks](#vaults-and-locks). A `lock` that lists no provider
+  (`lock: []`, `lock:`), or a near miss such as `Lock`, `locks`, or `locked`,
+  fails the file instead of importing the note unlocked.
 - Saving a key again replaces its text, but nothing is lost: every save,
   edit, retirement, and restore appends the note's content and status to
   `memory_note_revisions`, and `memory_inspect` lists the ten latest entries.
@@ -144,7 +146,10 @@ It replaces the retired batch-worker.
 - A file that can't be imported (unreadable, bad frontmatter, another domain,
   a key another file or source owns, too long to embed) is skipped and listed
   under `failed` with the reason; the other files import. Only when every
-  file fails is the import an error, and then nothing is written.
+  file fails is the import an error, and then nothing is written. With
+  vaults, a session's `memory_import` lists only failures of notes it may
+  see; the rest are counted in `failed_count` but not named (see
+  [Vaults and locks](#vaults-and-locks)).
 - Each note must fit the embedding model's context window (about 6 KB of
   English text for `nomic-embed-text`); `memory_save` rejects a longer note
   before anything is saved, with a request to split it.
@@ -321,6 +326,13 @@ lock in frontmatter (`lock: local`, or `lock: [local, anthropic]`);
   `memory_inspect`, links, `memory_stats`, import reports, and the older
   `rag_*` tools. Hidden notes never shift the ranking of visible ones.
 - `memory_save` and `memory_import` may write only to visible domains.
+- `memory_import` reads only files whose frontmatter names their `domain`.
+  One notes folder serves every vault, so a file without one could belong to
+  any vault and is skipped rather than imported into the session's domain.
+- An import's report names only notes the session may see. Files of other
+  vaults or locked notes, and files whose vault can't be told (no `domain`,
+  unreadable, or unparseable), are counted in `failed_count` but not named,
+  and a `hint` says so.
 - `memory_stats` counts only what the session may see.
 - `memory_maintenance` is refused, because it ages every vault. Run
   `kioku maintenance` instead.

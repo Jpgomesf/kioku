@@ -5,8 +5,11 @@
 //! normally. Only when every file fails is the import an error.
 //!
 //! One notes folder serves every vault, so an import for a vault session
-//! lists only the notes, links, and failures of notes that session may see.
-//! The others are counted, never named.
+//! reads only files whose frontmatter names their domain: a file that doesn't
+//! could belong to any vault, and must not adopt the session's domain. Its
+//! report lists only the notes, links, and failures of notes that session may
+//! see. The others, including files that can't be read or parsed (their vault
+//! is unknown), are counted, never named.
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -85,6 +88,19 @@ pub struct ImportReport {
     /// Skipped files whose notes the viewer may not see, left out of `failed`.
     #[serde(skip)]
     pub hidden_failures: usize,
+}
+
+impl ImportReport {
+    /// For a vault session, what the failures counted but not listed are.
+    pub fn unnamed_failures(&self) -> Option<String> {
+        (self.hidden_failures > 0).then(|| {
+            format!(
+                "failed_count includes {} {}. With vaults, every imported file must name its domain",
+                self.hidden_failures,
+                unnamed(self.hidden_failures)
+            )
+        })
+    }
 }
 
 /// A parsed, valid note and the path it is reported under.
@@ -326,9 +342,12 @@ fn prepare(
 ) -> (Vec<Candidate>, Vec<ImportFailure>) {
     let mut candidates = Vec::new();
     let mut failed = Vec::new();
+    // With vault rules, a file must name its domain itself.
+    let declared = viewer.is_some_and(Viewer::restricts_notes);
     for (source, text) in files {
         let path = relative_path(base, &source);
-        match text.and_then(|text| parse_file(&source, &text, domain)) {
+        let fallback = (!declared).then_some(domain);
+        match text.and_then(|text| parse_file(&source, &text, fallback)) {
             Ok(input) if strict_domain && input.domain != domain => {
                 let reason = format!(
                     "declares domain {:?}, but the import is for domain {domain:?}",
@@ -378,8 +397,12 @@ fn prepare(
 }
 
 /// One file's note. Its provenance is its real location, never its frontmatter.
-fn parse_file(source: &str, text: &str, domain: &str) -> Result<NoteInput> {
-    let mut input = markdown::parse_markdown(text, source, domain)?;
+/// Without a `domain`, the frontmatter must name one.
+fn parse_file(source: &str, text: &str, domain: Option<&str>) -> Result<NoteInput> {
+    let mut input = match domain {
+        Some(domain) => markdown::parse_markdown(text, source, domain)?,
+        None => markdown::parse_markdown_declared(text, source)?,
+    };
     input.source = Some(source.to_owned());
     input.validate()?;
     Ok(input)
@@ -404,6 +427,14 @@ fn too_long_reason(input: &NoteInput) -> String {
     )
 }
 
+/// What the failures a vault session isn't told about are, after their count.
+fn unnamed(count: usize) -> String {
+    let files = if count == 1 { "file" } else { "files" };
+    format!(
+        "{files} not named here: notes this session may not see, or files whose vault can't be told because they name no domain in their frontmatter or can't be read or parsed"
+    )
+}
+
 /// The error for an import in which every file failed.
 fn nothing_imported(mut failed: Vec<ImportFailure>) -> anyhow::Error {
     failed.sort_by(|a, b| a.path.cmp(&b.path));
@@ -418,9 +449,7 @@ fn nothing_imported(mut failed: Vec<ImportFailure>) -> anyhow::Error {
         listed.push(format!("and {} more", failed.len() - LISTED_FAILURES));
     }
     if hidden > 0 {
-        listed.push(format!(
-            "and {hidden} more of notes this session may not see"
-        ));
+        listed.push(format!("and {hidden} more {}", unnamed(hidden)));
     }
     UserError::InvalidArgument(format!(
         "nothing was imported; every file failed. {}",
@@ -632,27 +661,64 @@ mod tests {
                 file("/notes/s2.md", locked),
                 file("/notes/theirs.md", "---\nkey: t\ndomain: b\n---\nBody.\n"),
                 file("/notes/broken.md", "---\nkey: [x\n---\nBody.\n"),
+                // Vault b's file that relies on the import's domain.
+                file(
+                    "/notes/b/plain.md",
+                    "---\nkey: plain\n---\nVault b's text.\n",
+                ),
             ]
         };
-        let (_, failed) = prepare(files(), Path::new("/notes"), "a", true, Some(&viewer));
+        let (candidates, failed) = prepare(files(), Path::new("/notes"), "a", true, Some(&viewer));
+        assert!(
+            candidates.is_empty(),
+            "a file without a domain must not join the session's domain"
+        );
         let shown: Vec<&str> = failed
             .iter()
             .filter(|f| !f.hidden)
             .map(|f| f.path.as_str())
             .collect();
         assert_eq!(shown, ["a1.md", "a2.md"]);
-        assert_eq!(failed.iter().filter(|f| f.hidden).count(), 4);
+        assert_eq!(failed.iter().filter(|f| f.hidden).count(), 5);
         let message = nothing_imported(failed).to_string();
         assert!(
-            message.contains("and 4 more of notes this session may not see"),
+            message.contains("and 5 more files not named here")
+                && message.contains("name no domain"),
             "{message}"
         );
         assert!(
-            !message.contains("theirs") && !message.contains("s1.md"),
+            !message.contains("theirs") && !message.contains("s1.md") && !message.contains("plain"),
             "{message}"
         );
-        let (_, everything) = prepare(files(), Path::new("/notes"), "a", true, None);
+        let (candidates, everything) = prepare(files(), Path::new("/notes"), "a", true, None);
         assert!(everything.iter().all(|f| !f.hidden) && everything.len() == 6);
+        assert_eq!(
+            candidates.len(),
+            1,
+            "without vaults the import's domain applies"
+        );
+        assert_eq!(candidates[0].input.domain, "a");
+    }
+
+    #[test]
+    fn only_reports_with_unnamed_failures_explain_them() {
+        let report = |hidden_failures| ImportReport {
+            imported: 1,
+            notes: Vec::new(),
+            truncated: false,
+            unresolved_relationships: Vec::new(),
+            unresolved_count: 0,
+            failed: Vec::new(),
+            hidden_failures,
+        };
+        assert_eq!(report(0).unnamed_failures(), None);
+        let hint = report(2).unnamed_failures().unwrap();
+        assert!(
+            hint.starts_with("failed_count includes 2 files not named here")
+                && hint.contains("must name its domain"),
+            "{hint}"
+        );
+        assert!(report(1).unnamed_failures().unwrap().contains("1 file not"));
     }
 
     #[test]
