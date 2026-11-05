@@ -81,6 +81,7 @@ async fn history_checks(store: &Store) -> Result<()> {
         source: None,
         confidence: 0.8,
         pinned: false,
+        lock: Vec::new(),
     };
     let note = store.upsert(&input).await?;
     // Writes that change nothing add nothing.
@@ -180,6 +181,7 @@ async fn lifecycle_checks(store: &Store) -> Result<()> {
         source: None,
         confidence: 0.8,
         pinned: false,
+        lock: Vec::new(),
     };
     let note = store.upsert(&input).await?;
     store.mark_synced(note.id, note.revision).await?;

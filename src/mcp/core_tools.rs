@@ -332,6 +332,8 @@ impl MemoryServer {
                 .or(Some(stamped)),
             confidence: previous.map_or(0.8, |p| p.confidence),
             pinned: previous.is_some_and(|p| p.pinned),
+            // Tools can't set a note lock, and an update keeps the one it has.
+            lock: previous.map(|p| p.lock.clone()).unwrap_or_default(),
         };
         let outcome = self.app.upsert(input, WriteOrigin::Tool).await?;
         let mut out = json!({

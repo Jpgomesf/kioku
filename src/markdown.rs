@@ -26,6 +26,8 @@ struct Frontmatter {
     tags: Option<OneOrMany>,
     confidence: Option<f64>,
     pinned: Option<bool>,
+    /// Model providers that may read the note, one or a list.
+    lock: Option<OneOrMany>,
 }
 
 /// A frontmatter list that may also be written as a single value. Plain
@@ -181,6 +183,12 @@ pub fn parse_markdown(text_in: &str, source: &str, default_domain: &str) -> Resu
         source: Some(source.to_owned()),
         confidence: meta.confidence.unwrap_or(0.8),
         pinned: meta.pinned.unwrap_or(false),
+        lock: deduplicate_strings(
+            list(meta.lock)
+                .into_iter()
+                .map(|provider| provider.to_lowercase())
+                .collect(),
+        ),
     };
     note.validate()?;
     Ok(note)
@@ -268,6 +276,27 @@ mod tests {
         assert_eq!(parsed.source.as_deref(), Some("docs/billing.md"));
         assert!(parsed.pinned);
         assert!(parsed.body.contains("Usa PostgreSQL."));
+    }
+
+    #[test]
+    fn a_lock_names_providers_as_one_value_or_a_list() {
+        let one = parse_markdown("---\nlock: Local\n---\nBody.", "n.md", "d").unwrap();
+        assert_eq!(one.lock, ["local"]);
+        let many = parse_markdown(
+            "---\nlock: [local, anthropic, local]\n---\nBody.",
+            "n.md",
+            "d",
+        )
+        .unwrap();
+        assert_eq!(many.lock, ["local", "anthropic"]);
+        assert!(
+            parse_markdown("---\n---\nBody.", "n.md", "d")
+                .unwrap()
+                .lock
+                .is_empty()
+        );
+        let error = parse_markdown("---\nlock: [gpt]\n---\nBody.", "n.md", "d").unwrap_err();
+        assert!(error.to_string().contains("lock"), "{error}");
     }
 
     #[test]

@@ -286,6 +286,7 @@ mod tests {
             source: None,
             confidence: 0.9,
             pinned: false,
+            lock: Vec::new(),
         };
         Note {
             id: input.id(),
