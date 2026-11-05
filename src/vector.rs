@@ -208,10 +208,12 @@ impl Qdrant {
         Ok(())
     }
 
+    /// Nearest points, in `domains` when given (one domain, or several for a
+    /// whole vault), or in every domain.
     pub async fn search(
         &self,
         vector: Vec<f32>,
-        domain: Option<&str>,
+        domains: Option<&[&str]>,
         include_legacy: bool,
         limit: usize,
     ) -> Result<Vec<VectorHit>> {
@@ -221,8 +223,11 @@ impl Qdrant {
             "Vector search limit must be between 1 and 200"
         );
         let mut must = Vec::new();
-        if let Some(domain) = domain {
-            must.push(json!({"key":"domain","match":{"value":domain}}));
+        match domains {
+            None => {}
+            Some([]) => return Ok(Vec::new()),
+            Some([domain]) => must.push(json!({"key":"domain","match":{"value":domain}})),
+            Some(several) => must.push(json!({"key":"domain","match":{"any":several}})),
         }
         if !include_legacy {
             must.push(json!({"key":"status","match":{"value":"active"}}));

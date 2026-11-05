@@ -28,6 +28,9 @@ const SNIPPET_CHARS: usize = 220;
 pub struct SearchRequest<'a> {
     pub query: &'a str,
     pub domain: Option<&'a str>,
+    /// Search these domains together, ranked as one corpus, instead of
+    /// `domain`: a whole vault at once. `None` searches `domain` alone.
+    pub domains: Option<&'a [String]>,
     pub limit: usize,
     pub include_legacy: bool,
     pub ranking: RankOptions,
@@ -43,6 +46,7 @@ pub struct SearchRequest<'a> {
 pub struct SearchHit {
     pub id: Uuid,
     pub key: String,
+    pub domain: String,
     pub title: String,
     pub status: Status,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -142,17 +146,20 @@ impl App {
             invalid!("limit must be between 1 and 20");
         }
         let domain = self.domain(request.domain);
+        let one = [domain.to_owned()];
+        let domains: &[String] = request.domains.unwrap_or(&one);
         let span = tracing::Span::current();
-        span.record("domain", domain);
+        span.record("domain", domains.join(",").as_str());
         let mut stats = SearchStats::default();
         let stage = Instant::now();
         // A restricting viewer needs every note, legacy ones included, to
         // know which links touch notes it may not see.
         let restricted = request.viewer.is_some_and(Viewer::restricts_notes);
-        let mut notes = self
-            .store
-            .notes(Some(domain), request.include_legacy || restricted)
-            .await?;
+        let load_legacy = request.include_legacy || restricted;
+        let mut notes = match domains {
+            [domain] => self.store.notes(Some(domain), load_legacy).await?,
+            several => self.store.notes_in(several, load_legacy).await?,
+        };
         let hidden = hide(&mut notes, request.viewer);
         if restricted && !request.include_legacy {
             notes.retain(|note| note.status == Status::Active);
@@ -175,7 +182,7 @@ impl App {
             ));
         }
         let stage = Instant::now();
-        let dense = match self.dense_scores(query, domain, &notes, request).await {
+        let dense = match self.dense_scores(query, domains, &notes, request).await {
             Ok(dense) => {
                 stats.dense_candidates = dense.candidates;
                 stats.dense_stale = dense.stale;
@@ -194,7 +201,10 @@ impl App {
         let stage = Instant::now();
         let mut edges: Cow<'_, [Edge]> = match request.edges {
             Some(edges) => Cow::Borrowed(edges),
-            None if request.ranking.graph => Cow::Owned(self.store.edges(Some(domain)).await?),
+            None if request.ranking.graph => Cow::Owned(match domains {
+                [domain] => self.store.edges(Some(domain)).await?,
+                several => self.store.edges_in(several).await?,
+            }),
             None => Cow::Borrowed(&[]),
         };
         if !hidden.is_empty() {
@@ -228,6 +238,7 @@ impl App {
                 Some(SearchHit {
                     id: note.id,
                     key: note.input.key.clone(),
+                    domain: note.input.domain.clone(),
                     title: note.input.title.clone(),
                     status: note.status,
                     source: note.input.source.clone(),
@@ -264,16 +275,17 @@ impl App {
     async fn dense_scores(
         &self,
         query: &str,
-        domain: &str,
+        domains: &[String],
         notes: &[Note],
         request: &SearchRequest<'_>,
     ) -> Result<Dense> {
         let vector = self.embedder.embed_query(query).await?;
+        let domains: Vec<&str> = domains.iter().map(String::as_str).collect();
         let hits = self
             .vector
             .search(
                 vector,
-                Some(domain),
+                Some(&domains),
                 request.include_legacy,
                 (request.limit * 10).clamp(50, 200),
             )

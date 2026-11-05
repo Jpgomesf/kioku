@@ -339,6 +339,7 @@ async fn main() -> Result<()> {
                 .search(&SearchRequest {
                     query: &query,
                     domain: domain.as_deref(),
+                    domains: None,
                     limit,
                     include_legacy,
                     ranking: if no_graph {

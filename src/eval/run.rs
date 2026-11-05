@@ -175,6 +175,7 @@ async fn run_queries(
             .search(&SearchRequest {
                 query: &query.query,
                 domain: Some(&dataset.domain),
+                domains: None,
                 limit: options.k,
                 include_legacy: query.include_legacy,
                 ranking,

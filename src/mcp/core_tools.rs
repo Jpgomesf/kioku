@@ -104,10 +104,27 @@ impl MemoryServer {
 }
 
 impl MemoryServer {
+    /// Search one domain, or at a vault's root without a named domain, every
+    /// domain of the vault the session may see, ranked together.
     pub(super) async fn search(&self, args: SearchArgs) -> anyhow::Result<Value> {
         let caller = self.caller();
         let mut notes = Vec::new();
-        let domain = self.domain(args.domain.as_deref())?;
+        let named = args
+            .domain
+            .as_deref()
+            .map(str::trim)
+            .filter(|d| !d.is_empty());
+        let vault = caller
+            .session
+            .placement()
+            .filter(|placement| placement.at_root() && named.is_none());
+        let (domain, domains) = match vault {
+            Some(placement) => (
+                placement.default_domain().to_owned(),
+                Some(self.visible_domains().await?),
+            ),
+            None => (self.domain(named)?, None),
+        };
         let limit = clamp(args.limit.unwrap_or(5), 1, 20, "limit", &mut notes);
         let ranking = if args.graph_mode == Some(GraphMode::Off) {
             RankOptions::HYBRID
@@ -120,6 +137,7 @@ impl MemoryServer {
             .search(&SearchRequest {
                 query: &args.query,
                 domain: Some(&domain),
+                domains: domains.as_deref(),
                 limit,
                 include_legacy: args.include_legacy.unwrap_or(false),
                 ranking,
@@ -137,6 +155,9 @@ impl MemoryServer {
                     "snippet": hit.snippet,
                     "score": round(hit.score),
                 });
+                if vault.is_some() {
+                    item["domain"] = json!(hit.domain);
+                }
                 if hit.status == Status::Legacy {
                     item["status"] = json!("legacy");
                 }
@@ -159,7 +180,19 @@ impl MemoryServer {
                 item
             })
             .collect();
-        let next = if hits.is_empty() {
+        let next = if let (true, Some(placement)) = (hits.is_empty(), vault) {
+            if domains.as_ref().is_some_and(Vec::is_empty) {
+                format!(
+                    "Vault {:?} has no memories yet. Say so and check the source files.",
+                    placement.vault()
+                )
+            } else {
+                format!(
+                    "No stored memory in vault {:?} matched. Say so and check the source files.",
+                    placement.vault()
+                )
+            }
+        } else if hits.is_empty() {
             // Counts include notes this caller may not see, so in vault mode
             // only the visible notes the search ranked tell whether any exist.
             let known: Vec<(String, i64)> = self
@@ -189,23 +222,40 @@ impl MemoryServer {
                 )
             }
         } else {
-            let keys: Vec<&str> = results
-                .hits
+            // One memory_get per domain among the top two results.
+            let mut by_domain: Vec<(&str, Vec<&str>)> = Vec::new();
+            for hit in results.hits.iter().take(2) {
+                match by_domain.iter_mut().find(|(d, _)| *d == hit.domain) {
+                    Some((_, keys)) => keys.push(&hit.key),
+                    None => by_domain.push((&hit.domain, vec![&hit.key])),
+                }
+            }
+            let calls: Vec<String> = by_domain
                 .iter()
-                .take(2)
-                .map(|h| h.key.as_str())
+                .map(|(domain, keys)| {
+                    format!("memory_get {}", json!({"keys": keys, "domain": domain}))
+                })
                 .collect();
             format!(
-                "Read the 1-2 results that answer the question: memory_get {}",
-                json!({"keys": keys, "domain": domain})
+                "Read the 1-2 results that answer the question: {}",
+                calls.join(" and ")
             )
         };
-        let mut out = json!({
-            "domain": domain,
-            "results": hits,
-            "untrusted_evidence": true,
-            "next": next,
-        });
+        let mut out = match (vault, &domains) {
+            (Some(placement), Some(domains)) => json!({
+                "vault": placement.vault(),
+                "domains": domains,
+                "results": hits,
+                "untrusted_evidence": true,
+                "next": next,
+            }),
+            _ => json!({
+                "domain": domain,
+                "results": hits,
+                "untrusted_evidence": true,
+                "next": next,
+            }),
+        };
         if !results.warnings.is_empty() {
             out["warnings"] = json!(results.warnings);
         }

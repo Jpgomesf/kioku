@@ -124,6 +124,7 @@ impl App {
                 .search(&SearchRequest {
                     query,
                     domain: Some(domain),
+                    domains: None,
                     limit: QUERY_CANDIDATES,
                     include_legacy: request.include_legacy,
                     ranking: request.ranking,
@@ -549,6 +550,7 @@ mod tests {
         SearchHit {
             id: crate::model::NoteInput::id_for("d", key),
             key: key.to_owned(),
+            domain: "d".to_owned(),
             title: key.to_owned(),
             status: Status::Active,
             source: None,

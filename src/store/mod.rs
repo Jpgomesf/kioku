@@ -179,6 +179,25 @@ impl Store {
         rows.iter().map(decode_note).collect()
     }
 
+    /// Notes of several domains at once, for searching a whole vault. The
+    /// same limit as [`Store::notes`] applies to all of them together.
+    pub async fn notes_in(&self, domains: &[String], include_legacy: bool) -> Result<Vec<Note>> {
+        let rows = sqlx::query(
+            "SELECT * FROM memory_notes WHERE domain = ANY($1)
+             AND ($2 OR status='active') ORDER BY domain,note_key LIMIT $3",
+        )
+        .bind(domains)
+        .bind(include_legacy)
+        .bind(MAX_NOTES + 1)
+        .fetch_all(&self.pool)
+        .await?;
+        ensure!(
+            rows.len() <= MAX_NOTES as usize,
+            "More than {MAX_NOTES} memories in this vault; search one of its domains instead"
+        );
+        rows.iter().map(decode_note).collect()
+    }
+
     /// Replace the stored embedding identity after a full reindex.
     pub async fn set_embedding_identity(&self, identity: &str) -> Result<()> {
         sqlx::query(
@@ -285,20 +304,21 @@ impl Store {
         .bind(domain)
         .fetch_all(&self.pool)
         .await?;
-        ensure!(
-            rows.len() <= 1_000_000,
-            "Graph has too many edges; choose a narrower domain"
-        );
-        rows.iter()
-            .map(|r| {
-                Ok(Edge {
-                    source: r.try_get("source")?,
-                    target: r.try_get("target")?,
-                    kind: r.try_get("kind")?,
-                    weight: r.try_get("weight")?,
-                })
-            })
-            .collect()
+        decode_edges(&rows)
+    }
+
+    /// Links within each of several domains, for searching a whole vault.
+    pub async fn edges_in(&self, domains: &[String]) -> Result<Vec<Edge>> {
+        let rows = sqlx::query(
+            "SELECT e.source,e.target,e.kind,e.weight FROM memory_edges e
+             JOIN memory_notes s ON s.id=e.source JOIN memory_notes t ON t.id=e.target
+             WHERE s.domain=t.domain AND s.domain = ANY($1)
+             ORDER BY e.source,e.target,e.kind LIMIT 1000001",
+        )
+        .bind(domains)
+        .fetch_all(&self.pool)
+        .await?;
+        decode_edges(&rows)
     }
 
     pub async fn replace_edges(&self, domain: &str, edges: &[Edge]) -> Result<()> {
@@ -492,6 +512,23 @@ async fn record_revision(tx: &mut Transaction<'static, Postgres>, id: Uuid) -> R
     .await
     .context("cannot record the memory's history")?;
     Ok(())
+}
+
+fn decode_edges(rows: &[PgRow]) -> Result<Vec<Edge>> {
+    ensure!(
+        rows.len() <= 1_000_000,
+        "Graph has too many edges; choose a narrower domain"
+    );
+    rows.iter()
+        .map(|r| {
+            Ok(Edge {
+                source: r.try_get("source")?,
+                target: r.try_get("target")?,
+                kind: r.try_get("kind")?,
+                weight: r.try_get("weight")?,
+            })
+        })
+        .collect()
 }
 
 fn decode_note(row: &PgRow) -> Result<Note> {
