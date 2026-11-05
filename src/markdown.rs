@@ -1,18 +1,23 @@
 //! Parsing focused Markdown notes: YAML frontmatter, title, and labels.
 //!
 //! Note text is evidence, never executable instructions.
+//!
+//! A note lock must fail closed: a `lock` key that lists no provider, or a
+//! key that looks like a misspelled `lock` (`Lock`, `locks`, `locked`), makes
+//! the file fail instead of importing the note unlocked.
 
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
 
 use crate::model::NoteInput;
+use crate::vault::Provider;
 
 /// Frontmatter fields Kioku reads. Other fields (Obsidian dates, CSS classes,
-/// and so on) are ignored. Plain YAML scalars such as `2024` are accepted as
-/// strings; booleans must be `true` or `false`.
+/// and so on) are ignored, except near misses of `lock`. Plain YAML scalars
+/// such as `2024` are accepted as strings; booleans must be `true` or `false`.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 struct Frontmatter {
@@ -26,8 +31,118 @@ struct Frontmatter {
     tags: Option<OneOrMany>,
     confidence: Option<f64>,
     pinned: Option<bool>,
-    /// Model providers that may read the note, one or a list.
+    /// Model providers that may read the note, one or a list. `Some` whenever
+    /// the key is present, even as `lock:` with no value, so an empty lock is
+    /// an error rather than no lock.
+    #[serde(deserialize_with = "present")]
     lock: Option<OneOrMany>,
+}
+
+/// A field that is `Some` when present, even when its value is null.
+fn present<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<OneOrMany>, D::Error> {
+    OneOrMany::deserialize(deserializer).map(Some)
+}
+
+/// The top-level keys of a frontmatter mapping, as text. Keys that aren't
+/// scalars are left out.
+struct TopKeys(Vec<String>);
+
+impl<'de> Deserialize<'de> for TopKeys {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct KeysVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for KeysVisitor {
+            type Value = TopKeys;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a mapping")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<TopKeys, A::Error> {
+                let mut keys = Vec::new();
+                while let Some(KeyText(key)) = map.next_key()? {
+                    map.next_value::<serde::de::IgnoredAny>()?;
+                    keys.extend(key);
+                }
+                Ok(TopKeys(keys))
+            }
+            fn visit_unit<E: serde::de::Error>(self) -> Result<TopKeys, E> {
+                Ok(TopKeys(Vec::new()))
+            }
+        }
+
+        deserializer.deserialize_map(KeysVisitor)
+    }
+}
+
+/// A mapping key as text, or `None` for a key that isn't a scalar.
+struct KeyText(Option<String>);
+
+impl<'de> Deserialize<'de> for KeyText {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct KeyVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for KeyVisitor {
+            type Value = KeyText;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a mapping key")
+            }
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<KeyText, E> {
+                Ok(KeyText(Some(v.to_owned())))
+            }
+            fn visit_bool<E: serde::de::Error>(self, _: bool) -> Result<KeyText, E> {
+                Ok(KeyText(None))
+            }
+            fn visit_i64<E: serde::de::Error>(self, _: i64) -> Result<KeyText, E> {
+                Ok(KeyText(None))
+            }
+            fn visit_u64<E: serde::de::Error>(self, _: u64) -> Result<KeyText, E> {
+                Ok(KeyText(None))
+            }
+            fn visit_f64<E: serde::de::Error>(self, _: f64) -> Result<KeyText, E> {
+                Ok(KeyText(None))
+            }
+            fn visit_unit<E: serde::de::Error>(self) -> Result<KeyText, E> {
+                Ok(KeyText(None))
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<KeyText, A::Error> {
+                while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
+                Ok(KeyText(None))
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<KeyText, A::Error> {
+                while map
+                    .next_entry::<serde::de::IgnoredAny, serde::de::IgnoredAny>()?
+                    .is_some()
+                {}
+                Ok(KeyText(None))
+            }
+        }
+
+        deserializer.deserialize_any(KeyVisitor)
+    }
+}
+
+/// A top-level key that looks like `lock` but isn't, so Kioku would ignore
+/// it and leave the note unlocked.
+fn misspelled_lock(yaml: &str) -> Option<String> {
+    // The frontmatter already parsed, so a key walk that fails can only mean
+    // exotic keys; the `lock` key itself has been read either way.
+    let TopKeys(keys) = serde_saphyr::from_str(yaml).ok()?;
+    keys.into_iter().find(|key| {
+        let lower = key.trim().to_lowercase();
+        key != "lock" && matches!(lower.as_str(), "lock" | "locks" | "locked")
+    })
 }
 
 /// A frontmatter list that may also be written as a single value. Plain
@@ -146,17 +261,56 @@ fn text(value: Option<String>) -> Option<String> {
 
 /// Parse one focused Markdown note. The actual import location supplies provenance.
 /// Frontmatter `id` is accepted as a stable textual key, not a database UUID override.
+/// A note whose frontmatter names no domain belongs to `default_domain`.
 pub fn parse_markdown(text_in: &str, source: &str, default_domain: &str) -> Result<NoteInput> {
+    parse(text_in, source, Some(default_domain))
+}
+
+/// Like [`parse_markdown`], but the frontmatter must name the note's domain.
+/// Vault imports use this: one notes folder serves every vault, so a file
+/// that doesn't say where it belongs must not adopt the importer's domain.
+pub fn parse_markdown_declared(text_in: &str, source: &str) -> Result<NoteInput> {
+    parse(text_in, source, None)
+}
+
+fn parse(text_in: &str, source: &str, default_domain: Option<&str>) -> Result<NoteInput> {
     // A BOM and Windows line endings should not prevent frontmatter recognition.
     let normalized = text_in.trim_start_matches('\u{feff}').replace("\r\n", "\n");
     let (frontmatter, body) = split_frontmatter(&normalized)?;
     let meta: Frontmatter = match frontmatter {
-        Some(yaml) if !yaml.trim().is_empty() => serde_saphyr::from_str_with_options(
-            yaml,
-            serde_saphyr::options! { strict_booleans: true },
-        )
-        .context("invalid YAML frontmatter (quote [[wiki links]] inside lists, for example related: ['[[Note]]'])")?,
+        Some(yaml) if !yaml.trim().is_empty() => {
+            let meta = serde_saphyr::from_str_with_options(
+                yaml,
+                serde_saphyr::options! { strict_booleans: true },
+            )
+            .context("invalid YAML frontmatter (quote [[wiki links]] inside lists, for example related: ['[[Note]]'])")?;
+            if let Some(key) = misspelled_lock(yaml) {
+                bail!(
+                    "frontmatter key {key:?} is not read; write it as `lock` (lowercase) to limit which models may read this note, or rename it"
+                );
+            }
+            meta
+        }
         _ => Frontmatter::default(),
+    };
+    let domain = match (text(meta.domain), default_domain) {
+        (Some(domain), _) => domain,
+        (None, Some(default)) => default.to_owned(),
+        (None, None) => bail!(
+            "the frontmatter names no domain; with vaults, every imported file must say which domain it belongs to (domain: ...)"
+        ),
+    };
+    let lock = match meta.lock {
+        None => Vec::new(),
+        Some(providers) => {
+            let lock = list(Some(providers));
+            ensure!(
+                !lock.is_empty(),
+                "lock lists no providers; list at least one ({}), or remove the key",
+                Provider::names()
+            );
+            deduplicate_strings(lock.into_iter().map(|p| p.to_lowercase()).collect())
+        }
     };
 
     let fallback_key = Path::new(source)
@@ -173,7 +327,7 @@ pub fn parse_markdown(text_in: &str, source: &str, default_domain: &str) -> Resu
     let mut aliases = list(meta.aliases);
     aliases.extend(list(meta.alias));
     let note = NoteInput {
-        domain: text(meta.domain).unwrap_or_else(|| default_domain.to_owned()),
+        domain,
         key,
         title,
         body: body.trim().to_owned(),
@@ -183,12 +337,7 @@ pub fn parse_markdown(text_in: &str, source: &str, default_domain: &str) -> Resu
         source: Some(source.to_owned()),
         confidence: meta.confidence.unwrap_or(0.8),
         pinned: meta.pinned.unwrap_or(false),
-        lock: deduplicate_strings(
-            list(meta.lock)
-                .into_iter()
-                .map(|provider| provider.to_lowercase())
-                .collect(),
-        ),
+        lock,
     };
     note.validate()?;
     Ok(note)
@@ -297,6 +446,57 @@ mod tests {
         );
         let error = parse_markdown("---\nlock: [gpt]\n---\nBody.", "n.md", "d").unwrap_err();
         assert!(error.to_string().contains("lock"), "{error}");
+    }
+
+    #[test]
+    fn an_empty_lock_fails_instead_of_leaving_the_note_unlocked() {
+        for yaml in [
+            "lock: []",
+            "lock: \"\"",
+            "lock:",
+            "lock: ~",
+            "lock: null",
+            "lock: ['', ' ']",
+        ] {
+            let text = format!("---\nkey: k\n{yaml}\n---\nBody.");
+            let error = parse_markdown(&text, "n.md", "d").unwrap_err().to_string();
+            assert!(error.contains("lock lists no providers"), "{yaml}: {error}");
+        }
+        let kept = parse_markdown("---\nlock: [local, '']\n---\nBody.", "n.md", "d").unwrap();
+        assert_eq!(kept.lock, ["local"]);
+    }
+
+    #[test]
+    fn a_misspelled_lock_key_fails_instead_of_being_ignored() {
+        for key in ["Lock", "LOCK", "locks", "Locked", "locked", "\"Lock\""] {
+            let text = format!("---\nkey: k\n{key}: [local]\n---\nBody.");
+            let error = parse_markdown(&text, "n.md", "d").unwrap_err().to_string();
+            assert!(error.contains("write it as `lock`"), "{key}: {error}");
+        }
+        // Keys that merely contain the word, and nested keys, are fine.
+        let parsed = parse_markdown(
+            "---\nkey: k\nlockfile: yes\nblock: [a]\nmeta:\n  locked: true\n2024: x\n---\nBody.",
+            "n.md",
+            "d",
+        )
+        .unwrap();
+        assert!(parsed.lock.is_empty());
+    }
+
+    #[test]
+    fn a_declared_parse_needs_the_domain_in_frontmatter() {
+        let named = parse_markdown_declared("---\ndomain: work\n---\nBody.", "n.md").unwrap();
+        assert_eq!(named.domain, "work");
+        for text in [
+            "---\nkey: k\n---\nBody.",
+            "---\ndomain: ' '\n---\nBody.",
+            "# Title\nBody.",
+        ] {
+            let error = parse_markdown_declared(text, "n.md")
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("names no domain"), "{text:?}: {error}");
+        }
     }
 
     #[test]
