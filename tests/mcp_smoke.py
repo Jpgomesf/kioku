@@ -9,8 +9,9 @@ names contain "smoke" or "test". The script writes fixture notes and feedback
 there; it never deletes databases, collections, or memories. It runs the server
 with every tool enabled, its own notes folder, and a trace file, all in a
 temporary directory. A last phase writes a temporary vaults.toml with two vaults
-over smoke-a and smoke-b domains and checks that nothing crosses between them
-and that locks hide notes by model provider. No Python packages are needed.
+over smoke-a and smoke-b domains and checks that nothing crosses between them,
+and that locks hide notes by model provider, including through links, stats,
+the older rag_* tools, and lifecycle tools. No Python packages are needed.
 """
 
 from __future__ import annotations
@@ -299,6 +300,14 @@ def run(client: StdioClient, checks: Checks, notes_root: Path, hydration_key: st
     checks.check("identical save changes nothing", repeated["changed"] is False and repeated["revision"] == first["revision"])
     checks.check("identical save keeps the edit timestamp", before["updated_at"] == after["updated_at"])
     checks.check("identical save creates no memory", client.call("memory_stats")["total"] == total_before)
+    history_key = "smoke-history-" + uuid.uuid4().hex[:12]
+    for title in ("History v1", "History v2"):
+        client.call("memory_save", {"domain": domain, "key": history_key, "title": title, "source": "smoke://fixtures/history",
+                                    "body": f"{title} of a note saved twice, so its history has two entries."})
+    history = client.call("memory_inspect", {"key": history_key, "domain": domain}).get("history", [])
+    checks.check("inspect lists a note's history, newest first",
+                 [h.get("title") for h in history] == ["History v2", "History v1"]
+                 and [h.get("revision") for h in history] == [2, 1])
 
     client.call("memory_save", ledger)
     client.call("memory_save", untrusted)
@@ -503,14 +512,21 @@ def run_vaults(binary: Path, values: dict[str, str], root: Path, timeout: float,
         folder.mkdir(parents=True)
     notes = root / "vault-notes"
     notes.mkdir()
-    canary_a, canary_b, locked_key, sealed_key = (f"{name}-{tag}" for name in ("canary-a", "canary-b", "locked", "sealed"))
+    canary_a, canary_b, locked_key, sealed_key, linker_key, hush_key = (
+        f"{name}-{tag}" for name in ("canary-a", "canary-b", "locked", "sealed", "linker", "hush"))
     word_a, word_b, word_locked = (f"{name}{tag}" for name in ("ALPHACANARY", "BRAVOCANARY", "SEALEDCANARY"))
+    locked_title = f"Locked note {tag}"
     (notes / "locked.md").write_text(
-        f"---\nkey: {locked_key}\ndomain: smoke-a\ntitle: Locked note {tag}\nlock: [local]\n---\n"
+        f"---\nkey: {locked_key}\ndomain: smoke-a\ntitle: {locked_title}\nlock: [local]\n---\n"
         f"The locked fact {word_locked} is for local models only.\n", encoding="utf-8")
     # One notes folder serves every vault: vault A's imports must not name this file.
     (notes / f"bravo-{tag}.md").write_text(
         f"---\nkey: {canary_b}-file\ndomain: smoke-b\ntitle: Bravo file\n---\nVault B's file {word_b}.\n", encoding="utf-8")
+    # Vault B's file that relies on `kioku ingest --domain smoke-b` names no
+    # domain, so it must not join vault A's domain either.
+    (notes / "smoke-b").mkdir()
+    (notes / "smoke-b" / f"plain-{tag}.md").write_text(
+        f"---\nkey: {canary_b}-plain\ntitle: Bravo plain file\n---\nVault B's domain-less file {word_b}.\n", encoding="utf-8")
     vaults_file = root / "vaults.toml"
     vaults_file.write_text(VAULTS_TOML.format(
         vault_a=json.dumps(str(vault_a)), vault_b=json.dumps(str(vault_b)), area=json.dumps(str(area))), encoding="utf-8")
@@ -559,8 +575,31 @@ def run_vaults(binary: Path, values: dict[str, str], root: Path, timeout: float,
         imported = local.call("memory_import", {"domain": "smoke-a"})
         checks.check("a local session imports a note locked to local",
                      imported["imported"] == 1 and [n["key"] for n in imported["notes"]] == [locked_key])
-        checks.check("an import counts another vault's file but never names it",
-                     imported["failed"] == [] and imported["failed_count"] == 1 and clean(imported))
+        checks.check("an import counts other vaults' files, with or without a domain, but never names them",
+                     imported["failed"] == [] and imported["failed_count"] == 2 and "name its domain" in imported.get("hint", "")
+                     and clean(imported))
+        checks.check("a file without a domain is not imported into the session's domain",
+                     bool(refused(local, "memory_get", {"keys": [f"{canary_b}-plain"], "domain": "smoke-a"}, "not_found"))
+                     and clean(local.call("memory_search", {"query": word_b, "domain": "smoke-a", "limit": 20})))
+        (notes / "hush").mkdir()
+        (notes / "hush" / f"{hush_key}.md").write_text(
+            f"---\nkey: {hush_key}\ndomain: smoke-a/hush\ntitle: Hushed note\nlock: [local]\n---\nOnly local models know this domain.\n",
+            encoding="utf-8")
+        hushed = local.call("memory_import", {"path": "hush", "domain": "smoke-a/hush"})
+        linked = local.call("memory_save", {"key": linker_key, "title": f"Linker note {tag}", "domain": "smoke-a",
+                                            "body": "This visible note links to the locked one.", "related": [locked_key]})
+        checks.check("a local session fills a domain of locked notes and links a visible note to a locked one",
+                     hushed["imported"] == 1 and "unresolved_related" not in linked)
+        local_inspect = local.call("memory_inspect", {"key": linker_key, "domain": "smoke-a"})
+        local_read = local.call("memory_get", {"keys": [linker_key], "domain": "smoke-a"})
+        local_rag = local.call("rag_context", {"query": word_locked, "domain": "smoke-a"})
+        checks.check("provider local sees the link to the locked note in inspect, get, and rag_context",
+                     locked_key in {l["key"] for l in local_inspect["links"]}
+                     and locked_key in local_read["memories"][0].get("links", [])
+                     and word_locked in json.dumps(local_rag))
+        local_wide = local.call("memory_search", {"query": word_a})
+        checks.check("provider local's vault-wide search covers the domain of locked notes",
+                     "smoke-a/hush" in local_wide.get("domains", []))
         found = local.call("memory_search", {"query": word_locked, "domain": "smoke-a"})
         checks.check("a note locked to local is visible to provider local", locked_key in keys(found["results"]))
         sealed = local.call("memory_search", {"query": word_locked, "domain": "smoke-a/sealed"})
@@ -571,6 +610,13 @@ def run_vaults(binary: Path, values: dict[str, str], root: Path, timeout: float,
         checks.check("a vault-wide search covers only this vault's visible domains",
                      wide.get("vault") == "smoke-a" and "smoke-a" in wide.get("domains", [])
                      and all(d.startswith("smoke-a") and d != "smoke-a/sealed" for d in wide["domains"]))
+        checks.check("a vault-wide search never names a domain whose notes are all locked away",
+                     "smoke-a/hush" not in wide["domains"])
+        empty = f"smoke-a/empty-{tag}"
+        hint = a.call("memory_search", {"query": "anything", "domain": empty}).get("next", "")
+        local_hint = local.call("memory_search", {"query": "anything", "domain": empty}).get("next", "")
+        checks.check("the empty-domain hint names only domains holding a visible note",
+                     "has no memories" in hint and "smoke-a/hush" not in hint and "smoke-a/hush" in local_hint)
         checks.check("a vault-wide search never returns another vault's canary", clean(wide))
         own = a.call("memory_search", {"query": word_a})
         checks.check("a vault-wide search finds this vault's notes, with their domain",
@@ -585,8 +631,12 @@ def run_vaults(binary: Path, values: dict[str, str], root: Path, timeout: float,
         stats = a.call("memory_stats")
         checks.check("stats cover only this vault's visible notes",
                      stats.get("vault") == "smoke-a" and stats["by_domain"].get("smoke-a", 0) >= 1
-                     and all(d.startswith("smoke-a") and d != "smoke-a/sealed" for d in stats["by_domain"])
+                     and all(d.startswith("smoke-a") and d not in ("smoke-a/sealed", "smoke-a/hush") for d in stats["by_domain"])
                      and stats["total"] == sum(stats["by_domain"].values()) and clean(stats))
+        local_stats = local.call("memory_stats")
+        checks.check("stats leave out locked notes, which provider local counts",
+                     stats["by_domain"]["smoke-a"] < local_stats["by_domain"]["smoke-a"]
+                     and "smoke-a/hush" in local_stats["by_domain"])
         checks.check("legacy rag_search stays inside the vault", clean(a.call("rag_search", {"query": word_b, "limit": 10})))
         checks.check("legacy rag_search refuses another vault's domain",
                      bool(refused(a, "rag_search", {"query": word_b, "domain_filter": "smoke-b"})))
@@ -604,6 +654,33 @@ def run_vaults(binary: Path, values: dict[str, str], root: Path, timeout: float,
                      bool(refused(a, "memory_inspect", {"key": locked_key, "domain": "smoke-a"}, "not_found")))
         checks.check("save cannot overwrite a note locked to another provider", bool(refused(a, "memory_save", {
             "key": locked_key, "title": "Overwrite", "domain": "smoke-a", "body": "Must not replace a locked note."}, "conflict")))
+        inspected = a.call("memory_inspect", {"key": linker_key, "domain": "smoke-a"})
+        checks.check("inspect leaves out a link to a locked note",
+                     locked_key not in json.dumps(inspected) and inspected.get("links_total") == 0)
+        read = a.call("memory_get", {"keys": [linker_key], "domain": "smoke-a"})
+        checks.check("get leaves out a link to a locked note",
+                     read["memories"][0]["key"] == linker_key and locked_key not in json.dumps(read))
+        rag = json.dumps(a.call("rag_context", {"query": word_locked, "domain": "smoke-a"}))
+        checks.check("legacy rag_context packs neither a locked note nor links to it",
+                     word_locked not in rag and locked_key not in rag)
+        for label, tool, arguments in [
+            ("memory_retire", "memory_retire", {"key": locked_key, "domain": "smoke-a"}),
+            ("memory_restore", "memory_restore", {"key": locked_key, "domain": "smoke-a"}),
+            ("memory_feedback", "memory_feedback", {"key": locked_key, "domain": "smoke-a", "positive": False}),
+            ("memory_retire by title", "memory_retire", {"key": locked_title, "domain": "smoke-a"}),
+        ]:
+            checks.check(f"{label} cannot reach a note locked to another provider",
+                         bool(refused(a, tool, arguments, "not_found")))
+        retired = local.call("memory_retire", {"key": locked_key, "domain": "smoke-a"})
+        restored = local.call("memory_restore", {"key": locked_key, "domain": "smoke-a"})
+        checks.check("provider local may retire and restore the locked note",
+                     retired["status"] == "legacy" and restored["status"] == "active")
+        probe = a.call("memory_save", {"key": f"probe-{tag}", "title": "Probe", "domain": "smoke-a",
+                                       "body": "A save that names a locked note's title and key in related.",
+                                       "related": [locked_title, locked_key]})
+        checks.check("a save's unresolved links treat a locked note's title and key as missing",
+                     {u["ref"]: u["reason"] for u in probe.get("unresolved_related", [])}
+                     == {locked_title: "not_found", locked_key: "not_found"})
         checks.check("an area locked to local is refused to provider anthropic",
                      "locked" in refused(a, "memory_search", {"query": word_locked, "domain": "smoke-a/sealed"}))
         checks.check("a vault-wide search skips locked notes and areas",
