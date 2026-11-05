@@ -16,9 +16,12 @@ All notable changes to this project are documented here. The format follows
   plus one note per section keyed by GitHub's heading anchor. Each note opens
   with a facts line built from the spec's fields (type, lifecycle, trust tier,
   `stale_after`, `generated`, `resource`) and the producer's other plain
-  fields. Deprecated concepts become legacy, and notes whose concept left the
-  bundle are retired, so a re-import follows the bundle. `memory_import`
-  refuses a bundle and points to the command line.
+  fields. Deprecated concepts become legacy, and so do notes whose concept
+  left the bundle, so a re-import follows the bundle. `memory_import` refuses
+  a path in a bundle and points to the command line, and a Markdown import
+  lists a bundle it meets under `failed` instead of reading it.
+- An imported note whose source is a section (`file.md#anchor`) belongs to its
+  file while the file exists, as other file-backed notes do.
 - Embeddings on the Apple GPU. `make start` starts the Ollama container only
   when `EMBEDDING_URL` points at it (`127.0.0.1:11435`). With a native Ollama
   (`brew install ollama`, `EMBEDDING_URL=http://127.0.0.1:11434`) it starts

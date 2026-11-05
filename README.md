@@ -198,19 +198,25 @@ kioku ingest --path ~/work/company-kb --domain company/kb
   a link to `/kb/architecture.md#router` reaches the section about the router.
   Sections split at their headings, then by paragraph and table row (tables
   keep their header).
-- **Facts line.** Every note opens with the concept's type and id, its
+- **Facts line.** A concept's note (or hub) opens with its type and id, its
   lifecycle, the trust tier `verified` gives (unverified, machine-confirmed,
   human-reviewed), `stale_after`, the producer's other plain fields (a
   decision's status and who made it, say), who wrote it, and its `resource`.
-  Trust also sets the note's confidence. Profile fields need no setup in
-  Kioku.
+  A section opens with a shorter line: type and id, the concept it belongs
+  to, lifecycle, trust, and `stale_after`. Trust also sets the note's
+  confidence. Profile fields need no setup in Kioku.
 - **Lifecycle.** The bundle decides: concepts with `status: deprecated` are
   legacy notes, the rest are active, and a note whose concept or section left
-  the bundle is retired, never deleted. The report's `okf` part counts what
-  was read, retired, restored, and removed.
-- A bundle names no domain of its own, so only the command line imports one;
-  `memory_import` on a bundle explains how. A `lock` in a concept's
-  frontmatter works as in any note.
+  the bundle (or a bundle moved since its last import) becomes legacy too,
+  never deleted. The report's `okf` part counts what was read, and, for the
+  lifecycle, `retired` (now deprecated), `restored` (no longer deprecated),
+  and `removed` (gone from the bundle).
+- A bundle names no domain of its own, so only the command line imports one.
+  `memory_import` refuses a path in a bundle, and a Markdown import that
+  meets a bundle inside its folder lists it under `failed` instead of reading
+  it. `lock` and `pinned` in a concept's frontmatter work as in any note, and
+  a link to a locked concept keeps only its author's words, so the target's
+  title or id never reaches a note that more providers may read.
 
 ## How retrieval works
 
