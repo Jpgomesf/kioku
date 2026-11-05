@@ -132,6 +132,9 @@ It replaces the retired batch-worker.
 
 - `related` links resolve within the domain by key, then title, then alias;
   `[[wiki links]]` work. Missing or ambiguous references are reported.
+- `lock: local` (or a list of providers) limits which models may read the
+  note. It takes effect with a vaults file; see
+  [Vaults and locks](#vaults-and-locks).
 - Saving a key again replaces its text, but nothing is lost: every save,
   edit, retirement, and restore appends the note's content and status to
   `memory_note_revisions`, and `memory_inspect` lists the ten latest entries.
@@ -204,10 +207,13 @@ the file named by `--env-file` win over inherited variables.
 | `MEMORY_TOOLS` | `core` | `core`, `all`, or a comma-separated list |
 | `MEMORY_HALF_LIFE_DAYS`, `MEMORY_LEGACY_THRESHOLD` | `90`, `0.2` | Aging policy |
 | `MEMORY_BACKGROUND_UPKEEP` | `true` | Daily index repair while serving, and a log of notes aging would retire |
-| `MEMORY_TRACE_FILE`, `MEMORY_TRACE_RUN` | unset | Record every tool call as JSONL |
+| `MEMORY_TRACE_FILE`, `MEMORY_TRACE_RUN` | unset | Record every tool call as JSONL; `{vault}` in the path gives each vault its own file |
 | `MEMORY_TRACE_CONTENT`, `MEMORY_TRACE_SALT` | `full`, random | `redacted` or `hashed` keep keys, domains, and timing but drop query and note text |
 | `MEMORY_PRINCIPAL`, `MEMORY_SCOPES`, `MEMORY_DOMAINS` | `local`, `read,write,admin`, `*` | Access profile for a stdio server ([Access control](#access-control)) |
 | `MEMORY_ACCESS_FILE` | unset | Who may connect to `serve --http` |
+| `MEMORY_VAULTS_FILE` | `~/.config/kioku/vaults.toml` | Vault rules ([Vaults and locks](#vaults-and-locks)); no file means no vaults |
+| `MEMORY_PROVIDER` | unset | The client's model provider; set it in each client's MCP config, never in `.env` |
+| `KIOKU_SESSION_DIR` | the working directory | The folder that places a session in a vault; set it per client |
 | `MEMORY_LOG_FORMAT` | `text` | `json` for one JSON object per log line; filter with `RUST_LOG` |
 
 ## Access control
@@ -220,7 +226,7 @@ listed at all.
 
 ```jsonc
 // Kilo with a local model: read and save, personal domains only
-"env": { "MEMORY_SCOPES": "read,write", "MEMORY_DOMAINS": "personal-*,kioku", "MEMORY_DEFAULT_DOMAIN": "kioku" }
+"environment": { "MEMORY_SCOPES": "read,write", "MEMORY_DOMAINS": "personal-*,kioku", "MEMORY_DEFAULT_DOMAIN": "kioku" }
 ```
 
 Patterns are globs (`work-*`) or anchored regexes (`re:client-(acme|globex)`),
@@ -247,6 +253,93 @@ and `tools/list` differs per principal. That token check is the only code that
 knows about credentials, so an OAuth provider can replace it later without
 changing tools.
 
+## Vaults and locks
+
+A vault holds everything about one company or one part of your life, such as
+`personal` and `trifundable`. Its areas are domains. Vaults never see each
+other, in either direction. A lock limits which model providers may read an
+area or a note.
+
+Vaults are off until `~/.config/kioku/vaults.toml` exists (or the file named
+by `MEMORY_VAULTS_FILE`). Without that file, Kioku works exactly as before.
+
+```toml
+[[vault]]
+name = "personal"
+paths = ["~"]                         # folders that place a session here
+domains = ["personal", "personal/*", "kioku", "local"]
+providers = ["local", "anthropic"]    # who may read this vault
+default_domain = "personal"
+
+[[vault]]
+name = "trifundable"
+paths = ["~/work/trifundable"]
+git_remotes = ["github.com/fundable-ai/*"]   # a match wins over paths
+domains = ["trifundable", "trifundable/*"]
+providers = ["local", "anthropic", "openai"]
+default_domain = "trifundable"
+
+[[area]]
+domain = "personal/kioku"
+paths = ["~/projects/personal/mcp/kioku"]
+
+[[lock]]
+domains = ["personal/citizenship"]    # only local models may read these notes
+providers = ["local"]
+```
+
+**Placement.** A session's folder is `KIOKU_SESSION_DIR`, or else the folder
+the client started Kioku in.
+
+- If that folder is in a git repository whose remote matches a vault's
+  `git_remotes`, that vault wins. Remotes are compared as `host/owner/repo` in
+  lowercase, `origin` first. Kioku reads `.git/config` itself; it needs no
+  network and no `git`.
+- Otherwise the vault with the longest matching `paths` entry wins.
+- Inside an area's folder, calls without a domain use that area. At the
+  vault's root they use `default_domain`, and `memory_search` without a domain
+  searches every domain of the vault at once. Each result then names its
+  domain.
+- A session that no vault covers gets no memories. Every tool returns a
+  `refused` error that names its folder and the vaults file.
+
+**Providers.** Each client declares the provider of its model with
+`MEMORY_PROVIDER`: `local`, `anthropic`, `openai`, `moonshot`, `deepseek`,
+`google`, or `other`. A client without it gets no memories. Set it in the
+client's MCP config env, never in `.env`: values in `.env` override the
+client's, so every client would claim the same provider. Kioku logs a warning
+when `.env` sets `MEMORY_PROVIDER` or `KIOKU_SESSION_DIR`.
+[docs/clients.md](docs/clients.md#vaults-and-providers) shows each client.
+
+**What a session sees.** The domains of its vault, narrowed by
+`MEMORY_DOMAINS` if that is set, minus areas whose lock leaves out its
+provider. The vault must list the provider too. A note can also carry its own
+lock in frontmatter (`lock: local`, or `lock: [local, anthropic]`);
+`memory_save` keeps a note's lock but can't set one.
+
+- A note a session may not see is missing everywhere: search, `memory_get`,
+  `memory_inspect`, links, `memory_stats`, import reports, and the older
+  `rag_*` tools. Hidden notes never shift the ranking of visible ones.
+- `memory_save` and `memory_import` may write only to visible domains.
+- `memory_stats` counts only what the session may see.
+- `memory_maintenance` is refused, because it ages every vault. Run
+  `kioku maintenance` instead.
+- The CLI is not restricted. It is your own shell.
+
+Mistakes in the vaults file stop the server at startup. A domain that matches
+no vault is invisible. A domain that matches two vaults is a configuration
+error, reported when a session meets it. Locks apply only with a vaults file,
+because only then do clients declare a provider.
+
+Over HTTP, each `[[principal]]` in the access file names its `provider` and
+`vault`; `kioku token NAME --provider anthropic --vault personal` writes both.
+In vault mode, a token without both gets nothing. HTTP sessions sit at their
+vault's root.
+
+`MEMORY_TRACE_FILE=/path/trace-{vault}.jsonl` gives each vault its own trace
+file, and every record names its vault. Sessions that were refused write to
+`trace-_unplaced.jsonl`. Without vaults, `{vault}` becomes `default`.
+
 ## Operations
 
 ```sh
@@ -269,7 +362,7 @@ only `kioku maintenance` or `memory_maintenance` with `dry_run: false` does.
 
 ```sh
 make check   # fmt, clippy with warnings denied, unit and contract tests
-make smoke   # 74 checks over stdio and 15 over HTTP; SMOKE_ENV must name test storage
+make smoke   # 108 checks over stdio and 20 over HTTP; SMOKE_ENV must name test storage
 make eval    # retrieval quality in isolated storage
 ```
 

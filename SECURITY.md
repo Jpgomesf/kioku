@@ -32,18 +32,38 @@ that machine's trust; stdio is not a sandbox.
 - **Traces contain note text unless told otherwise.** `MEMORY_TRACE_FILE` is off
   by default and created with mode 0600. `MEMORY_TRACE_CONTENT=redacted` or
   `hashed` drops queries, titles, and bodies while keeping keys and timing.
+  With `{vault}` in the path, each vault gets its own file.
 - **Clients can be scoped.** `MEMORY_SCOPES` and `MEMORY_DOMAINS` in a client's
   MCP config limit that client's process to some tools and domains. The checks
   run on the server for every call, including through older tool names, and
   `memory_stats` hides domains outside the profile.
+- **Vaults keep companies and models apart.** With a vaults file, each
+  session is placed in at most one vault, by its git remote or its folder,
+  and sees only that vault's domains. Area locks and note locks hide notes
+  from model providers they leave out. Every read path filters before
+  ranking (search, get, inspect, links, stats, import reports, older tool
+  names), so a hidden note is never returned and never shifts the ranking of
+  visible ones. Writes may target only visible domains, and a save can't
+  overwrite a hidden note. A session that isn't placed, or declares no
+  provider, gets nothing. A broken vaults file stops the server, and a domain
+  claimed by two vaults is an error, never shared.
+- **The provider is declared, not proven.** `MEMORY_PROVIDER` comes from the
+  client's own MCP config, and an access-file entry for HTTP. Kioku trusts
+  that config as it trusts the rest of your machine. It keeps the declaration
+  honest only against mistakes: `.env` values override a client's, so Kioku
+  warns when `.env` sets `MEMORY_PROVIDER` or `KIOKU_SESSION_DIR`. A hidden
+  note's key still can't be reused by a session that can't see it, so a save
+  can tell that the key is taken, and import reports count files they don't
+  name. The CLI is not restricted.
 - **HTTP is opt-in and local.** `serve --http` exists only in builds with the
   `http` feature, binds only to loopback addresses, and requires a bearer token
   on every request. Only SHA-256 hashes of tokens are stored, and they are
   compared in constant time. Host and Origin headers are validated against DNS
   rebinding, and request bodies are capped at 1 MiB. A request that reaches a
   tool without an authenticated principal gets a principal with no scopes, so
-  a wiring mistake fails closed. There is no OAuth yet; the transport is meant
-  for one machine.
+  a wiring mistake fails closed. In vault mode, a token works only if its
+  access-file entry names a provider and a vault. There is no OAuth yet; the
+  transport is meant for one machine.
 
 ## Supply chain
 

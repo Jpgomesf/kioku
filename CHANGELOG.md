@@ -8,6 +8,23 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Vaults and locks. A vaults file (`MEMORY_VAULTS_FILE`, default
+  `~/.config/kioku/vaults.toml`) groups domains into vaults that never see
+  each other. A stdio session is placed by the git remote of its repository,
+  else by the longest matching folder (`KIOKU_SESSION_DIR` or the working
+  directory), and declares its model provider with `MEMORY_PROVIDER`. Area
+  locks in the file and `lock` in note frontmatter limit which providers may
+  read notes. Search, get, inspect, links, stats, imports, and the older
+  `rag_*` tools all filter before ranking. A session that isn't placed, or
+  names no provider, gets a `refused` error from every tool. Without the file,
+  nothing changes.
+- Vault-wide search: at a vault's root, `memory_search` without a domain
+  searches every visible domain of the vault together, and each result names
+  its domain.
+- HTTP access-file entries take `provider` and `vault`
+  (`kioku token --provider --vault`); in vault mode a token needs both.
+- Traces record the vault, and `{vault}` in `MEMORY_TRACE_FILE` gives each
+  vault its own file.
 - Note history: every write that changes a note's content or status appends
   it to the append-only `memory_note_revisions` table in the same transaction,
   so overwritten text stays recoverable. Existing notes start their history at
@@ -37,6 +54,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- When a search finds nothing, the hint lists only domains the connection may
+  use. It used to list every domain, even for a restricted profile.
+- The README's Kilo example now passes variables under `environment`, the key
+  Kilo reads, instead of `env`.
 - Imports skip the files they can't import (unreadable, invalid frontmatter
   or content, another domain, a duplicate or owned key, too long to embed)
   and list them under `failed` with a reason and a path relative to the import

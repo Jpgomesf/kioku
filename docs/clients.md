@@ -56,6 +56,46 @@ calls on other domains return a `refused` error naming the allowed patterns.
 See [Access control](../README.md#access-control); the same principals apply
 to the optional HTTP transport.
 
+## Vaults and providers
+
+With a vaults file ([Vaults and locks](../README.md#vaults-and-locks)), every
+client must say who serves its model. Set `MEMORY_PROVIDER` in the client's
+own MCP config, never in `.env`: values in `.env` override the client's, so
+every client would claim the same provider. A client without it gets no
+memories.
+
+| Client and model | `MEMORY_PROVIDER` |
+|---|---|
+| Kilo with a local model (llama.cpp, Ollama, LM Studio) | `local` |
+| Claude Code | `anthropic` |
+| Codex | `openai` |
+| Kimi, DeepSeek, or Gemini models | `moonshot`, `deepseek`, `google` |
+| Anything else hosted | `other` |
+
+```sh
+# Claude Code
+claude mcp add --scope user --env MEMORY_PROVIDER=anthropic kioku -- /abs/kioku/scripts/mcp.sh
+```
+
+```toml
+# Codex: ~/.codex/config.toml
+[mcp_servers.kioku]
+command = "/abs/kioku/scripts/mcp.sh"
+env = { MEMORY_PROVIDER = "openai" }
+```
+
+```jsonc
+// Kilo: ~/.config/kilo/kilo.jsonc
+"mcp": {"kioku": {"type": "local", "command": ["/abs/kioku/scripts/mcp.sh"], "enabled": true,
+                  "environment": {"MEMORY_PROVIDER": "local"}}}
+```
+
+The session's folder decides its vault and area. Clients start Kioku in the
+project folder, so this usually needs nothing. If a client starts it
+elsewhere, set `KIOKU_SESSION_DIR` to the project folder in that client's
+config as well. A session in a folder no vault covers gets a `refused` error
+that names the folder.
+
 ## Why the surface looks like this
 
 Each rule below addresses a failure seen in real clients or models.
