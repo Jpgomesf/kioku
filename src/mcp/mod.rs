@@ -39,7 +39,7 @@ use rmcp::{ErrorData, RoleServer, ServerHandler, prompt_handler, tool_handler};
 use crate::access::Principal;
 use crate::app::App;
 use crate::error::UserError;
-use crate::trace::Tracer;
+use crate::trace::TraceFiles;
 use crate::vault::Session;
 use dispatch::Caller;
 use legacy::upgrade_legacy;
@@ -60,7 +60,7 @@ pub struct MemoryServer {
     app: App,
     tool_router: ToolRouter<Self>,
     prompt_router: PromptRouter<Self>,
-    tracer: Option<Tracer>,
+    tracer: Option<TraceFiles>,
     instructions: String,
     /// The process's own caller: the stdio profile and the vault its folder
     /// places it in, or over HTTP a principal with no scopes, so a request the
@@ -99,7 +99,12 @@ impl MemoryServer {
                 tracing::warn!(reason = reason.as_str(), "this session gets no memories");
             }
         }
-        Self::build(app, spec, Arc::new(Caller::new(principal, session)))
+        let server = Self::build(app, spec, Arc::new(Caller::new(principal, session)))?;
+        // Open this session's trace file now, so a bad path fails at startup.
+        if let Some(files) = &server.tracer {
+            files.tracer(server.caller.session.trace_label())?;
+        }
+        Ok(server)
     }
 
     /// Build a server for the HTTP transport. Each request carries its own
@@ -123,7 +128,7 @@ impl MemoryServer {
             .config
             .trace_file
             .as_deref()
-            .map(Tracer::open)
+            .map(TraceFiles::open)
             .transpose()?;
         Ok(Self {
             app,

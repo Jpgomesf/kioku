@@ -112,8 +112,16 @@ impl MemoryServer {
             ms = tracing::field::Empty,
         );
         let started = Instant::now();
-        let arguments = self
-            .tracer
+        // Each vault has its own trace file when the path names `{vault}`.
+        let tracer = self.tracer.as_ref().and_then(|files| {
+            files
+                .tracer(caller.session.trace_label())
+                .inspect_err(|error| {
+                    tracing::warn!(error = format!("{error:#}"), "cannot open trace file")
+                })
+                .ok()
+        });
+        let arguments = tracer
             .as_ref()
             .map(|_| request.arguments.clone().map_or(Value::Null, Value::Object));
         let client = context.peer.peer_info().map(|info| ClientInfo {
@@ -132,7 +140,7 @@ impl MemoryServer {
         };
         span.record("is_error", is_error);
         span.record("ms", duration_ms);
-        let (Some(tracer), Some(arguments)) = (&self.tracer, arguments) else {
+        let (Some(tracer), Some(arguments)) = (&tracer, arguments) else {
             return response;
         };
         let summary = summarize(&response);
