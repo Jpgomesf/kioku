@@ -144,16 +144,23 @@ impl Concept {
     }
 
     /// The first line of the concept's own note (or hub): its type and id,
-    /// lifecycle, trust, the producer's plain fields, who wrote it, and the
-    /// resource it describes.
+    /// lifecycle, trust, the producer's plain fields (what it replaces or is
+    /// replaced by first), who wrote it, and the resource it describes.
     pub fn facts(&self) -> String {
         let mut line = self.named_kind();
         for part in self.lifecycle_parts() {
             line.push_str(" · ");
             line.push_str(&part);
         }
+        let (relations, others): (Vec<_>, Vec<_>) = self
+            .fields
+            .iter()
+            .partition(|(key, _)| is_relation_key(key));
+        for (key, value) in relations {
+            line.push_str(&format!(" · {}: {value}", key.replace('_', " ")));
+        }
         let mut omitted = false;
-        for (key, value) in &self.fields {
+        for (key, value) in others {
             let part = format!(" · {}: {value}", key.replace('_', " "));
             if line.len() + part.len() > FACTS_BYTES {
                 omitted = true;
@@ -197,6 +204,13 @@ impl Concept {
         let opening: String = self.body.chars().take(400).collect();
         (!normalized(&opening).contains(&normalized(&probe))).then_some(description)
     }
+}
+
+/// Whether a producer field names the concepts this one replaces or is
+/// replaced by, such as `supersedes`, `superseded_by` or `replaces`.
+pub(super) fn is_relation_key(key: &str) -> bool {
+    let key = key.to_lowercase();
+    key.contains("supersed") || key.contains("replac")
 }
 
 fn normalized(text: &str) -> String {

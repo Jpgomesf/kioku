@@ -54,6 +54,8 @@ const MAX_RELATED: usize = 128;
 const MAX_LABELS: usize = 64;
 const MAX_TITLE_BYTES: usize = 512;
 const MAX_KEY_BYTES: usize = 256;
+/// The longest list of named replacements one facts-line field shows.
+const RELATION_CHARS: usize = 400;
 /// The hub shows at most this much of a long description.
 const HUB_DESCRIPTION_CHARS: usize = 600;
 
@@ -246,6 +248,7 @@ pub fn convert(bundle: &Bundle, domain: &str) -> Conversion {
             Err(reason) => failed.push((path.clone(), reason)),
         }
     }
+    name_replacements(&mut concepts);
     let mut summary = Summary {
         okf_version: bundle.version.clone(),
         concepts: concepts.len(),
@@ -366,6 +369,46 @@ pub fn convert(bundle: &Bundle, domain: &str) -> Conversion {
         notes,
         failed,
         summary,
+    }
+}
+
+/// Name the concepts a lifecycle field (`supersedes`, `superseded_by`) lists
+/// by id: `DEC-276` becomes `DEC-276 (Each batch links unlinked rows)`. A
+/// question about an old rule then reaches the note that replaced it, and a
+/// reader of either sees what changed, without opening the other. A locked
+/// concept's title is named only to notes under the same or a stricter lock.
+fn name_replacements(concepts: &mut [Concept]) {
+    let titles: HashMap<String, (String, Vec<String>)> = concepts
+        .iter()
+        .filter_map(|c| {
+            let id = c.producer_id.clone()?;
+            Some((id, (c.title.clone(), c.lock.clone())))
+        })
+        .collect();
+    for concept in concepts.iter_mut() {
+        let reader = concept.lock.clone();
+        for (key, value) in &mut concept.fields {
+            if !concept::is_relation_key(key) {
+                continue;
+            }
+            let named: Vec<String> = value
+                .split(", ")
+                .map(|id| {
+                    let id = id.trim();
+                    match titles.get(id) {
+                        Some((title, lock))
+                            if lock.is_empty()
+                                || (!reader.is_empty()
+                                    && reader.iter().all(|p| lock.contains(p))) =>
+                        {
+                            format!("{id} ({})", truncate_chars(title, 90))
+                        }
+                        _ => id.to_owned(),
+                    }
+                })
+                .collect();
+            *value = truncate_chars(&named.join("; "), RELATION_CHARS);
+        }
     }
 }
 

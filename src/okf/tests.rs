@@ -176,14 +176,14 @@ fn the_facts_line_carries_type_lifecycle_trust_and_producer_fields() {
     let facts = decision.input.body.lines().next().unwrap();
     assert_eq!(
         facts,
-        "Decision DEC-350 · human-reviewed by human:joao on 2026-11-04 · decision status: active · decided by: TJ · linear: FUN-628 (15:49 contract) · projects: People Data · supersedes: DEC-276"
+        "Decision DEC-350 · human-reviewed by human:joao on 2026-11-04 · supersedes: DEC-276 (Each batch links unlinked rows) · decision status: active · decided by: TJ · linear: FUN-628 (15:49 contract) · projects: People Data"
     );
     assert!((decision.input.confidence - 0.95).abs() < 1e-9);
 
     let old = note(&conversion, "kb/decisions/DEC-276-old");
     assert!(
         old.input.body.starts_with(
-            "Decision DEC-276 · deprecated · machine-confirmed · superseded by: DEC-350"
+            "Decision DEC-276 · deprecated · machine-confirmed · superseded by: DEC-350 (Fundable links come from sources)"
         ),
         "{}",
         old.input.body
