@@ -1,8 +1,9 @@
 //! Ranked search and graph lookups around a note.
 //!
-//! With a [`Viewer`], notes it may not see are dropped before ranking, and so
-//! are vector hits and links that touch them, so a hidden note can neither be
-//! returned nor shift the ranking of visible ones.
+//! With a [`Viewer`], notes it may not see are dropped before ranking. The
+//! vector index is told to leave them out of its candidates, and links that
+//! touch them are dropped, so a hidden note can neither be returned nor shift
+//! the ranking of visible ones.
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -152,18 +153,16 @@ impl App {
         span.record("domain", domains.join(",").as_str());
         let mut stats = SearchStats::default();
         let stage = Instant::now();
-        // A restricting viewer needs every note, legacy ones included, to
-        // know which links touch notes it may not see.
         let restricted = request.viewer.is_some_and(Viewer::restricts_notes);
-        let load_legacy = request.include_legacy || restricted;
         let mut notes = match domains {
-            [domain] => self.store.notes(Some(domain), load_legacy).await?,
-            several => self.store.notes_in(several, load_legacy).await?,
+            [domain] => {
+                self.store
+                    .notes(Some(domain), request.include_legacy)
+                    .await?
+            }
+            several => self.store.notes_in(several, request.include_legacy).await?,
         };
         let hidden = hide(&mut notes, request.viewer);
-        if restricted && !request.include_legacy {
-            notes.retain(|note| note.status == Status::Active);
-        }
         stats.load_ms = elapsed_ms(stage);
         stats.notes = notes.len();
         if notes.is_empty() {
@@ -182,7 +181,10 @@ impl App {
             ));
         }
         let stage = Instant::now();
-        let dense = match self.dense_scores(query, domains, &notes, request).await {
+        let dense = match self
+            .dense_scores(query, domains, &notes, &hidden, request)
+            .await
+        {
             Ok(dense) => {
                 stats.dense_candidates = dense.candidates;
                 stats.dense_stale = dense.stale;
@@ -207,11 +209,14 @@ impl App {
             }),
             None => Cow::Borrowed(&[]),
         };
-        if !hidden.is_empty() {
+        if restricted || !hidden.is_empty() {
+            // Keep only links between ranked notes, so none touches a hidden
+            // one, including hidden legacy notes that weren't loaded.
+            let ranked: HashSet<Uuid> = notes.iter().map(|n| n.id).collect();
             edges = Cow::Owned(
                 edges
                     .iter()
-                    .filter(|e| !hidden.contains(&e.source) && !hidden.contains(&e.target))
+                    .filter(|e| ranked.contains(&e.source) && ranked.contains(&e.target))
                     .cloned()
                     .collect(),
             );
@@ -271,22 +276,27 @@ impl App {
     }
 
     /// Cosine similarity for notes whose indexed revision is current.
-    /// PostgreSQL is authoritative even if a vector payload is stale.
+    /// PostgreSQL is authoritative even if a vector payload is stale. Hidden
+    /// notes are excluded in the index itself, so they take no candidate slot.
     async fn dense_scores(
         &self,
         query: &str,
         domains: &[String],
         notes: &[Note],
+        hidden: &HashSet<Uuid>,
         request: &SearchRequest<'_>,
     ) -> Result<Dense> {
         let vector = self.embedder.embed_query(query).await?;
         let domains: Vec<&str> = domains.iter().map(String::as_str).collect();
+        let mut exclude: Vec<Uuid> = hidden.iter().copied().collect();
+        exclude.sort_unstable();
         let hits = self
             .vector
             .search(
                 vector,
                 Some(&domains),
                 request.include_legacy,
+                &exclude,
                 (request.limit * 10).clamp(50, 200),
             )
             .await?;
