@@ -45,8 +45,8 @@ fn present<'de, D: serde::Deserializer<'de>>(
     OneOrMany::deserialize(deserializer).map(Some)
 }
 
-/// The top-level keys of a frontmatter mapping, as text. Keys that aren't
-/// scalars are left out.
+/// The top-level keys of a frontmatter mapping. Keys that aren't strings
+/// (numbers, lists) are left out; none of them can be a near miss of `lock`.
 struct TopKeys(Vec<String>);
 
 impl<'de> Deserialize<'de> for TopKeys {
@@ -79,7 +79,7 @@ impl<'de> Deserialize<'de> for TopKeys {
     }
 }
 
-/// A mapping key as text, or `None` for a key that isn't a scalar.
+/// A mapping key, or `None` for a key that isn't a string.
 struct KeyText(Option<String>);
 
 impl<'de> Deserialize<'de> for KeyText {

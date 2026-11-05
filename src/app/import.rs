@@ -343,10 +343,9 @@ fn prepare(
     let mut candidates = Vec::new();
     let mut failed = Vec::new();
     // With vault rules, a file must name its domain itself.
-    let declared = viewer.is_some_and(Viewer::restricts_notes);
+    let fallback = (!viewer.is_some_and(Viewer::restricts_notes)).then_some(domain);
     for (source, text) in files {
         let path = relative_path(base, &source);
-        let fallback = (!declared).then_some(domain);
         match text.and_then(|text| parse_file(&source, &text, fallback)) {
             Ok(input) if strict_domain && input.domain != domain => {
                 let reason = format!(
