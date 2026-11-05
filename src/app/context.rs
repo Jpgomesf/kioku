@@ -19,6 +19,7 @@ use uuid::Uuid;
 use crate::error::{invalid, not_found};
 use crate::model::{Note, Status};
 use crate::rank::{MatchKind, RankOptions};
+use crate::vault::Viewer;
 
 use super::excerpt::{Excerpt, query_weights};
 use super::{App, SearchHit, SearchRequest};
@@ -44,6 +45,9 @@ pub struct ContextRequest<'a> {
     pub ranking: RankOptions,
     /// Count included notes as consumed. Evaluation turns this off.
     pub record_access: bool,
+    /// Whose view to pack: notes it may not see are neither packed nor listed
+    /// as links. `None` (the CLI and evaluation) sees everything.
+    pub viewer: Option<&'a Viewer>,
 }
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
@@ -124,6 +128,7 @@ impl App {
                     include_legacy: request.include_legacy,
                     ranking: request.ranking,
                     edges: None,
+                    viewer: request.viewer,
                 })
                 .await?
                 .hits;
@@ -137,7 +142,10 @@ impl App {
                 continue;
             }
             match self.store.get(id).await? {
-                Some(note) if note.input.domain == domain => {
+                Some(note)
+                    if note.input.domain == domain
+                        && request.viewer.is_none_or(|viewer| viewer.sees(&note)) =>
+                {
                     let requested = request.ids.is_some();
                     if note.status == Status::Legacy && !request.include_legacy && !requested {
                         skipped.push(SkippedMemory {
@@ -157,9 +165,21 @@ impl App {
         if notes.is_empty() && request.ids.is_some() {
             not_found!("none of the requested memories exists in domain {domain:?}");
         }
+        // Links name only notes the viewer may see. Links never leave their
+        // domain, so the domain's visible notes are enough to decide.
+        let visible: Option<HashSet<Uuid>> = match request.viewer {
+            Some(viewer) if viewer.restricts_notes() => {
+                let mut all = self.store.notes(Some(domain), true).await?;
+                super::search::hide(&mut all, Some(viewer));
+                Some(all.iter().map(|n| n.id).collect())
+            }
+            _ => None,
+        };
         let links = self
             .store
-            .neighbor_keys(&notes.iter().map(|n| n.id).collect::<Vec<_>>())
+            .neighbor_keys(&notes.iter().map(|n| n.id).collect::<Vec<_>>(), |id| {
+                visible.as_ref().is_none_or(|ids| ids.contains(&id))
+            })
             .await?;
         let priority = if hits.is_empty() {
             notes.len()

@@ -118,6 +118,10 @@ pub struct ToolCall<'a> {
     pub session: Uuid,
     /// Who made the call: `local` over stdio, or an access-file subject.
     pub principal: &'a str,
+    /// The caller's vault. Absent without a vaults file and for sessions
+    /// that were refused.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vault: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -287,6 +291,7 @@ mod tests {
                     ts: Utc::now(),
                     session: tracer.session(),
                     principal: "local",
+                    vault: None,
                     run: None,
                     client: None,
                     called: None,

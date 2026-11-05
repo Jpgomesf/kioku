@@ -105,6 +105,7 @@ impl MemoryServer {
 
 impl MemoryServer {
     pub(super) async fn search(&self, args: SearchArgs) -> anyhow::Result<Value> {
+        let caller = self.caller();
         let mut notes = Vec::new();
         let domain = self.domain(args.domain.as_deref())?;
         let limit = clamp(args.limit.unwrap_or(5), 1, 20, "limit", &mut notes);
@@ -123,6 +124,7 @@ impl MemoryServer {
                 include_legacy: args.include_legacy.unwrap_or(false),
                 ranking,
                 edges: None,
+                viewer: Some(&caller.viewer),
             })
             .await?;
         let hits: Vec<Value> = results
@@ -158,8 +160,22 @@ impl MemoryServer {
             })
             .collect();
         let next = if hits.is_empty() {
-            let known = self.app.store.domain_counts().await?;
-            if known.iter().any(|(d, _)| *d == domain) {
+            // Counts include notes this caller may not see, so in vault mode
+            // only the visible notes the search ranked tell whether any exist.
+            let known: Vec<(String, i64)> = self
+                .app
+                .store
+                .domain_counts()
+                .await?
+                .into_iter()
+                .filter(|(d, _)| caller.viewer.sees_domain(d).unwrap_or(false))
+                .collect();
+            let has_notes = if caller.viewer.restricts_notes() {
+                results.stats.notes > 0
+            } else {
+                known.iter().any(|(d, _)| *d == domain)
+            };
+            if has_notes {
                 "No stored memory matched. Say so and check the source files.".to_owned()
             } else {
                 let names: Vec<String> = known.into_iter().map(|(d, _)| d).take(10).collect();
@@ -261,6 +277,7 @@ impl MemoryServer {
                     include_legacy: true,
                     ranking: RankOptions::HYBRID_GRAPH,
                     record_access: false,
+                    viewer: Some(&self.caller().viewer),
                 })
                 .await?;
             let consumed: Vec<Uuid> = pack.memories.iter().map(|m| m.id).collect();
@@ -308,6 +325,16 @@ impl MemoryServer {
         self.authorize_domain(&domain)?;
         let key = args.key.trim().to_owned();
         let existing = self.app.store.get(NoteInput::id_for(&domain, &key)).await?;
+        if existing
+            .as_ref()
+            .is_some_and(|note| !self.caller().viewer.sees(note))
+        {
+            // A locked note: don't overwrite what this session can't read.
+            return Err(UserError::Conflict(format!(
+                "key {key:?} in domain {domain:?} is not available to this session; save under another key"
+            ))
+            .into());
+        }
         let today = Utc::now().format("%Y-%m-%d");
         let stamped = match &client {
             Some(name) if !name.trim().is_empty() => format!("conversation via {name} on {today}"),

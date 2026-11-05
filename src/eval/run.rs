@@ -179,6 +179,7 @@ async fn run_queries(
                 include_legacy: query.include_legacy,
                 ranking,
                 edges,
+                viewer: None,
             })
             .await
             .with_context(|| format!("query {} failed", query.id))?
@@ -410,6 +411,7 @@ async fn context_sufficiency(app: &App, dataset: &Dataset, budget: usize) -> Res
                 include_legacy: query.include_legacy,
                 ranking: RankOptions::HYBRID_GRAPH,
                 record_access: false,
+                viewer: None,
             })
             .await
             .with_context(|| format!("context for {} failed", query.id))?;

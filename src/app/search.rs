@@ -1,6 +1,11 @@
 //! Ranked search and graph lookups around a note.
+//!
+//! With a [`Viewer`], notes it may not see are dropped before ranking, and so
+//! are vector hits and links that touch them, so a hidden note can neither be
+//! returned nor shift the ranking of visible ones.
 
-use std::collections::HashMap;
+use std::borrow::Cow;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use anyhow::Result;
@@ -10,10 +15,11 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::error::invalid;
+use crate::error::{invalid, not_found};
 use crate::model::{Edge, Note, Status};
 use crate::rank::{self, MatchKind, RankInput, RankOptions};
 use crate::text::truncate_chars;
+use crate::vault::Viewer;
 
 use super::App;
 
@@ -28,6 +34,9 @@ pub struct SearchRequest<'a> {
     /// Links to rank with instead of the domain's stored ones. Evaluation
     /// ablations set this; everything else passes `None`.
     pub edges: Option<&'a [Edge]>,
+    /// Whose view to rank: notes it may not see are left out. `None` (the CLI
+    /// and evaluation) sees everything; MCP always passes its session's viewer.
+    pub viewer: Option<&'a Viewer>,
 }
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
@@ -102,6 +111,21 @@ fn elapsed_ms(started: Instant) -> f64 {
     started.elapsed().as_secs_f64() * 1000.0
 }
 
+/// Drop the notes `viewer` may not see, and return their ids.
+pub(super) fn hide(notes: &mut Vec<Note>, viewer: Option<&Viewer>) -> HashSet<Uuid> {
+    let mut hidden = HashSet::new();
+    if let Some(viewer) = viewer {
+        notes.retain(|note| {
+            let visible = viewer.sees(note);
+            if !visible {
+                hidden.insert(note.id);
+            }
+            visible
+        });
+    }
+    hidden
+}
+
 impl App {
     #[tracing::instrument(
         name = "search",
@@ -122,10 +146,17 @@ impl App {
         span.record("domain", domain);
         let mut stats = SearchStats::default();
         let stage = Instant::now();
-        let notes = self
+        // A restricting viewer needs every note, legacy ones included, to
+        // know which links touch notes it may not see.
+        let restricted = request.viewer.is_some_and(Viewer::restricts_notes);
+        let mut notes = self
             .store
-            .notes(Some(domain), request.include_legacy)
+            .notes(Some(domain), request.include_legacy || restricted)
             .await?;
+        let hidden = hide(&mut notes, request.viewer);
+        if restricted && !request.include_legacy {
+            notes.retain(|note| note.status == Status::Active);
+        }
         stats.load_ms = elapsed_ms(stage);
         stats.notes = notes.len();
         if notes.is_empty() {
@@ -161,15 +192,21 @@ impl App {
         };
         stats.dense_ms = elapsed_ms(stage);
         let stage = Instant::now();
-        let stored;
-        let edges: &[Edge] = match request.edges {
-            Some(edges) => edges,
-            None if request.ranking.graph => {
-                stored = self.store.edges(Some(domain)).await?;
-                &stored
-            }
-            None => &[],
+        let mut edges: Cow<'_, [Edge]> = match request.edges {
+            Some(edges) => Cow::Borrowed(edges),
+            None if request.ranking.graph => Cow::Owned(self.store.edges(Some(domain)).await?),
+            None => Cow::Borrowed(&[]),
         };
+        if !hidden.is_empty() {
+            edges = Cow::Owned(
+                edges
+                    .iter()
+                    .filter(|e| !hidden.contains(&e.source) && !hidden.contains(&e.target))
+                    .cloned()
+                    .collect(),
+            );
+        }
+        let edges: &[Edge] = &edges;
         stats.links = edges.len();
         let ranked = rank::rank(
             &RankInput {
@@ -259,13 +296,19 @@ impl App {
         })
     }
 
+    /// A note and its explicit links. With a viewer, a note it may not see is
+    /// not found, and neighbors it may not see are left out.
     pub async fn graph_context(
         &self,
         id: Uuid,
         domain: Option<&str>,
         include_legacy: bool,
+        viewer: Option<&Viewer>,
     ) -> Result<Value> {
         let note = self.require_note(id, domain).await?;
+        if viewer.is_some_and(|viewer| !viewer.sees(&note)) {
+            not_found!("no memory {id} in domain {:?}", self.domain(domain));
+        }
         if !include_legacy && note.status == Status::Legacy {
             invalid!(
                 "memory {:?} is legacy; set include_legacy to inspect it",
@@ -273,10 +316,11 @@ impl App {
             );
         }
         let edges = self.store.edges(Some(&note.input.domain)).await?;
-        let notes = self
+        let mut notes = self
             .store
             .notes(Some(&note.input.domain), include_legacy)
             .await?;
+        hide(&mut notes, viewer);
         let by_id: HashMap<_, _> = notes.iter().map(|n| (n.id, n)).collect();
         let mut neighbors = Vec::new();
         for edge in edges.iter().filter(|e| e.source == id || e.target == id) {

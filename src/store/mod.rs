@@ -201,10 +201,12 @@ impl Store {
     }
 
     /// Keys of active notes explicitly linked to each of `ids`, both directions,
-    /// at most ten per note.
+    /// at most ten per note. Only neighbors whose id passes `keep` are listed,
+    /// so callers can leave out notes a session may not see.
     pub async fn neighbor_keys(
         &self,
         ids: &[Uuid],
+        keep: impl Fn(Uuid) -> bool,
     ) -> Result<std::collections::HashMap<Uuid, Vec<String>>> {
         let mut out: std::collections::HashMap<Uuid, Vec<String>> =
             std::collections::HashMap::new();
@@ -226,19 +228,21 @@ impl Store {
         for row in rows {
             let source: Uuid = row.try_get("source")?;
             let target: Uuid = row.try_get("target")?;
-            for (from, other_key, other_status) in [
+            for (from, other, other_key, other_status) in [
                 (
                     source,
+                    target,
                     row.try_get::<String, _>("target_key")?,
                     row.try_get::<String, _>("target_status")?,
                 ),
                 (
                     target,
+                    source,
                     row.try_get::<String, _>("source_key")?,
                     row.try_get::<String, _>("source_status")?,
                 ),
             ] {
-                if ids.contains(&from) && other_status == "active" {
+                if ids.contains(&from) && other_status == "active" && keep(other) {
                     let keys = out.entry(from).or_default();
                     if keys.len() < 10 && !keys.contains(&other_key) {
                         keys.push(other_key);
@@ -259,16 +263,6 @@ impl Store {
         rows.iter()
             .map(|row| Ok((row.try_get("domain")?, row.try_get("notes")?)))
             .collect()
-    }
-
-    /// Keys in a domain, for suggesting near matches to a mistyped key.
-    pub async fn keys(&self, domain: &str) -> Result<Vec<String>> {
-        Ok(sqlx::query_scalar(
-            "SELECT note_key FROM memory_notes WHERE domain = $1 ORDER BY note_key LIMIT 10001",
-        )
-        .bind(domain)
-        .fetch_all(&self.pool)
-        .await?)
     }
 
     pub async fn get(&self, id: Uuid) -> Result<Option<Note>> {

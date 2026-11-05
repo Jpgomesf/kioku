@@ -1,4 +1,8 @@
 //! Routing a tool call, and recording it when tracing is on.
+//!
+//! Every call runs with a [`Caller`]: the principal, its vault session, and
+//! the viewer the application filters notes by. A session refused by the
+//! vault rules gets a refused error from every tool before any tool code runs.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -14,39 +18,82 @@ use tracing::Instrument;
 use crate::access::{Principal, required_scope};
 use crate::error::UserError;
 use crate::trace::{self, ClientInfo, ToolCall};
+use crate::vault::{Placement, Session, Viewer};
 
 use super::MemoryServer;
 use super::output::{error_text, render_error};
 
+/// Who is calling, and what they may see.
+pub(super) struct Caller {
+    pub(super) principal: Arc<Principal>,
+    pub(super) session: Session,
+    /// What the application filters by. A refused session's viewer sees
+    /// nothing, so a missed check still fails closed.
+    pub(super) viewer: Viewer,
+}
+
+impl Caller {
+    pub(super) fn new(principal: Arc<Principal>, session: Session) -> Self {
+        let viewer = Viewer::new(&principal, &session);
+        Self {
+            principal,
+            session,
+            viewer,
+        }
+    }
+
+    /// The domain a call uses when it names none, when a vault decides it.
+    pub(super) fn default_domain(&self) -> Option<&str> {
+        self.session.placement().map(Placement::default_domain)
+    }
+}
+
 tokio::task_local! {
-    /// The principal of the tool call being served. Set around every call, so
+    /// The caller of the tool call being served. Set around every call, so
     /// domain checks deep in tool code see who is calling without threading it
     /// through every helper.
-    static CALLER: Arc<Principal>;
+    static CALLER: Arc<Caller>;
 }
 
 impl MemoryServer {
+    /// The principal the HTTP layer authenticated for this request, if any.
+    #[cfg(feature = "http")]
+    fn http_principal(context: &RequestContext<RoleServer>) -> Option<&Arc<Principal>> {
+        context
+            .extensions
+            .get::<axum::http::request::Parts>()
+            .and_then(|parts| parts.extensions.get::<Arc<Principal>>())
+    }
+
     /// The principal for this request: the one the HTTP layer authenticated,
     /// or this process's own for stdio. An HTTP request without one gets the
     /// server's principal, which over HTTP has no scopes, so it fails closed.
     pub(super) fn principal_for(&self, context: &RequestContext<RoleServer>) -> Arc<Principal> {
         #[cfg(feature = "http")]
-        if let Some(principal) = context
-            .extensions
-            .get::<axum::http::request::Parts>()
-            .and_then(|parts| parts.extensions.get::<Arc<Principal>>())
-        {
+        if let Some(principal) = Self::http_principal(context) {
             return principal.clone();
         }
         let _ = context;
-        self.principal.clone()
+        self.caller.principal.clone()
     }
 
-    /// Who is calling inside a tool. Outside a call, the process principal.
-    pub(super) fn caller(&self) -> Arc<Principal> {
+    /// The caller for this request. Over HTTP, the session comes from the
+    /// principal's access-file entry; over stdio, from this process.
+    fn caller_for(&self, context: &RequestContext<RoleServer>) -> Arc<Caller> {
+        #[cfg(feature = "http")]
+        if let Some(principal) = Self::http_principal(context) {
+            let session = Session::for_principal(self.app.config.vaults.as_ref(), principal);
+            return Arc::new(Caller::new(principal.clone(), session));
+        }
+        let _ = context;
+        self.caller.clone()
+    }
+
+    /// Who is calling inside a tool. Outside a call, this process's caller.
+    pub(super) fn caller(&self) -> Arc<Caller> {
         CALLER
             .try_with(Arc::clone)
-            .unwrap_or_else(|_| self.principal.clone())
+            .unwrap_or_else(|_| self.caller.clone())
     }
 
     pub(super) async fn traced(
@@ -55,12 +102,12 @@ impl MemoryServer {
         context: RequestContext<RoleServer>,
         called: String,
     ) -> Result<CallToolResponse, ErrorData> {
-        let caller = self.principal_for(&context);
+        let caller = self.caller_for(&context);
         let tool = request.name.to_string();
         let span = tracing::info_span!(
             "tool",
             tool = %tool,
-            principal = %caller.subject,
+            principal = %caller.principal.subject,
             is_error = tracing::field::Empty,
             ms = tracing::field::Empty,
         );
@@ -94,7 +141,8 @@ impl MemoryServer {
             .record(&ToolCall {
                 ts: Utc::now(),
                 session: tracer.session(),
-                principal: &caller.subject,
+                principal: &caller.principal.subject,
+                vault: caller.session.vault_name(),
                 run: config.trace_run.clone(),
                 client,
                 called: (called != tool).then_some(called),
@@ -115,15 +163,19 @@ impl MemoryServer {
         &self,
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
-        caller: &Principal,
+        caller: &Caller,
     ) -> Result<CallToolResponse, ErrorData> {
         let name = request.name.to_string();
-        if !caller.allows_tool(&name) {
+        if !caller.principal.allows_tool(&name) {
             let scope = required_scope(&name).as_str();
             let error = anyhow::Error::from(UserError::Refused(format!(
                 "{name} needs the {scope} scope, which this connection ({}) does not have. Ask the user to grant it in the client's Kioku settings",
-                caller.subject
+                caller.principal.subject
             )));
+            return Ok(error_text(render_error(&name, &error)).into());
+        }
+        if let Some(reason) = caller.session.refusal() {
+            let error = anyhow::Error::from(UserError::Refused(reason.to_owned()));
             return Ok(error_text(render_error(&name, &error)).into());
         }
         if name == "rag_context_query" {

@@ -1,11 +1,15 @@
 //! Tools for curating memory, enabled by the `all` profile or by name.
 
+use std::collections::HashSet;
+
 use chrono::Utc;
 use rmcp::model::{CallToolResult, JsonObject};
 use rmcp::{tool, tool_router};
 use serde_json::{Value, json};
+use uuid::Uuid;
 
 use super::args::{EmptyArgs, FeedbackArgs, ImportArgs, KeyArgs, MaintenanceArgs, parse};
+use crate::app::ImportedNote;
 use crate::error::UserError;
 use crate::lifecycle;
 
@@ -131,7 +135,15 @@ impl MemoryServer {
             Ok(domain) => domain,
             Err(error) => return error_text(render_error("memory_import", &error)),
         };
-        match self.app.hydrate(args.path.as_deref(), Some(&domain)).await {
+        let imported = async {
+            let mut report = self
+                .app
+                .hydrate(args.path.as_deref(), Some(&domain))
+                .await?;
+            self.hide_imported(&mut report.notes).await?;
+            anyhow::Ok(report)
+        };
+        match imported.await {
             Ok(report) => ok(json!({
                 "domain": domain,
                 "imported": report.imported,
@@ -165,12 +177,19 @@ impl MemoryServer {
             Err(text) => return error_text(text),
         };
         let caller = self.caller();
-        if !caller.sees_all_domains() {
-            let error = anyhow::Error::from(UserError::Refused(format!(
+        let refusal = if caller.session.placement().is_some() {
+            Some("memory_maintenance ages the memories of every vault, so a vault session can't run it. Ask the user to run `kioku maintenance` from a shell".to_owned())
+        } else if !caller.principal.sees_all_domains() {
+            Some(format!(
                 "memory_maintenance ages every domain, and this connection ({}) may use only {}",
-                caller.subject,
-                caller.describe_domains()
-            )));
+                caller.principal.subject,
+                caller.principal.describe_domains()
+            ))
+        } else {
+            None
+        };
+        if let Some(text) = refusal {
+            let error = anyhow::Error::from(UserError::Refused(text));
             return error_text(render_error("memory_maintenance", &error));
         }
         match self.app.maintenance(args.dry_run.unwrap_or(true)).await {
@@ -192,16 +211,19 @@ impl MemoryServer {
         }
         let caller = self.caller();
         let result = async {
+            if let Some(placement) = caller.session.placement() {
+                return self.vault_stats(placement.vault()).await;
+            }
             let by_domain: serde_json::Map<String, Value> = self
                 .app
                 .store
                 .domain_counts()
                 .await?
                 .into_iter()
-                .filter(|(domain, _)| caller.allows_domain(domain))
+                .filter(|(domain, _)| caller.principal.allows_domain(domain))
                 .map(|(domain, count)| (domain, json!(count)))
                 .collect();
-            if !caller.sees_all_domains() {
+            if !caller.principal.sees_all_domains() {
                 // Store-wide totals would reveal domains this caller can't see.
                 return anyhow::Ok(json!({"by_domain": by_domain}));
             }
@@ -223,7 +245,11 @@ impl MemoryServer {
             .resolve_one("memory_inspect", &domain, &args.key)
             .await?;
         let note = self.app.require_note(id, Some(&domain)).await?;
-        let graph = self.app.graph_context(id, Some(&domain), true).await?;
+        let caller = self.caller();
+        let graph = self
+            .app
+            .graph_context(id, Some(&domain), true, Some(&caller.viewer))
+            .await?;
         let history = self.app.store.revisions(id, INSPECT_HISTORY).await?;
         let retention = lifecycle::retention(&note, Utc::now(), self.app.config.half_life_days);
         let source = self.display_source(note.input.source.as_deref());
@@ -259,6 +285,69 @@ impl MemoryServer {
             "links_total": graph["total_neighbors"],
             "truncated": graph["truncated"],
             "history": history,
+        }))
+    }
+
+    /// In vault mode, leave notes this session may not read out of an
+    /// import's listing. The count still includes them.
+    async fn hide_imported(&self, notes: &mut Vec<ImportedNote>) -> anyhow::Result<()> {
+        let caller = self.caller();
+        if !caller.viewer.restricts_notes() {
+            return Ok(());
+        }
+        let mut visible = Vec::with_capacity(notes.len());
+        for imported in notes.drain(..) {
+            if self
+                .app
+                .store
+                .get(imported.id)
+                .await?
+                .is_some_and(|note| caller.viewer.sees(&note))
+            {
+                visible.push(imported);
+            }
+        }
+        *notes = visible;
+        Ok(())
+    }
+
+    /// Statistics over the notes a vault session may see, and nothing else:
+    /// store-wide totals would reveal other vaults.
+    async fn vault_stats(&self, vault: &str) -> anyhow::Result<Value> {
+        let caller = self.caller();
+        let viewer = &caller.viewer;
+        let domains = self.visible_domains().await?;
+        let mut by_domain = serde_json::Map::new();
+        let (mut total, mut active, mut pending, mut edges) = (0usize, 0usize, 0usize, 0usize);
+        for domain in &domains {
+            let mut notes = self.app.store.notes(Some(domain), true).await?;
+            notes.retain(|note| viewer.sees(note));
+            if notes.is_empty() {
+                continue;
+            }
+            total += notes.len();
+            active += notes.iter().filter(|n| n.status.is_active()).count();
+            pending += notes.iter().filter(|n| !n.vector_synced).count();
+            let ids: HashSet<Uuid> = notes.iter().map(|n| n.id).collect();
+            edges += self
+                .app
+                .store
+                .edges(Some(domain))
+                .await?
+                .iter()
+                .filter(|e| ids.contains(&e.source) && ids.contains(&e.target))
+                .count();
+            by_domain.insert(domain.clone(), json!(notes.len()));
+        }
+        Ok(json!({
+            "vault": vault,
+            "total": total,
+            "active": active,
+            "legacy": total - active,
+            "pending_vectors": pending,
+            "domains": by_domain.len(),
+            "edges": edges,
+            "by_domain": by_domain,
         }))
     }
 
