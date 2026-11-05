@@ -412,15 +412,13 @@ impl MemoryServer {
             // Tools can't set a note lock, and an update keeps the one it has.
             lock: previous.map(|p| p.lock.clone()).unwrap_or_default(),
         };
-        let outcome = self.app.upsert(input, WriteOrigin::Tool).await?;
-        // The domain's other notes may be locked to other providers, so a
-        // vault session hears only about this note's own links.
-        let own_links_only = self.caller().viewer.restricts_notes();
-        let unresolved: Vec<_> = outcome
-            .unresolved_relationships
-            .iter()
-            .filter(|u| !own_links_only || u.source == outcome.id)
-            .collect();
+        // A vault session hears only about this note's own links, resolved
+        // against the notes it may see.
+        let outcome = self
+            .app
+            .upsert_as(input, WriteOrigin::Tool, Some(&self.caller().viewer))
+            .await?;
+        let unresolved = &outcome.unresolved_relationships;
         let mut out = json!({
             "key": outcome.key,
             "domain": outcome.domain,

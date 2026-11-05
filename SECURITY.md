@@ -54,7 +54,9 @@ that machine's trust; stdio is not a sandbox.
   warns when `.env` sets `MEMORY_PROVIDER` or `KIOKU_SESSION_DIR`. A hidden
   note's key still can't be reused by a session that can't see it, so a save
   can tell that the key is taken, and import reports count files they don't
-  name. The CLI is not restricted.
+  name. A save's unresolved `related` references are checked against the
+  notes the session may see, so they can't probe hidden titles or aliases.
+  The CLI is not restricted.
 - **HTTP is opt-in and local.** `serve --http` exists only in builds with the
   `http` feature, binds only to loopback addresses, and requires a bearer token
   on every request. Only SHA-256 hashes of tokens are stored, and they are
