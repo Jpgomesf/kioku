@@ -34,12 +34,15 @@ All notable changes to this project are documented here. The format follows
   else by the longest matching folder (`KIOKU_SESSION_DIR` or the working
   directory), and declares its model provider with `MEMORY_PROVIDER`. Area
   locks in the file and `lock` in note frontmatter limit which providers may
-  read notes. Search, get, inspect, links, stats, imports, and the older
+  read notes. The server's instructions name the session's vault, or its
+  area, and tell the agent to search without a domain instead of guessing one
+  from the folder name. Search, get, inspect, links, stats, imports, and the older
   `rag_*` tools all filter before ranking, and the vector index leaves hidden
   notes out of its candidates. Domain lists (a vault-wide search's `domains`,
   the empty-search hint, `memory_stats`) name only domains holding a note the
   session may see, and a save's unresolved `related` links are checked
-  against those notes too. A session that isn't placed, or names no
+  against those notes too. A vault-wide search leaves out domains whose notes
+  are all retired unless it sets `include_legacy`. A session that isn't placed, or names no
   provider, gets a `refused` error from every tool. Without the file, nothing
   changes.
 - In vault mode, `memory_import` imports only files whose frontmatter names

@@ -221,12 +221,14 @@ impl Store {
 
     /// Each domain with each distinct note lock its notes carry (empty for
     /// no lock), sorted by domain: enough to tell which domains hold a note
-    /// a session may see without loading the notes.
-    pub async fn domain_locks(&self) -> Result<Vec<(String, Vec<String>)>> {
+    /// a session may see without loading the notes. Without
+    /// `include_legacy`, only active notes count.
+    pub async fn domain_locks(&self, include_legacy: bool) -> Result<Vec<(String, Vec<String>)>> {
         let rows = sqlx::query(
             "SELECT DISTINCT domain, COALESCE(input->'lock', '[]'::jsonb) AS lock
-             FROM memory_notes ORDER BY domain",
+             FROM memory_notes WHERE $1 OR status = 'active' ORDER BY domain",
         )
+        .bind(include_legacy)
         .fetch_all(&self.pool)
         .await?;
         rows.iter()

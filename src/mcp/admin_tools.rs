@@ -295,7 +295,7 @@ impl MemoryServer {
     async fn vault_stats(&self, vault: &str) -> anyhow::Result<Value> {
         let caller = self.caller();
         let viewer = &caller.viewer;
-        let domains = self.visible_domains().await?;
+        let domains = self.visible_domains(true).await?;
         let mut by_domain = serde_json::Map::new();
         let (mut total, mut active, mut pending, mut edges) = (0usize, 0usize, 0usize, 0usize);
         for domain in &domains {

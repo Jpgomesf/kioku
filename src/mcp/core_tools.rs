@@ -121,7 +121,10 @@ impl MemoryServer {
         let (domain, domains) = match vault {
             Some(placement) => (
                 placement.default_domain().to_owned(),
-                Some(self.visible_domains().await?),
+                Some(
+                    self.visible_domains(args.include_legacy.unwrap_or(false))
+                        .await?,
+                ),
             ),
             None => (self.domain(named)?, None),
         };
@@ -197,7 +200,7 @@ impl MemoryServer {
             // see are known to it. Without them, every stored domain, as
             // always.
             let known: Vec<String> = if caller.viewer.restricts_notes() {
-                self.visible_domains().await?
+                self.visible_domains(true).await?
             } else {
                 let counts = self.app.store.domain_counts().await?;
                 counts.into_iter().map(|(d, _)| d).collect()
