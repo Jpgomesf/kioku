@@ -151,8 +151,10 @@ impl App {
         let unchanged = existing
             .as_ref()
             .is_some_and(|note| note.input == input && note.vector_synced);
-        // Embed first: if this fails, nothing has been written.
-        let vector = if unchanged {
+        // Embed first: if this fails, nothing has been written. A note the
+        // embedding service may not read is never sent to it.
+        let embeds = self.embedder.reads(&input);
+        let vector = if unchanged || !embeds {
             None
         } else {
             Some(self.embed_note(&input).await?)
@@ -169,13 +171,19 @@ impl App {
         let (unresolved, unresolved_count) = save_report(notes, note.id, domain_report, viewer, 20);
         let mut indexed = true;
         if !note.vector_synced {
-            let vector = match vector {
-                Some(vector) => vector,
-                None => self.embed_note(&input).await?,
-            };
             // The row is committed; a vector failure leaves it findable by
             // keyword and is repaired automatically, so report it, don't fail.
-            match self.vector.upsert(&note, vector).await {
+            let written = if embeds {
+                let vector = match vector {
+                    Some(vector) => vector,
+                    None => self.embed_note(&input).await?,
+                };
+                self.vector.upsert(&note, vector).await
+            } else {
+                // No vector: search finds it by keyword, label, and link.
+                self.vector.delete(&[note.id]).await
+            };
+            match written {
                 Ok(()) => self.store.mark_synced(note.id, note.revision).await?,
                 Err(error) => {
                     tracing::warn!(error = format!("{error:#}"), key = %input.key, "vector write failed after save");
@@ -229,7 +237,8 @@ impl App {
             );
         }
         // A stale or missing vector is rebuilt along the way; embed before locking.
-        let vector = if note.vector_synced {
+        let embeds = self.embedder.reads(&note.input);
+        let vector = if note.vector_synced || !embeds {
             None
         } else {
             Some(self.embed_note(&note.input).await?)
@@ -247,7 +256,8 @@ impl App {
         let updated = self.store.get(id).await?.context("memory disappeared")?;
         let indexed = match vector {
             Some(vector) => self.vector.upsert(&updated, vector).await,
-            None => self.vector.set_status(id, updated.status).await,
+            None if embeds => self.vector.set_status(id, updated.status).await,
+            None => self.vector.delete(&[id]).await,
         };
         indexed.context(
             "the status changed in PostgreSQL, but the vector index could not be updated; it will be repaired automatically",

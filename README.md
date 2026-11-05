@@ -76,6 +76,54 @@ make stop-docker-ollama  # the container is no longer used
 on the model and prompts, not on where they run, and the same model gives the
 same vectors (cosine similarity above 0.9999 between the two runtimes).
 
+### Hosted embeddings
+
+To run no embedding model at all, use a hosted service with an
+OpenAI-compatible `/embeddings` endpoint, such as
+[OpenRouter](https://openrouter.ai/collections/embedding-models) or OpenAI:
+
+```sh
+# in .env
+EMBEDDING_PROVIDER=openai                      # the API's shape, whoever serves it
+EMBEDDING_URL=https://openrouter.ai/api/v1     # or https://api.openai.com/v1
+EMBEDDING_MODEL=openai/text-embedding-3-small  # OpenRouter's name for it; OpenAI's is text-embedding-3-small
+EMBEDDING_DIM=1536                             # the model's vector size
+EMBEDDING_API_KEY=...
+ALLOW_REMOTE_EMBEDDINGS=true
+EMBEDDING_READER=openai                        # who reads the text you send; see below
+```
+
+`make start` then starts only PostgreSQL and Qdrant. Kioku picks query and
+document prompts from the model's name (`qwen/qwen3-embedding-8b` gets
+Qwen3's), and a wrong `EMBEDDING_DIM` stops the first embedding with a clear
+error. An install that already has an index moves in three steps: copy
+`.env` to `hosted.env` and change the embedding settings and
+`QDRANT_COLLECTION` there; compare the model on the bundled retrieval set
+with `./bin/kioku --env-file hosted.env eval`; then run
+`./bin/kioku reindex --to-env-file hosted.env`, which embeds every note again
+before switching, and make `hosted.env` your `.env`.
+
+**What the service may read.** The service reads every text it embeds, so
+Kioku treats it like a model of the provider named in `EMBEDDING_READER`:
+`local` by default for an address on this machine, `other` for any other.
+Through OpenRouter the text passes both OpenRouter and the model's host, so
+name the host's provider only if you trust both.
+
+- A service read only locally (`local`) receives every note, as before.
+- Any other receives a note only if that provider may read it. Without
+  vaults, a note whose `lock` leaves the provider out is kept from it. With
+  vaults, the note's vault must list the provider, no area lock may leave it
+  out, and the note's own lock, if any, must name it.
+- A note kept from the service has no vector. Search finds it by keyword,
+  label, and link, with its keyword rank standing in for the meaning rank it
+  can't have; `memory_inspect` marks it `not_sent_to_embedder`, and imports
+  and `kioku repair` count such notes.
+- Queries go to the service too, unless it may read none of the domains
+  searched.
+- After changing which providers a vault lists, or its locks, run
+  `./bin/kioku repair --all`: it embeds the notes the service may now read
+  and removes the vectors of those it no longer may.
+
 ## Connect a client
 
 Every client launches [`scripts/mcp.sh`](scripts/mcp.sh), which runs
@@ -444,6 +492,7 @@ file, and every record names its vault. Sessions that were refused write to
 ./bin/kioku maintenance            # apply it: stale, unpinned notes move to legacy
 ./bin/kioku pin KEY --domain D     # protect a memory from aging
 ./bin/kioku reindex --embedding-model qwen3-embedding:0.6b --embedding-dim 1024 --collection local_memory_v2
+./bin/kioku reindex --to-env-file hosted.env   # another service: its settings, including a new collection
 ```
 
 `reindex` embeds every memory into a new collection, switches the database to
@@ -458,7 +507,7 @@ never retires them: only `kioku maintenance` or `memory_maintenance` with
 ```sh
 make check   # fmt, clippy with warnings denied, unit and contract tests
 make test-db # PostgreSQL tests (history, aging, store); MEMORY_TEST_DATABASE_URL must allow CREATE DATABASE
-make smoke   # 143 checks over stdio and 20 over HTTP; SMOKE_ENV must name test storage
+make smoke   # 153 checks over stdio and 20 over HTTP; SMOKE_ENV must name test storage
 make eval    # retrieval quality in isolated storage
 ```
 

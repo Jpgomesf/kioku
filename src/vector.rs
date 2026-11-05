@@ -208,6 +208,24 @@ impl Qdrant {
         Ok(())
     }
 
+    /// Remove the points of `ids`, if any: notes the embedding service may no
+    /// longer read keep no vector. Missing points are not an error.
+    pub async fn delete(&self, ids: &[Uuid]) -> Result<()> {
+        for batch in ids.chunks(256) {
+            self.request(
+                reqwest::Method::POST,
+                &format!("{}/points/delete?wait=true", self.collection_path()),
+            )
+            .json(&json!({"points": batch}))
+            .send()
+            .await
+            .context("cannot reach Qdrant")?
+            .error_for_status()
+            .context("cannot remove Qdrant vectors")?;
+        }
+        Ok(())
+    }
+
     /// Nearest points, in `domains` when given (one domain, or several for a
     /// whole vault), or in every domain. Points in `exclude` are never
     /// returned, so they can't take candidate slots from the others.

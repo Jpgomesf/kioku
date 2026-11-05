@@ -390,6 +390,13 @@ impl Vaults {
             .collect()
     }
 
+    /// Whether `provider` may read the notes of `domain`: exactly one vault
+    /// owns it, that vault lists the provider, and no area lock leaves it out.
+    pub fn admits(&self, domain: &str, provider: Provider) -> bool {
+        matches!(self.owners(domain).as_slice(), [only] if self.vaults[*only].providers.contains(&provider))
+            && !self.locked(domain, provider)
+    }
+
     /// Whether a lock covering `domain` leaves out `provider`.
     pub(super) fn locked(&self, domain: &str, provider: Provider) -> bool {
         self.locks.iter().any(|lock| {

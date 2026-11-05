@@ -22,6 +22,19 @@ All notable changes to this project are documented here. The format follows
   lists a bundle it meets under `failed` instead of reading it.
 - An imported note whose source is a section (`file.md#anchor`) belongs to its
   file while the file exists, as other file-backed notes do.
+- Hosted embeddings. The OpenAI-compatible provider works with OpenRouter,
+  OpenAI, and similar services (README, "Hosted embeddings"). The service
+  reads what it embeds, so `EMBEDDING_READER` names its provider (`local` by
+  default on this machine, `other` elsewhere), and any reader but `local`
+  receives only the notes that provider may read: vault providers, area
+  locks, and note locks all apply. Other notes keep no vector and are found
+  by keyword, label, and link, ranked on their keyword rank in place of the
+  missing one; queries are not sent when the service may read none of the
+  searched domains. `memory_inspect`, imports, `repair`, and `reindex` report
+  `not_sent_to_embedder`, and `repair --all` applies a changed vaults file.
+  `kioku reindex --to-env-file` moves an index to another service, and
+  `Retry-After` on a 429 is honored for up to 30 seconds. Isolated evaluation
+  storage ignores the vaults file.
 - Embeddings on the Apple GPU. `make start` starts the Ollama container only
   when `EMBEDDING_URL` points at it (`127.0.0.1:11435`). With a native Ollama
   (`brew install ollama`, `EMBEDDING_URL=http://127.0.0.1:11434`) it starts

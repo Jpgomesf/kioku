@@ -1,5 +1,8 @@
 //! Client for the embedding service: Ollama's `/api/embed` or any
-//! OpenAI-compatible `/embeddings` endpoint.
+//! OpenAI-compatible `/embeddings` endpoint, such as OpenRouter or OpenAI.
+//!
+//! The service reads every text it embeds, so it is treated as a reader of
+//! notes like any model: [`Embedder::reads`] decides which notes it receives.
 
 use std::time::Duration;
 
@@ -7,11 +10,15 @@ use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
 
 use crate::config::{Config, EmbeddingProvider};
+use crate::model::NoteInput;
+use crate::vault::Provider;
 
 /// Texts per request when embedding many documents.
 pub(crate) const BATCH: usize = 16;
 /// Attempts for transient failures (connection errors, 429, 5xx).
 const ATTEMPTS: u32 = 3;
+/// The longest wait a `Retry-After` header may impose between attempts.
+const MAX_RETRY_AFTER: Duration = Duration::from_secs(30);
 
 #[derive(Clone)]
 pub struct Embedder {
@@ -49,6 +56,37 @@ impl Embedder {
                 .context("cannot build the embedding HTTP client")?,
             config: config.clone(),
         })
+    }
+
+    /// Whether the embedding service may receive this note's text. A service
+    /// read only on this machine (`EMBEDDING_READER=local`) receives every
+    /// note. Any other is a reader like a model of that provider: it receives
+    /// a note only if the provider may read the note's domain (see
+    /// [`Embedder::reads_domain`]) and the note's own lock, if any, names it.
+    /// A note it may not read keeps no vector, and search finds it by
+    /// keyword, label, and link.
+    pub fn reads(&self, input: &NoteInput) -> bool {
+        let reader = self.config.embedding_reader;
+        reader == Provider::Local
+            || (self.reads_domain(&input.domain)
+                && (input.lock.is_empty()
+                    || input
+                        .lock
+                        .iter()
+                        .any(|name| Provider::parse(name).is_ok_and(|p| p == reader))))
+    }
+
+    /// Whether the embedding service may read the notes of `domain`, before
+    /// any note's own lock. With vaults, the domain's vault must list the
+    /// reader and no area lock may leave it out; without them, every domain.
+    pub fn reads_domain(&self, domain: &str) -> bool {
+        let reader = self.config.embedding_reader;
+        reader == Provider::Local
+            || self
+                .config
+                .vaults
+                .as_ref()
+                .is_none_or(|vaults| vaults.admits(domain, reader))
     }
 
     /// Embed a search query with the model's query prompt.
@@ -105,6 +143,7 @@ impl Embedder {
         let mut attempt = 0;
         let response: Value = loop {
             attempt += 1;
+            let mut wait = None;
             let mut request = self.client.post(&url).json(&body);
             if let Some(key) = &self.config.embedding_api_key {
                 request = request.bearer_auth(key);
@@ -118,6 +157,7 @@ impl Embedder {
                 }
                 Ok(response) => {
                     let status = response.status();
+                    wait = retry_after(&response);
                     let text = response.text().await.unwrap_or_default();
                     let message = serde_json::from_str::<Value>(&text)
                         .ok()
@@ -153,7 +193,11 @@ impl Embedder {
             if attempt >= ATTEMPTS {
                 return Err(outcome.into());
             }
-            tokio::time::sleep(Duration::from_millis(250 * 4u64.pow(attempt - 1))).await;
+            // Hosted services say how long to wait after a 429; honor that,
+            // within reason.
+            let backoff = Duration::from_millis(250 * 4u64.pow(attempt - 1));
+            tokio::time::sleep(wait.map_or(backoff, |wait| wait.min(MAX_RETRY_AFTER).max(backoff)))
+                .await;
         };
         let vectors: Vec<Vec<f32>> = match self.config.embedding_provider {
             EmbeddingProvider::Ollama => serde_json::from_value(response["embeddings"].clone())
@@ -198,6 +242,19 @@ impl Embedder {
     }
 }
 
+/// The delay a response's `Retry-After` header asks for, in seconds.
+fn retry_after(response: &reqwest::Response) -> Option<Duration> {
+    response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+        .map(Duration::from_secs)
+}
+
 /// Whether an error means the input exceeded the model's context window.
 pub fn is_too_long(error: &anyhow::Error) -> bool {
     matches!(
@@ -211,5 +268,92 @@ pub fn failed_index(error: &anyhow::Error) -> Option<usize> {
     match error.downcast_ref::<EmbedError>() {
         Some(EmbedError::TooLong { index, .. }) => *index,
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::vault::Vaults;
+
+    fn embedder(reader: &str, vaults: bool) -> Embedder {
+        let mut config = Config::from_lookup(|name| match name {
+            "DATABASE_URL" => Some("postgresql://memory:secret@127.0.0.1:15432/memory".to_owned()),
+            "EMBEDDING_READER" => Some(reader.to_owned()),
+            _ => None,
+        })
+        .unwrap();
+        config.vaults = vaults.then(|| {
+            let text = r#"
+                [[vault]]
+                name = "work"
+                paths = ["/work"]
+                domains = ["work", "work/*"]
+                providers = ["local", "openai"]
+                default_domain = "work"
+
+                [[vault]]
+                name = "home"
+                paths = ["/home/me"]
+                domains = ["home"]
+                providers = ["local", "anthropic"]
+                default_domain = "home"
+
+                [[lock]]
+                domains = ["work/secret"]
+                providers = ["local"]
+            "#;
+            Arc::new(Vaults::parse(text, Path::new("/cfg/vaults.toml"), None).unwrap())
+        });
+        Embedder::new(&config).unwrap()
+    }
+
+    fn note(domain: &str, lock: &[&str]) -> NoteInput {
+        NoteInput {
+            lock: lock.iter().map(|p| (*p).to_owned()).collect(),
+            ..crate::testing::note("k", domain).input
+        }
+    }
+
+    #[test]
+    fn a_local_embedding_service_reads_every_note() {
+        for vaults in [false, true] {
+            let local = embedder("local", vaults);
+            for domain in ["work", "work/secret", "home", "nowhere"] {
+                assert!(local.reads_domain(domain));
+                assert!(local.reads(&note(domain, &["anthropic"])));
+            }
+        }
+    }
+
+    #[test]
+    fn without_vaults_a_hosted_service_reads_notes_whose_lock_names_it() {
+        let hosted = embedder("openai", false);
+        assert!(hosted.reads_domain("anything"));
+        assert!(hosted.reads(&note("anything", &[])));
+        assert!(!hosted.reads(&note("anything", &["local"])));
+        assert!(hosted.reads(&note("anything", &["local", "openai"])));
+    }
+
+    #[test]
+    fn with_vaults_a_hosted_service_reads_what_its_provider_may() {
+        let hosted = embedder("openai", true);
+        assert!(hosted.reads(&note("work", &[])));
+        assert!(hosted.reads(&note("work/api", &["openai"])));
+        // The note's own lock leaves it out.
+        assert!(!hosted.reads(&note("work", &["local"])));
+        // An area lock leaves it out.
+        assert!(!hosted.reads_domain("work/secret"));
+        assert!(!hosted.reads(&note("work/secret", &["openai"])));
+        // Its vault doesn't list the provider.
+        assert!(!hosted.reads_domain("home"));
+        assert!(!hosted.reads(&note("home", &[])));
+        // No vault owns the domain.
+        assert!(!hosted.reads_domain("nowhere"));
+        // `other` is a provider like the rest: no vault here lists it.
+        assert!(!embedder("other", true).reads(&note("work", &[])));
     }
 }

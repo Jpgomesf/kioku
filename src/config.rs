@@ -8,7 +8,7 @@ use serde::Serialize;
 
 use crate::access::Principal;
 use crate::trace::TraceContent;
-use crate::vault::Vaults;
+use crate::vault::{Provider, Vaults};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -86,6 +86,11 @@ pub struct Config {
     pub embedding_dim: usize,
     pub embedding_api_key: Option<String>,
     pub embedding_prompts: EmbeddingPrompts,
+    /// The model provider that reads the text sent to the embedding service
+    /// (`EMBEDDING_READER`): `local` by default for an address on this
+    /// machine, `other` for any other. Anything but `local` receives only the
+    /// notes that provider may read.
+    pub embedding_reader: Provider,
     pub half_life_days: f64,
     pub legacy_threshold: f64,
     pub default_domain: String,
@@ -190,9 +195,16 @@ fn home_folder(var: Option<String>, account: impl FnOnce() -> Option<PathBuf>) -
 
 impl Config {
     pub fn from_env() -> Result<Self> {
-        Self::from_lookup(|name| match name {
-            "HOME" => home_folder(std::env::var("HOME").ok(), std::env::home_dir),
-            _ => std::env::var(name).ok(),
+        Self::from_env_with(&std::collections::HashMap::new())
+    }
+
+    /// The environment with `overrides` on top: how `kioku reindex
+    /// --to-env-file` reads the settings it switches to.
+    pub fn from_env_with(overrides: &std::collections::HashMap<String, String>) -> Result<Self> {
+        Self::from_lookup(|name| match (overrides.get(name), name) {
+            (Some(value), _) => Some(value.clone()),
+            (None, "HOME") => home_folder(std::env::var("HOME").ok(), std::env::home_dir),
+            (None, _) => std::env::var(name).ok(),
         })
     }
 
@@ -213,6 +225,14 @@ impl Config {
             prompts.document = document;
             prompts.profile = "custom".to_owned();
         }
+        let embedding_url = value("EMBEDDING_URL", "http://127.0.0.1:11435");
+        let embedding_reader = match optional("EMBEDDING_READER") {
+            Some(name) => Provider::parse(&name).context("invalid EMBEDDING_READER")?,
+            None if reqwest::Url::parse(&embedding_url).is_ok_and(|url| is_loopback(&url)) => {
+                Provider::Local
+            }
+            None => Provider::Other,
+        };
         let cfg = Self {
             database_url: optional("DATABASE_URL")
                 .context("DATABASE_URL is required; run scripts/start.sh to create .env")?,
@@ -224,13 +244,14 @@ impl Config {
                 "openai" => EmbeddingProvider::OpenAi,
                 other => bail!("EMBEDDING_PROVIDER must be ollama or openai, got {other:?}"),
             },
-            embedding_url: value("EMBEDDING_URL", "http://127.0.0.1:11435"),
+            embedding_url,
             embedding_model,
             embedding_dim: value("EMBEDDING_DIM", "768")
                 .parse()
                 .context("EMBEDDING_DIM must be a whole number")?,
             embedding_api_key: optional("EMBEDDING_API_KEY"),
             embedding_prompts: prompts,
+            embedding_reader,
             half_life_days: value("MEMORY_HALF_LIFE_DAYS", "90")
                 .parse()
                 .context("MEMORY_HALF_LIFE_DAYS must be a number")?,
@@ -412,6 +433,24 @@ mod tests {
             "title: none | text: "
         );
         assert_eq!(EmbeddingPrompts::for_model("bge-m3").profile, "none");
+    }
+
+    #[test]
+    fn the_embedding_reader_defaults_by_where_the_service_runs() {
+        assert_eq!(config(&[]).unwrap().embedding_reader, Provider::Local);
+        let remote = [
+            ("EMBEDDING_URL", "https://openrouter.ai/api/v1"),
+            ("ALLOW_REMOTE_EMBEDDINGS", "true"),
+            ("EMBEDDING_PROVIDER", "openai"),
+        ];
+        assert_eq!(config(&remote).unwrap().embedding_reader, Provider::Other);
+        let named = [remote.as_slice(), &[("EMBEDDING_READER", "OpenAI")]].concat();
+        assert_eq!(config(&named).unwrap().embedding_reader, Provider::OpenAi);
+        // A proxy on this machine can forward to a hosted model.
+        let proxy = config(&[("EMBEDDING_READER", "openai")]).unwrap();
+        assert_eq!(proxy.embedding_reader, Provider::OpenAi);
+        let error = config(&[("EMBEDDING_READER", "openrouter")]).err().unwrap();
+        assert!(format!("{error:#}").contains("EMBEDDING_READER"));
     }
 
     #[test]
