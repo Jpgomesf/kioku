@@ -47,22 +47,41 @@ read -r EMBEDDING_MODE EMBEDDING_MODEL_NAME EMBEDDING_ENDPOINT < <("$PYTHON_BIN"
 from pathlib import Path
 from urllib.parse import urlsplit
 import sys
+import ipaddress
 values = {}
 for line in Path(sys.argv[1]).read_text(encoding='utf-8').splitlines():
     key, separator, value = line.partition('=')
-    if separator and not key.lstrip().startswith('#'):
-        values[key.strip()] = value.strip().strip('"').strip("'")
-url = values.get('EMBEDDING_URL', 'http://127.0.0.1:11435').rstrip('/')
-model = values.get('EMBEDDING_MODEL', 'nomic-embed-text')
-if values.get('EMBEDDING_PROVIDER', 'ollama') != 'ollama':
+    key = key.strip().removeprefix('export ').strip()
+    if not separator or key.startswith('#'):
+        continue
+    value = value.strip()
+    quote = value[:1]
+    if quote in (chr(34), chr(39)) and quote in value[1:]:
+        value = value[1:].split(quote, 1)[0]
+    else:
+        value = value.split(chr(32) + chr(35), 1)[0].strip()
+    values[key] = value
+# Empty means the default, as in the Kioku configuration.
+provider = values.get('EMBEDDING_PROVIDER') or 'ollama'
+url = (values.get('EMBEDDING_URL') or 'http://127.0.0.1:11435').rstrip('/')
+model = values.get('EMBEDDING_MODEL') or 'nomic-embed-text'
+parts = urlsplit(url)
+host = (parts.hostname or '').lower()
+try:
+    loopback = host == 'localhost' or ipaddress.ip_address(host).is_loopback
+except ValueError:
+    loopback = False
+try:
+    port = parts.port
+except ValueError:
+    port = None
+if provider != 'ollama' or not loopback:
     mode = 'external'
-elif url == 'http://127.0.0.1:11435':
+elif port == 11435:
     mode = 'container'
-elif urlsplit(url).hostname in ('127.0.0.1', 'localhost', '::1'):
-    mode = 'native'
 else:
-    mode = 'external'
-print(mode, model or '-', url or '-')
+    mode = 'native'
+print(mode, model, url)
 PY
 )
 

@@ -42,7 +42,7 @@ install: build ## Install the server binary into bin/ (used by scripts/mcp.sh)
 	mkdir -p bin
 	install -m 755 target/release/kioku bin/kioku
 
-start: ## Start PostgreSQL, Qdrant, and Ollama
+start: ## Start PostgreSQL, Qdrant, and the Ollama container unless EMBEDDING_URL points elsewhere
 	./scripts/start.sh
 
 stop: ## Stop the services; volumes are kept
