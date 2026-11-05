@@ -131,8 +131,14 @@ fn load_vaults(explicit: Option<String>, home: Option<&Path>) -> Result<Option<A
     let text = explicit.unwrap_or_else(|| DEFAULT_VAULTS_FILE.to_owned());
     let path = match crate::vault::expand_home(&text, home) {
         Ok(path) => path,
-        // No HOME and no explicit file: there is nowhere to look.
-        Err(_) if !named => return Ok(None),
+        // No home folder and no explicit file: there is nowhere to look. Say
+        // so, since vault rules the user set up would silently be off.
+        Err(_) if !named => {
+            tracing::warn!(
+                "the home folder is unknown (HOME is not set), so {DEFAULT_VAULTS_FILE} can't be read; running without vaults. Set MEMORY_VAULTS_FILE to the vaults file's absolute path if you use vaults"
+            );
+            return Ok(None);
+        }
         Err(error) => return Err(error.context("invalid MEMORY_VAULTS_FILE")),
     };
     ensure!(
@@ -171,9 +177,23 @@ fn is_loopback(url: &reqwest::Url) -> bool {
             .is_ok_and(|ip| ip.is_loopback())
 }
 
+/// `HOME`, or when it is unset or empty, the account's home folder from the
+/// system (`account`), so a client that starts the server without `HOME`
+/// still gets the default vaults file.
+fn home_folder(var: Option<String>, account: impl FnOnce() -> Option<PathBuf>) -> Option<String> {
+    var.filter(|home| !home.is_empty()).or_else(|| {
+        account()
+            .map(|path| path.to_string_lossy().into_owned())
+            .filter(|home| !home.is_empty())
+    })
+}
+
 impl Config {
     pub fn from_env() -> Result<Self> {
-        Self::from_lookup(|name| std::env::var(name).ok())
+        Self::from_lookup(|name| match name {
+            "HOME" => home_folder(std::env::var("HOME").ok(), std::env::home_dir),
+            _ => std::env::var(name).ok(),
+        })
     }
 
     /// Build the configuration from any variable source, so tests never mutate
@@ -491,6 +511,22 @@ mod tests {
         assert_eq!(session, Some(dir.join("p")));
         assert!(config(&[("KIOKU_SESSION_DIR", "relative")]).is_err());
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_missing_home_falls_back_to_the_account_folder() {
+        let account = || Some(PathBuf::from("/Users/me"));
+        assert_eq!(
+            home_folder(Some("/home/x".into()), account).as_deref(),
+            Some("/home/x")
+        );
+        assert_eq!(home_folder(None, account).as_deref(), Some("/Users/me"));
+        assert_eq!(
+            home_folder(Some(String::new()), account).as_deref(),
+            Some("/Users/me")
+        );
+        assert_eq!(home_folder(None, || None), None);
+        assert_eq!(home_folder(None, || Some(PathBuf::new())), None);
     }
 
     #[test]
