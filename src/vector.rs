@@ -208,11 +208,15 @@ impl Qdrant {
         Ok(())
     }
 
+    /// Nearest points, in `domains` when given (one domain, or several for a
+    /// whole vault), or in every domain. Points in `exclude` are never
+    /// returned, so they can't take candidate slots from the others.
     pub async fn search(
         &self,
         vector: Vec<f32>,
-        domain: Option<&str>,
+        domains: Option<&[&str]>,
         include_legacy: bool,
+        exclude: &[Uuid],
         limit: usize,
     ) -> Result<Vec<VectorHit>> {
         self.validate_vector(&vector)?;
@@ -220,15 +224,11 @@ impl Qdrant {
             (1..=200).contains(&limit),
             "Vector search limit must be between 1 and 200"
         );
-        let mut must = Vec::new();
-        if let Some(domain) = domain {
-            must.push(json!({"key":"domain","match":{"value":domain}}));
-        }
-        if !include_legacy {
-            must.push(json!({"key":"status","match":{"value":"active"}}));
-        }
+        let Some(filter) = search_filter(domains, include_legacy, exclude) else {
+            return Ok(Vec::new());
+        };
         let value: Value = self.request(reqwest::Method::POST, &format!("{}/points/query", self.collection_path()))
-            .json(&json!({"query":vector,"filter":{"must":must},"limit":limit,"with_payload":true,"with_vector":false}))
+            .json(&json!({"query":vector,"filter":filter,"limit":limit,"with_payload":true,"with_vector":false}))
             .send().await?.error_for_status().context("Qdrant search failed")?.json().await?;
         let points = value["result"]["points"]
             .as_array()
@@ -277,9 +277,56 @@ impl Qdrant {
     }
 }
 
+/// The filter of a vector search, or `None` when no domain is allowed.
+fn search_filter(
+    domains: Option<&[&str]>,
+    include_legacy: bool,
+    exclude: &[Uuid],
+) -> Option<Value> {
+    let mut must = Vec::new();
+    match domains {
+        None => {}
+        Some([]) => return None,
+        Some([domain]) => must.push(json!({"key":"domain","match":{"value":domain}})),
+        Some(several) => must.push(json!({"key":"domain","match":{"any":several}})),
+    }
+    if !include_legacy {
+        must.push(json!({"key":"status","match":{"value":"active"}}));
+    }
+    let mut filter = json!({"must": must});
+    if !exclude.is_empty() {
+        filter["must_not"] = json!([{"has_id": exclude}]);
+    }
+    Some(filter)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn search_filters_leave_out_excluded_points() {
+        let plain = search_filter(Some(&["a"]), false, &[]).unwrap();
+        assert_eq!(
+            plain,
+            json!({"must": [
+                {"key": "domain", "match": {"value": "a"}},
+                {"key": "status", "match": {"value": "active"}},
+            ]}),
+            "without exclusions the filter is unchanged"
+        );
+        let id = Uuid::nil();
+        let vault = search_filter(Some(&["a", "b"]), true, &[id]).unwrap();
+        assert_eq!(
+            vault,
+            json!({
+                "must": [{"key": "domain", "match": {"any": ["a", "b"]}}],
+                "must_not": [{"has_id": [id]}],
+            })
+        );
+        assert!(search_filter(Some(&[]), false, &[id]).is_none());
+        assert_eq!(search_filter(None, true, &[]).unwrap(), json!({"must": []}));
+    }
     #[test]
     fn rejects_invalid_vectors_before_network() {
         let client = Qdrant::new("http://127.0.0.1:1", "test", None, 2).unwrap();

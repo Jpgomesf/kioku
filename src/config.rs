@@ -1,12 +1,14 @@
 //! Configuration from environment variables (optionally loaded from a dotenv file).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
 
 use crate::access::Principal;
 use crate::trace::TraceContent;
+use crate::vault::Vaults;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -88,7 +90,8 @@ pub struct Config {
     pub legacy_threshold: f64,
     pub default_domain: String,
     pub notes_root: Option<PathBuf>,
-    /// Run aging and index repair in the background while serving MCP.
+    /// Repair the index and log aging candidates in the background while
+    /// serving MCP. Aging itself is applied only by explicit maintenance.
     pub background_upkeep: bool,
     /// Append every MCP tool call to this JSONL file (opt-in; contains note text).
     pub trace_file: Option<PathBuf>,
@@ -105,6 +108,48 @@ pub struct Config {
     /// Salt for `MEMORY_TRACE_CONTENT=hashed`. Set `MEMORY_TRACE_SALT` to compare
     /// hashes across runs; otherwise each process picks its own.
     pub trace_salt: String,
+    /// Vault rules from `MEMORY_VAULTS_FILE` (default
+    /// `~/.config/kioku/vaults.toml`). `None` when that file doesn't exist:
+    /// compatibility mode, with no vault restrictions at all.
+    pub vaults: Option<Arc<Vaults>>,
+    /// The provider of this client's model (`MEMORY_PROVIDER`). Checked only
+    /// in vault mode, per call, so a bad value refuses calls instead of
+    /// stopping the server.
+    pub provider: Option<String>,
+    /// The folder that places a stdio session in a vault
+    /// (`KIOKU_SESSION_DIR`); without it, the process working directory.
+    pub session_dir: Option<PathBuf>,
+}
+
+/// Where the vaults file is looked for when `MEMORY_VAULTS_FILE` is unset.
+const DEFAULT_VAULTS_FILE: &str = "~/.config/kioku/vaults.toml";
+
+/// Load the vaults file, which may be absent. A path given explicitly that
+/// doesn't exist is logged, since it is probably a typo.
+fn load_vaults(explicit: Option<String>, home: Option<&Path>) -> Result<Option<Arc<Vaults>>> {
+    let named = explicit.is_some();
+    let text = explicit.unwrap_or_else(|| DEFAULT_VAULTS_FILE.to_owned());
+    let path = match crate::vault::expand_home(&text, home) {
+        Ok(path) => path,
+        // No home folder and no explicit file: there is nowhere to look. Say
+        // so, since vault rules the user set up would silently be off.
+        Err(_) if !named => {
+            tracing::warn!(
+                "the home folder is unknown (HOME is not set), so {DEFAULT_VAULTS_FILE} can't be read; running without vaults. Set MEMORY_VAULTS_FILE to the vaults file's absolute path if you use vaults"
+            );
+            return Ok(None);
+        }
+        Err(error) => return Err(error.context("invalid MEMORY_VAULTS_FILE")),
+    };
+    ensure!(
+        path.is_absolute(),
+        "MEMORY_VAULTS_FILE must be an absolute path (or start with ~), because MCP clients start the server from other directories"
+    );
+    let vaults = Vaults::load(&path, home)?;
+    if vaults.is_none() && named {
+        tracing::warn!(path = %path.display(), "MEMORY_VAULTS_FILE does not exist; running without vaults");
+    }
+    Ok(vaults.map(Arc::new))
 }
 
 /// Field order is the serialized order. It must stay alphabetical so the
@@ -132,9 +177,23 @@ fn is_loopback(url: &reqwest::Url) -> bool {
             .is_ok_and(|ip| ip.is_loopback())
 }
 
+/// `HOME`, or when it is unset or empty, the account's home folder from the
+/// system (`account`), so a client that starts the server without `HOME`
+/// still gets the default vaults file.
+fn home_folder(var: Option<String>, account: impl FnOnce() -> Option<PathBuf>) -> Option<String> {
+    var.filter(|home| !home.is_empty()).or_else(|| {
+        account()
+            .map(|path| path.to_string_lossy().into_owned())
+            .filter(|home| !home.is_empty())
+    })
+}
+
 impl Config {
     pub fn from_env() -> Result<Self> {
-        Self::from_lookup(|name| std::env::var(name).ok())
+        Self::from_lookup(|name| match name {
+            "HOME" => home_folder(std::env::var("HOME").ok(), std::env::home_dir),
+            _ => std::env::var(name).ok(),
+        })
     }
 
     /// Build the configuration from any variable source, so tests never mutate
@@ -143,6 +202,7 @@ impl Config {
         let optional = |name: &str| lookup(name).filter(|v| !v.is_empty());
         let value =
             |name: &str, default: &str| optional(name).unwrap_or_else(|| default.to_owned());
+        let home = optional("HOME").map(PathBuf::from);
         let embedding_model = value("EMBEDDING_MODEL", "nomic-embed-text");
         let mut prompts = EmbeddingPrompts::for_model(&embedding_model);
         if let Some(query) = optional("EMBEDDING_QUERY_PREFIX") {
@@ -192,6 +252,12 @@ impl Config {
             trace_content: TraceContent::parse(&value("MEMORY_TRACE_CONTENT", "full"))?,
             trace_salt: optional("MEMORY_TRACE_SALT")
                 .unwrap_or_else(|| uuid::Uuid::new_v4().simple().to_string()),
+            vaults: load_vaults(optional("MEMORY_VAULTS_FILE"), home.as_deref())?,
+            provider: optional("MEMORY_PROVIDER"),
+            session_dir: optional("KIOKU_SESSION_DIR")
+                .map(|dir| crate::vault::expand_home(&dir, home.as_deref()))
+                .transpose()
+                .context("invalid KIOKU_SESSION_DIR")?,
         };
         ensure!(
             (1..=8192).contains(&cfg.embedding_dim),
@@ -214,6 +280,10 @@ impl Config {
             "MEMORY_DEFAULT_DOMAIN {:?} is outside MEMORY_DOMAINS ({}); set it to a domain this profile may use",
             cfg.default_domain,
             cfg.principal.describe_domains()
+        );
+        ensure!(
+            cfg.session_dir.as_ref().is_none_or(|dir| dir.is_absolute()),
+            "KIOKU_SESSION_DIR must be an absolute path (or start with ~)"
         );
         ensure!(
             cfg.notes_root
@@ -384,6 +454,79 @@ mod tests {
         assert!(config(&[("MEMORY_NOTES_ROOT", "notes")]).is_err());
         assert!(config(&[("MEMORY_HALF_LIFE_DAYS", "0")]).is_err());
         assert!(config(&[("MEMORY_LEGACY_THRESHOLD", "1")]).is_err());
+    }
+
+    #[test]
+    fn vaults_load_only_when_the_file_exists() {
+        // No HOME and no MEMORY_VAULTS_FILE: compatibility mode.
+        assert!(config(&[]).unwrap().vaults.is_none());
+        let dir = std::env::temp_dir().join(format!("kioku-config-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let home = dir.to_string_lossy().into_owned();
+        assert!(
+            config(&[("HOME", &home)]).unwrap().vaults.is_none(),
+            "no file at the default path"
+        );
+        let file = dir.join(".config/kioku/vaults.toml");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(
+            &file,
+            "[[vault]]\nname = \"p\"\npaths = [\"~\"]\ndomains = [\"local\"]\nproviders = [\"local\"]\ndefault_domain = \"local\"\n",
+        )
+        .unwrap();
+        let cfg = config(&[("HOME", &home), ("MEMORY_PROVIDER", "local")]).unwrap();
+        assert!(cfg.vaults.is_some());
+        assert_eq!(cfg.provider.as_deref(), Some("local"));
+        let named = file.to_string_lossy().into_owned();
+        assert!(
+            config(&[("MEMORY_VAULTS_FILE", &named), ("HOME", &home)])
+                .unwrap()
+                .vaults
+                .is_some()
+        );
+        assert!(
+            config(&[("MEMORY_VAULTS_FILE", &named)]).is_err(),
+            "~ in the file needs HOME"
+        );
+        assert!(config(&[("MEMORY_VAULTS_FILE", "vaults.toml")]).is_err());
+        let missing = dir.join("missing.toml").to_string_lossy().into_owned();
+        assert!(
+            config(&[("MEMORY_VAULTS_FILE", &missing)])
+                .unwrap()
+                .vaults
+                .is_none()
+        );
+        std::fs::write(&file, "[[vault]]\nname = \"p\"\n").unwrap();
+        assert!(
+            config(&[("HOME", &home)]).is_err(),
+            "a broken file stops startup"
+        );
+        let session = config(&[
+            ("HOME", &home),
+            ("MEMORY_VAULTS_FILE", &missing),
+            ("KIOKU_SESSION_DIR", "~/p"),
+        ])
+        .unwrap()
+        .session_dir;
+        assert_eq!(session, Some(dir.join("p")));
+        assert!(config(&[("KIOKU_SESSION_DIR", "relative")]).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_missing_home_falls_back_to_the_account_folder() {
+        let account = || Some(PathBuf::from("/Users/me"));
+        assert_eq!(
+            home_folder(Some("/home/x".into()), account).as_deref(),
+            Some("/home/x")
+        );
+        assert_eq!(home_folder(None, account).as_deref(), Some("/Users/me"));
+        assert_eq!(
+            home_folder(Some(String::new()), account).as_deref(),
+            Some("/Users/me")
+        );
+        assert_eq!(home_folder(None, || None), None);
+        assert_eq!(home_folder(None, || Some(PathBuf::new())), None);
     }
 
     #[test]

@@ -56,6 +56,13 @@ enum Command {
         /// Comma-separated domain globs, or `re:<regex>`.
         #[arg(long, default_value = "*")]
         domains: String,
+        /// Provider of the client's model (local, anthropic, openai, moonshot,
+        /// deepseek, google, or other). Needed with a vaults file.
+        #[arg(long)]
+        provider: Option<String>,
+        /// Vault this client may use. Needed with a vaults file.
+        #[arg(long)]
+        vault: Option<String>,
     },
     /// Print the tool list a client sees, as JSON (no services needed beyond startup).
     Tools {
@@ -224,10 +231,22 @@ enum Format {
     Json,
 }
 
+/// Variables each MCP client sets for itself. Values in `--env-file` win over
+/// inherited ones, so setting these there would give every client the same.
+const PER_CLIENT: [&str; 2] = ["MEMORY_PROVIDER", "KIOKU_SESSION_DIR"];
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    // Per-client settings that an env file would silently override.
+    let mut shadowed = Vec::new();
     if let Some(file) = &cli.env_file {
+        if let Ok(entries) = dotenvy::from_path_iter(file) {
+            shadowed = entries
+                .filter_map(|entry| entry.ok().map(|(name, _)| name))
+                .filter(|name| PER_CLIENT.contains(&name.as_str()))
+                .collect();
+        }
         dotenvy::from_path_override(file)
             .with_context(|| format!("cannot read env file {}", file.display()))?;
     } else if !matches!(cli.command, Command::Serve { .. })
@@ -238,13 +257,22 @@ async fn main() -> Result<()> {
         dotenvy::from_path_override(".env").context("cannot read ./.env")?;
     }
     init_logging()?;
+    for name in &shadowed {
+        tracing::warn!(
+            variable = name.as_str(),
+            "the env file sets a per-client variable, which overrides the value in each client's MCP config"
+        );
+    }
     if let Command::Token {
         subject,
         scopes,
         domains,
+        provider,
+        vault,
     } = &cli.command
     {
-        let principal = kioku::access::Principal::new(subject, scopes, domains)?;
+        let principal = kioku::access::Principal::new(subject, scopes, domains)?
+            .with_vault(provider.as_deref(), vault.as_deref())?;
         let token = kioku::access::new_token();
         return emit(&serde_json::to_string_pretty(&json!({
             "token": token,
@@ -311,6 +339,7 @@ async fn main() -> Result<()> {
                 .search(&SearchRequest {
                     query: &query,
                     domain: domain.as_deref(),
+                    domains: None,
                     limit,
                     include_legacy,
                     ranking: if no_graph {
@@ -319,6 +348,7 @@ async fn main() -> Result<()> {
                         RankOptions::HYBRID_GRAPH
                     },
                     edges: None,
+                    viewer: None,
                 })
                 .await?;
             if explain {
@@ -341,6 +371,7 @@ async fn main() -> Result<()> {
                 include_legacy,
                 ranking: RankOptions::HYBRID_GRAPH,
                 record_access: true,
+                viewer: None,
             })
             .await?,
         )?,
@@ -349,7 +380,7 @@ async fn main() -> Result<()> {
             domain,
             include_legacy,
         } => {
-            app.graph_context(id, domain.as_deref(), include_legacy)
+            app.graph_context(id, domain.as_deref(), include_legacy, None)
                 .await?
         }
         Command::Tools { tools } => {

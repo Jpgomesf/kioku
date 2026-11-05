@@ -1,48 +1,5 @@
 use super::*;
-
-/// A database created for one test run and dropped afterwards, so tests
-/// never touch data they did not create.
-struct ScratchDatabase {
-    admin_url: String,
-    name: String,
-    url: String,
-}
-
-impl ScratchDatabase {
-    async fn create() -> Result<Self> {
-        use sqlx::Connection;
-        let admin_url = std::env::var("MEMORY_TEST_DATABASE_URL").context(
-            "set MEMORY_TEST_DATABASE_URL to a PostgreSQL URL that may create databases",
-        )?;
-        let name = format!("kioku_test_{}", Uuid::new_v4().simple());
-        let mut admin = sqlx::PgConnection::connect(&admin_url).await?;
-        // Audited: the name is generated from a UUID.
-        sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE DATABASE \"{name}\"")))
-            .execute(&mut admin)
-            .await?;
-        admin.close().await?;
-        let mut url = reqwest::Url::parse(&admin_url)?;
-        url.set_path(&format!("/{name}"));
-        Ok(Self {
-            admin_url,
-            name,
-            url: url.to_string(),
-        })
-    }
-
-    async fn drop_database(self) -> Result<()> {
-        use sqlx::Connection;
-        let mut admin = sqlx::PgConnection::connect(&self.admin_url).await?;
-        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
-            "DROP DATABASE IF EXISTS \"{}\" WITH (FORCE)",
-            self.name
-        )))
-        .execute(&mut admin)
-        .await?;
-        admin.close().await?;
-        Ok(())
-    }
-}
+use crate::testing::ScratchDatabase;
 
 /// Creates and drops its own database on the server in MEMORY_TEST_DATABASE_URL.
 #[tokio::test]
@@ -54,6 +11,116 @@ async fn postgres_preserves_lifecycle_and_rejects_cross_domain_edges() -> Result
     store.pool.close().await;
     scratch.drop_database().await?;
     outcome
+}
+
+/// Creates and drops its own database on the server in MEMORY_TEST_DATABASE_URL.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; set MEMORY_TEST_DATABASE_URL"]
+async fn postgres_keeps_append_only_note_history() -> Result<()> {
+    let scratch = ScratchDatabase::create().await?;
+    let store = Store::connect(&scratch.url).await?;
+    let outcome = history_checks(&store).await;
+    store.pool.close().await;
+    scratch.drop_database().await?;
+    outcome
+}
+
+async fn history_checks(store: &Store) -> Result<()> {
+    store.migrate().await?;
+    let mut input = NoteInput {
+        domain: "history".into(),
+        key: "service".into(),
+        title: "Service v1".into(),
+        body: "Service runs on the old cluster.".into(),
+        aliases: vec![],
+        related: vec![],
+        tags: vec![],
+        source: None,
+        confidence: 0.8,
+        pinned: false,
+        lock: Vec::new(),
+    };
+    let note = store.upsert(&input).await?;
+    // Writes that change nothing add nothing.
+    store.upsert(&input).await?;
+    store
+        .set_retention(note.id, 0.5, Status::Active, Utc::now())
+        .await?;
+    assert_eq!(store.revisions(note.id, 10).await?.len(), 1);
+
+    input.title = "Service v2".into();
+    input.body = "Service moved to the new cluster.".into();
+    store.upsert(&input).await?;
+    store
+        .set_retention(note.id, 0.1, Status::Legacy, Utc::now())
+        .await?;
+    store.restore(note.id).await?;
+    let history = store.revisions(note.id, 10).await?;
+    let summary: Vec<_> = history
+        .iter()
+        .map(|entry| (entry.revision, entry.status, entry.title.as_str()))
+        .collect();
+    assert_eq!(
+        summary,
+        vec![
+            (2, Status::Active, "Service v2"),
+            (2, Status::Legacy, "Service v2"),
+            (2, Status::Active, "Service v2"),
+            (1, Status::Active, "Service v1"),
+        ]
+    );
+    assert!(
+        history
+            .windows(2)
+            .all(|w| w[0].written_at >= w[1].written_at)
+    );
+    // The overwritten text is kept.
+    let first: Value = sqlx::query_scalar(
+        "SELECT input FROM memory_note_revisions WHERE note_id=$1 ORDER BY id LIMIT 1",
+    )
+    .bind(note.id)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(first["body"], "Service runs on the old cluster.");
+    assert_eq!(store.revisions(note.id, 2).await?.len(), 2);
+    assert!(store.revisions(note.id, 0).await.is_err());
+
+    // A write by an older binary, which kept no history, is caught up once.
+    sqlx::query("UPDATE memory_notes SET status='legacy' WHERE id=$1")
+        .bind(note.id)
+        .execute(&store.pool)
+        .await?;
+    store.migrate().await?;
+    store.migrate().await?;
+    let caught_up = store.revisions(note.id, 10).await?;
+    assert_eq!(caught_up.len(), 5);
+    assert_eq!(
+        (caught_up[0].revision, caught_up[0].status),
+        (2, Status::Legacy)
+    );
+    assert!(caught_up[0].written_at >= caught_up[1].written_at);
+
+    // Notes saved before history existed get their current revision, once.
+    sqlx::query("DELETE FROM memory_note_revisions WHERE note_id=$1")
+        .bind(note.id)
+        .execute(&store.pool)
+        .await?;
+    store.migrate().await?;
+    store.migrate().await?;
+    let backfilled = store.revisions(note.id, 10).await?;
+    assert_eq!(backfilled.len(), 1);
+    assert_eq!(
+        (backfilled[0].revision, backfilled[0].status),
+        (2, Status::Legacy)
+    );
+
+    // History goes away only with its note.
+    sqlx::query("DELETE FROM memory_notes WHERE id=$1")
+        .bind(note.id)
+        .execute(&store.pool)
+        .await?;
+    assert!(store.revisions(note.id, 10).await?.is_empty());
+    Ok(())
 }
 
 async fn lifecycle_checks(store: &Store) -> Result<()> {
@@ -71,6 +138,7 @@ async fn lifecycle_checks(store: &Store) -> Result<()> {
         source: None,
         confidence: 0.8,
         pinned: false,
+        lock: Vec::new(),
     };
     let note = store.upsert(&input).await?;
     store.mark_synced(note.id, note.revision).await?;
@@ -140,6 +208,43 @@ async fn lifecycle_checks(store: &Store) -> Result<()> {
     );
     assert_eq!(store.edges(Some(&domain)).await?, vec![edge]);
     assert!(store.edges(Some(&other.domain)).await?.is_empty());
+    // A whole vault's domains load together.
+    let both = [domain.clone(), other.domain.clone()];
+    assert_eq!(store.notes_in(&both, true).await?.len(), 3);
+    assert_eq!(
+        store.notes_in(&both, false).await?.len(),
+        2,
+        "the legacy note is left out"
+    );
+    assert_eq!(
+        store.edges_in(&both).await?,
+        store.edges(Some(&domain)).await?
+    );
+    assert!(store.notes_in(&[], true).await?.is_empty());
+    let neighbors = store.neighbor_keys(&[note.id], |_| true).await?;
+    assert_eq!(
+        neighbors.get(&note.id).map(Vec::as_slice),
+        Some(&["neighbor".to_owned()][..])
+    );
+    assert!(store.neighbor_keys(&[note.id], |_| false).await?.is_empty());
+    // Each domain's distinct note locks, without loading the notes.
+    store
+        .upsert(&NoteInput {
+            key: "sealed".into(),
+            lock: vec!["local".into()],
+            ..other.clone()
+        })
+        .await?;
+    let mut locks = store.domain_locks().await?;
+    locks.sort();
+    assert_eq!(
+        locks,
+        [
+            (domain.clone(), vec![]),
+            (other.domain.clone(), vec![]),
+            (other.domain.clone(), vec!["local".to_owned()]),
+        ]
+    );
     // Concurrent retries must record exactly one event, not merely avoid
     // duplicate rows while incrementing the counter twice.
     let concurrent_id = Uuid::new_v4().to_string();

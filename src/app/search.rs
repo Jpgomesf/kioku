@@ -1,6 +1,12 @@
 //! Ranked search and graph lookups around a note.
+//!
+//! With a [`Viewer`], notes it may not see are dropped before ranking. The
+//! vector index is told to leave them out of its candidates, and links that
+//! touch them are dropped, so a hidden note can neither be returned nor shift
+//! the ranking of visible ones.
 
-use std::collections::HashMap;
+use std::borrow::Cow;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use anyhow::Result;
@@ -10,10 +16,11 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::error::invalid;
+use crate::error::{invalid, not_found};
 use crate::model::{Edge, Note, Status};
 use crate::rank::{self, MatchKind, RankInput, RankOptions};
 use crate::text::truncate_chars;
+use crate::vault::Viewer;
 
 use super::App;
 
@@ -22,18 +29,28 @@ const SNIPPET_CHARS: usize = 220;
 pub struct SearchRequest<'a> {
     pub query: &'a str,
     pub domain: Option<&'a str>,
+    /// Search these domains together, ranked as one corpus, instead of
+    /// `domain`: a whole vault at once. `None` searches `domain` alone.
+    pub domains: Option<&'a [String]>,
     pub limit: usize,
     pub include_legacy: bool,
     pub ranking: RankOptions,
     /// Links to rank with instead of the domain's stored ones. Evaluation
     /// ablations set this; everything else passes `None`.
     pub edges: Option<&'a [Edge]>,
+    /// Whose view to rank: notes it may not see are left out. `None` (the CLI
+    /// and evaluation) sees everything; MCP always passes its session's viewer.
+    pub viewer: Option<&'a Viewer>,
 }
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 pub struct SearchHit {
     pub id: Uuid,
     pub key: String,
+    /// The note's domain, for vault-wide searches. Not serialized, so
+    /// `kioku search` prints what it always has.
+    #[serde(skip)]
+    pub domain: String,
     pub title: String,
     pub status: Status,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -102,6 +119,21 @@ fn elapsed_ms(started: Instant) -> f64 {
     started.elapsed().as_secs_f64() * 1000.0
 }
 
+/// Drop the notes `viewer` may not see, and return their ids.
+pub(super) fn hide(notes: &mut Vec<Note>, viewer: Option<&Viewer>) -> HashSet<Uuid> {
+    let mut hidden = HashSet::new();
+    if let Some(viewer) = viewer {
+        notes.retain(|note| {
+            let visible = viewer.sees(note);
+            if !visible {
+                hidden.insert(note.id);
+            }
+            visible
+        });
+    }
+    hidden
+}
+
 impl App {
     #[tracing::instrument(
         name = "search",
@@ -118,14 +150,22 @@ impl App {
             invalid!("limit must be between 1 and 20");
         }
         let domain = self.domain(request.domain);
+        let one = [domain.to_owned()];
+        let domains: &[String] = request.domains.unwrap_or(&one);
         let span = tracing::Span::current();
-        span.record("domain", domain);
+        span.record("domain", domains.join(",").as_str());
         let mut stats = SearchStats::default();
         let stage = Instant::now();
-        let notes = self
-            .store
-            .notes(Some(domain), request.include_legacy)
-            .await?;
+        let restricted = request.viewer.is_some_and(Viewer::restricts_notes);
+        let mut notes = match domains {
+            [domain] => {
+                self.store
+                    .notes(Some(domain), request.include_legacy)
+                    .await?
+            }
+            several => self.store.notes_in(several, request.include_legacy).await?,
+        };
+        let hidden = hide(&mut notes, request.viewer);
         stats.load_ms = elapsed_ms(stage);
         stats.notes = notes.len();
         if notes.is_empty() {
@@ -144,7 +184,10 @@ impl App {
             ));
         }
         let stage = Instant::now();
-        let dense = match self.dense_scores(query, domain, &notes, request).await {
+        let dense = match self
+            .dense_scores(query, domains, &notes, &hidden, request)
+            .await
+        {
             Ok(dense) => {
                 stats.dense_candidates = dense.candidates;
                 stats.dense_stale = dense.stale;
@@ -161,15 +204,27 @@ impl App {
         };
         stats.dense_ms = elapsed_ms(stage);
         let stage = Instant::now();
-        let stored;
-        let edges: &[Edge] = match request.edges {
-            Some(edges) => edges,
-            None if request.ranking.graph => {
-                stored = self.store.edges(Some(domain)).await?;
-                &stored
-            }
-            None => &[],
+        let mut edges: Cow<'_, [Edge]> = match request.edges {
+            Some(edges) => Cow::Borrowed(edges),
+            None if request.ranking.graph => Cow::Owned(match domains {
+                [domain] => self.store.edges(Some(domain)).await?,
+                several => self.store.edges_in(several).await?,
+            }),
+            None => Cow::Borrowed(&[]),
         };
+        if restricted || !hidden.is_empty() {
+            // Keep only links between ranked notes, so none touches a hidden
+            // one, including hidden legacy notes that weren't loaded.
+            let ranked: HashSet<Uuid> = notes.iter().map(|n| n.id).collect();
+            edges = Cow::Owned(
+                edges
+                    .iter()
+                    .filter(|e| ranked.contains(&e.source) && ranked.contains(&e.target))
+                    .cloned()
+                    .collect(),
+            );
+        }
+        let edges: &[Edge] = &edges;
         stats.links = edges.len();
         let ranked = rank::rank(
             &RankInput {
@@ -191,6 +246,7 @@ impl App {
                 Some(SearchHit {
                     id: note.id,
                     key: note.input.key.clone(),
+                    domain: note.input.domain.clone(),
                     title: note.input.title.clone(),
                     status: note.status,
                     source: note.input.source.clone(),
@@ -223,21 +279,27 @@ impl App {
     }
 
     /// Cosine similarity for notes whose indexed revision is current.
-    /// PostgreSQL is authoritative even if a vector payload is stale.
+    /// PostgreSQL is authoritative even if a vector payload is stale. Hidden
+    /// notes are excluded in the index itself, so they take no candidate slot.
     async fn dense_scores(
         &self,
         query: &str,
-        domain: &str,
+        domains: &[String],
         notes: &[Note],
+        hidden: &HashSet<Uuid>,
         request: &SearchRequest<'_>,
     ) -> Result<Dense> {
         let vector = self.embedder.embed_query(query).await?;
+        let domains: Vec<&str> = domains.iter().map(String::as_str).collect();
+        let mut exclude: Vec<Uuid> = hidden.iter().copied().collect();
+        exclude.sort_unstable();
         let hits = self
             .vector
             .search(
                 vector,
-                Some(domain),
+                Some(&domains),
                 request.include_legacy,
+                &exclude,
                 (request.limit * 10).clamp(50, 200),
             )
             .await?;
@@ -259,13 +321,19 @@ impl App {
         })
     }
 
+    /// A note and its explicit links. With a viewer, a note it may not see is
+    /// not found, and neighbors it may not see are left out.
     pub async fn graph_context(
         &self,
         id: Uuid,
         domain: Option<&str>,
         include_legacy: bool,
+        viewer: Option<&Viewer>,
     ) -> Result<Value> {
         let note = self.require_note(id, domain).await?;
+        if viewer.is_some_and(|viewer| !viewer.sees(&note)) {
+            not_found!("no memory {id} in domain {:?}", self.domain(domain));
+        }
         if !include_legacy && note.status == Status::Legacy {
             invalid!(
                 "memory {:?} is legacy; set include_legacy to inspect it",
@@ -273,10 +341,11 @@ impl App {
             );
         }
         let edges = self.store.edges(Some(&note.input.domain)).await?;
-        let notes = self
+        let mut notes = self
             .store
             .notes(Some(&note.input.domain), include_legacy)
             .await?;
+        hide(&mut notes, viewer);
         let by_id: HashMap<_, _> = notes.iter().map(|n| (n.id, n)).collect();
         let mut neighbors = Vec::new();
         for edge in edges.iter().filter(|e| e.source == id || e.target == id) {
@@ -307,5 +376,45 @@ impl App {
             "total_neighbors": total,
             "truncated": total > 50,
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn search_hits_serialize_as_before_vaults() {
+        let hit = SearchHit {
+            id: Uuid::nil(),
+            key: "k".into(),
+            domain: "local".into(),
+            title: "T".into(),
+            status: Status::Active,
+            source: None,
+            snippet: "s".into(),
+            score: 0.5,
+            kind: MatchKind::Search,
+            linked_from: None,
+            signals: Signals {
+                dense: None,
+                lexical: Some(1.0),
+                retention: 0.8,
+            },
+        };
+        let value = serde_json::to_value(&hit).unwrap();
+        let mut fields: Vec<&str> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        fields.sort_unstable();
+        assert_eq!(
+            fields,
+            [
+                "id", "key", "match", "score", "signals", "snippet", "status", "title"
+            ]
+        );
     }
 }

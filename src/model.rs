@@ -30,6 +30,11 @@ pub struct NoteInput {
     pub confidence: f64,
     #[serde(default)]
     pub pinned: bool,
+    /// Model providers that may read this note (frontmatter `lock`), enforced
+    /// only with a vaults file. Empty means the note has no lock of its own.
+    /// Left out of the stored JSON when empty, so older notes are unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lock: Vec<String>,
 }
 
 impl NoteInput {
@@ -83,6 +88,14 @@ impl NoteInput {
         anyhow::ensure!(
             self.source.as_ref().is_none_or(|s| s.len() <= 2048),
             "source is too long"
+        );
+        anyhow::ensure!(
+            self.lock
+                .iter()
+                .all(|name| crate::vault::Provider::parse(name)
+                    .is_ok_and(|provider| provider.as_str() == name)),
+            "lock must list model providers in lowercase: {}",
+            crate::vault::Provider::names()
         );
         // PostgreSQL jsonb rejects NUL, and other control characters are never intended.
         let fields = [&self.domain, &self.key, &self.title, &self.body]
@@ -160,6 +173,16 @@ pub struct Note {
     pub revision: i64,
 }
 
+/// One entry of a note's append-only history: what a write left behind.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct NoteRevision {
+    /// The note's content revision. A status change keeps the revision.
+    pub revision: i64,
+    pub status: Status,
+    pub title: String,
+    pub written_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Edge {
     pub source: Uuid,
@@ -191,11 +214,30 @@ mod tests {
             source: None,
             confidence: 0.8,
             pinned: false,
+            lock: vec![],
         };
         let first = input.id();
         input.domain = "a".into();
         input.key = "b:c".into();
         assert_ne!(first, input.id());
+    }
+
+    #[test]
+    fn notes_without_a_lock_serialize_as_before() {
+        let mut input: NoteInput = serde_json::from_value(serde_json::json!({
+            "domain": "d", "key": "k", "title": "T", "body": "B"
+        }))
+        .unwrap();
+        assert!(input.lock.is_empty());
+        assert!(serde_json::to_value(&input).unwrap().get("lock").is_none());
+        assert!(input.validate().is_ok());
+        input.lock = vec!["local".into()];
+        assert_eq!(serde_json::to_value(&input).unwrap()["lock"][0], "local");
+        assert!(input.validate().is_ok());
+        input.lock = vec!["Local".into()];
+        assert!(input.validate().is_err(), "not normalized");
+        input.lock = vec!["gpt".into()];
+        assert!(input.validate().is_err(), "unknown provider");
     }
 
     #[test]

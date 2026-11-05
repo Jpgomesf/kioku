@@ -7,6 +7,9 @@
 //! take credentials from. Over HTTP it comes from a bearer token listed in an
 //! access file. Tools see only the principal, never credentials, so an OAuth
 //! verifier can replace the token check later without touching tool code.
+//!
+//! With a vaults file ([`crate::vault`]), an access-file principal also names
+//! its model provider and vault; one without both gets no memories.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -15,6 +18,8 @@ use anyhow::{Context, Result, bail, ensure};
 use regex::Regex;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+
+use crate::vault::Provider;
 
 /// What a principal may do. Tools require exactly one scope each.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
@@ -127,6 +132,12 @@ pub struct Principal {
     pub subject: String,
     pub scopes: BTreeSet<Scope>,
     pub domains: Vec<Pattern>,
+    /// The model provider an access-file entry declares. Stdio processes
+    /// declare theirs in `MEMORY_PROVIDER` instead.
+    pub provider: Option<Provider>,
+    /// The vault an access-file entry may use. Stdio processes are placed by
+    /// their folder instead.
+    pub vault: Option<String>,
 }
 
 impl Principal {
@@ -136,6 +147,8 @@ impl Principal {
             subject: "local".to_owned(),
             scopes: [Scope::Read, Scope::Write, Scope::Admin].into(),
             domains: vec![Pattern::any()],
+            provider: None,
+            vault: None,
         }
     }
 
@@ -145,6 +158,8 @@ impl Principal {
             subject: "nobody".to_owned(),
             scopes: BTreeSet::new(),
             domains: Vec::new(),
+            provider: None,
+            vault: None,
         }
     }
 
@@ -170,7 +185,25 @@ impl Principal {
             subject: subject.to_owned(),
             scopes,
             domains,
+            provider: None,
+            vault: None,
         })
+    }
+
+    /// This principal with a declared provider and vault, as an access-file
+    /// entry gives them. Both are optional; vault mode needs both.
+    pub fn with_vault(mut self, provider: Option<&str>, vault: Option<&str>) -> Result<Self> {
+        self.provider = provider
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .map(Provider::parse)
+            .transpose()
+            .with_context(|| format!("principal {:?}", self.subject))?;
+        self.vault = vault
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_owned);
+        Ok(self)
     }
 
     pub fn allows_tool(&self, tool: &str) -> bool {
@@ -209,6 +242,10 @@ struct Entry {
     token_sha256: String,
     scopes: Vec<String>,
     domains: Vec<String>,
+    /// The model provider behind this client; needed in vault mode.
+    provider: Option<String>,
+    /// The vault this client may use; needed in vault mode.
+    vault: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -249,7 +286,8 @@ impl AccessFile {
                 &entry.subject,
                 &entry.scopes.join(","),
                 &entry.domains.join(","),
-            )?;
+            )?
+            .with_vault(entry.provider.as_deref(), entry.vault.as_deref())?;
             entries.push((hash, principal));
         }
         Ok(Self { entries })
@@ -275,6 +313,11 @@ impl AccessFile {
 
     pub fn len(&self) -> usize {
         self.entries.len()
+    }
+
+    /// Every principal, in file order.
+    pub fn principals(&self) -> impl Iterator<Item = &Principal> {
+        self.entries.iter().map(|(_, principal)| principal)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -310,7 +353,7 @@ pub fn access_entry(principal: &Principal, token: &str) -> String {
             .collect::<Vec<_>>()
             .join(", ")
     };
-    format!(
+    let mut entry = format!(
         "[[principal]]\nsubject = {:?}\ntoken_sha256 = \"{}\"\nscopes = [{}]\ndomains = [{}]\n",
         principal.subject,
         hex(&token_hash(token)),
@@ -322,7 +365,14 @@ pub fn access_entry(principal: &Principal, token: &str) -> String {
                 .collect()
         ),
         quote(principal.domains.iter().map(ToString::to_string).collect()),
-    )
+    );
+    if let Some(provider) = principal.provider {
+        entry.push_str(&format!("provider = \"{provider}\"\n"));
+    }
+    if let Some(vault) = &principal.vault {
+        entry.push_str(&format!("vault = {vault:?}\n"));
+    }
+    entry
 }
 
 fn decode_hash(hex: &str) -> Result<[u8; 32]> {
@@ -414,7 +464,21 @@ mod tests {
         let found = file.find(&token_hash(&token)).unwrap();
         assert_eq!(found.subject, "kilo-qwen");
         assert!(found.allows_domain("personal-x") && found.allows_tool("memory_save"));
+        assert!(found.provider.is_none() && found.vault.is_none());
         assert!(file.find(&token_hash("wrong")).is_none());
+        let placed = principal
+            .with_vault(Some("Local"), Some("personal"))
+            .unwrap();
+        let entry = access_entry(&placed, &token);
+        assert!(
+            entry.ends_with("provider = \"local\"\nvault = \"personal\"\n"),
+            "{entry}"
+        );
+        let file = AccessFile::parse(&entry).unwrap();
+        let found = file.find(&token_hash(&token)).unwrap();
+        assert_eq!(found.provider, Some(Provider::Local));
+        assert_eq!(found.vault.as_deref(), Some("personal"));
+        assert_eq!(file.principals().count(), 1);
         assert_eq!(
             hex(&token_hash("abc")),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
@@ -438,6 +502,13 @@ mod tests {
             )
             .is_err(),
             "short hash"
+        );
+        assert!(
+            AccessFile::parse(&format!(
+                "[[principal]]\nsubject = \"a\"\ntoken_sha256 = \"{hash}\"\nscopes = [\"read\"]\ndomains = [\"*\"]\nprovider = \"gpt\"\n"
+            ))
+            .is_err(),
+            "unknown provider"
         );
         let twice = format!(
             "[[principal]]\nsubject = \"a\"\ntoken_sha256 = \"{hash}\"\nscopes = [\"read\"]\ndomains = [\"*\"]\n"

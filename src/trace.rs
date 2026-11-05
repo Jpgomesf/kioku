@@ -5,13 +5,15 @@
 //! and timing. Arguments include queries and note text, so the file is created
 //! with owner-only permissions and should stay private. `MEMORY_TRACE_CONTENT`
 //! can drop or pseudonymize that text while keeping keys, domains, and timing.
+//! A path containing `{vault}` gives each vault its own file ([`TraceFiles`]).
 
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::Value;
@@ -26,6 +28,66 @@ pub struct Tracer {
     path: PathBuf,
     session: Uuid,
     file: Arc<Mutex<File>>,
+}
+
+/// Replaced in `MEMORY_TRACE_FILE` by the session's vault name.
+pub const VAULT_PLACEHOLDER: &str = "{vault}";
+
+/// The trace files of one server: a single file, or one per vault when the
+/// path contains `{vault}`, so vaults never share a trace.
+#[derive(Clone)]
+pub struct TraceFiles {
+    template: PathBuf,
+    open: Arc<Mutex<HashMap<PathBuf, Tracer>>>,
+}
+
+impl TraceFiles {
+    /// Without `{vault}` the file is opened now, so a bad path fails at startup.
+    pub fn open(template: &Path) -> Result<Self> {
+        let files = Self {
+            template: template.to_path_buf(),
+            open: Arc::default(),
+        };
+        if files.per_vault() {
+            ensure!(
+                template.to_str().is_some(),
+                "MEMORY_TRACE_FILE must be valid UTF-8 to contain {VAULT_PLACEHOLDER}"
+            );
+        } else {
+            files.tracer("")?;
+        }
+        Ok(files)
+    }
+
+    pub fn per_vault(&self) -> bool {
+        self.template.to_string_lossy().contains(VAULT_PLACEHOLDER)
+    }
+
+    /// The file for a session labelled `label` (a vault name, or a reserved
+    /// label from [`crate::vault`]).
+    pub fn path_for(&self, label: &str) -> PathBuf {
+        match self.template.to_str() {
+            Some(template) if template.contains(VAULT_PLACEHOLDER) => {
+                PathBuf::from(template.replace(VAULT_PLACEHOLDER, label))
+            }
+            _ => self.template.clone(),
+        }
+    }
+
+    /// The tracer for `label`, opening its file on first use.
+    pub fn tracer(&self, label: &str) -> Result<Tracer> {
+        let path = self.path_for(label);
+        let mut open = self
+            .open
+            .lock()
+            .map_err(|_| anyhow!("trace file registry lock poisoned"))?;
+        if let Some(tracer) = open.get(&path) {
+            return Ok(tracer.clone());
+        }
+        let tracer = Tracer::open(&path)?;
+        open.insert(path, tracer.clone());
+        Ok(tracer)
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -118,6 +180,10 @@ pub struct ToolCall<'a> {
     pub session: Uuid,
     /// Who made the call: `local` over stdio, or an access-file subject.
     pub principal: &'a str,
+    /// The caller's vault. Absent without a vaults file and for sessions
+    /// that were refused.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vault: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -287,6 +353,7 @@ mod tests {
                     ts: Utc::now(),
                     session: tracer.session(),
                     principal: "local",
+                    vault: None,
                     run: None,
                     client: None,
                     called: None,
@@ -316,6 +383,30 @@ mod tests {
                 0o600
             );
         }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn vault_placeholders_give_each_vault_its_own_file() {
+        let dir = std::env::temp_dir().join(format!("kioku-trace-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let files = TraceFiles::open(&dir.join("trace-{vault}.jsonl")).unwrap();
+        assert!(files.per_vault());
+        assert!(
+            !dir.join("trace-{vault}.jsonl").exists(),
+            "opened lazily, per vault"
+        );
+        let personal = files.tracer("personal").unwrap();
+        assert_eq!(
+            personal.session(),
+            files.tracer("personal").unwrap().session()
+        );
+        assert_ne!(personal.session(), files.tracer("work").unwrap().session());
+        assert!(dir.join("trace-personal.jsonl").exists() && dir.join("trace-work.jsonl").exists());
+        let single = TraceFiles::open(&dir.join("trace.jsonl")).unwrap();
+        assert!(!single.per_vault() && dir.join("trace.jsonl").exists());
+        assert_eq!(single.path_for("work"), dir.join("trace.jsonl"));
+        assert!(TraceFiles::open(&dir.join("missing/trace.jsonl")).is_err());
         std::fs::remove_dir_all(dir).unwrap();
     }
 

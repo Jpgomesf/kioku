@@ -7,6 +7,8 @@
 //! otherwise reach the port. Host and Origin headers are validated against DNS
 //! rebinding. The token check is the only part that knows about credentials;
 //! it hands tools a [`Principal`], so an OAuth verifier can replace it later.
+//! With a vaults file, each principal's access-file entry names its provider
+//! and vault, and the MCP layer enforces them per request.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -43,6 +45,19 @@ pub async fn serve(app: App, options: HttpOptions) -> Result<()> {
     );
     // Fail at startup, not on the first request, if the tool selection is bad.
     MemoryServer::new_http(app.clone(), options.tools.as_deref())?;
+    // Likewise for an access-file entry that names a vault the vaults file lacks.
+    if let Some(vaults) = &app.config.vaults {
+        for principal in options.access.principals() {
+            if let Some(vault) = &principal.vault {
+                ensure!(
+                    vaults.find(vault).is_some(),
+                    "access-file principal {:?} names vault {vault:?}, which {} does not define",
+                    principal.subject,
+                    vaults.file().display()
+                );
+            }
+        }
+    }
     let tools = options.tools.clone();
     let factory_app = app.clone();
     let config = StreamableHttpServerConfig::default()

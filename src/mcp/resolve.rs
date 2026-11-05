@@ -1,4 +1,7 @@
 //! Resolving human-readable keys to notes, with suggestions for near misses.
+//!
+//! Only notes the caller may see resolve or appear as suggestions, so a key
+//! of a locked note looks exactly like one that doesn't exist.
 
 use uuid::Uuid;
 
@@ -24,23 +27,35 @@ impl MemoryServer {
     /// Find the memory a key refers to: an exact key, then an id, then a unique
     /// case-insensitive key, title, or alias.
     pub(super) async fn resolve(&self, domain: &str, reference: &str) -> anyhow::Result<Resolved> {
+        let caller = self.caller();
+        let viewer = &caller.viewer;
         let reference = reference.trim();
         let by_key = NoteInput::id_for(domain, reference);
-        if self.app.store.get(by_key).await?.is_some() {
+        if self
+            .app
+            .store
+            .get(by_key)
+            .await?
+            .is_some_and(|note| viewer.sees(&note))
+        {
             return Ok(Resolved::Found(by_key));
         }
         if let Ok(id) = Uuid::parse_str(reference) {
             return Ok(match self.app.store.get(id).await? {
-                Some(note) if note.input.domain == domain => Resolved::Found(id),
+                Some(note) if note.input.domain == domain && viewer.sees(&note) => {
+                    Resolved::Found(id)
+                }
                 _ => Resolved::Missing(Vec::new()),
             });
         }
-        let notes = self.app.store.notes(Some(domain), true).await?;
+        let mut notes = self.app.store.notes(Some(domain), true).await?;
+        notes.retain(|note| viewer.sees(note));
         match graph::resolve_reference(&notes, domain, reference) {
             Ok(id) => Ok(Resolved::Found(id)),
             Err("ambiguous") => Ok(Resolved::Ambiguous),
             Err(_) => {
-                let keys = self.app.store.keys(domain).await?;
+                // Notes come ordered by key, as suggestions always were.
+                let keys: Vec<String> = notes.into_iter().map(|note| note.input.key).collect();
                 Ok(Resolved::Missing(suggest(reference, &keys)))
             }
         }

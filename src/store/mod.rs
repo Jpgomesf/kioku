@@ -1,5 +1,7 @@
 //! Authoritative PostgreSQL persistence. All multi-store mutations must hold
 //! `mutation_lock` until their Qdrant updates and graph rebuild have completed.
+//! Every write that changes a note's content or status appends to its history
+//! (`memory_note_revisions`) in the same transaction.
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -12,10 +14,12 @@ use sqlx::{
 };
 use uuid::Uuid;
 
-use crate::model::{Edge, Note, NoteInput, Status};
+use crate::model::{Edge, Note, NoteInput, NoteRevision, Status};
 
 const MAX_NOTES: i64 = 10_000;
 const MUTATION_LOCK: i64 = 0x4d454d4f525931;
+/// Most history entries one call may return.
+const MAX_REVISIONS: i64 = 100;
 
 #[derive(Clone)]
 pub struct Store {
@@ -112,6 +116,7 @@ impl Store {
     pub async fn upsert(&self, input: &NoteInput) -> Result<Note> {
         input.validate()?;
         let payload = serde_json::to_value(input)?;
+        let mut tx = self.pool.begin().await?;
         let row = sqlx::query(
             "INSERT INTO memory_notes(id, domain, note_key, input, retention_score)
              VALUES ($1,$2,$3,$4,$5)
@@ -122,8 +127,39 @@ impl Store {
                vector_synced = CASE WHEN memory_notes.input IS DISTINCT FROM EXCLUDED.input THEN false ELSE memory_notes.vector_synced END
              RETURNING *")
             .bind(input.id()).bind(&input.domain).bind(&input.key).bind(payload).bind(input.confidence)
-            .fetch_one(&self.pool).await.context("Could not save memory")?;
-        decode_note(&row)
+            .fetch_one(&mut *tx).await.context("Could not save memory")?;
+        let note = decode_note(&row)?;
+        record_revision(&mut tx, note.id).await?;
+        tx.commit().await?;
+        Ok(note)
+    }
+
+    /// A note's most recent history entries, newest first.
+    pub async fn revisions(&self, id: Uuid, limit: i64) -> Result<Vec<NoteRevision>> {
+        ensure!(
+            (1..=MAX_REVISIONS).contains(&limit),
+            "history limit must be between 1 and {MAX_REVISIONS}"
+        );
+        let rows = sqlx::query(
+            "SELECT revision, status, input->>'title' AS title, written_at
+             FROM memory_note_revisions WHERE note_id=$1 ORDER BY id DESC LIMIT $2",
+        )
+        .bind(id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter()
+            .map(|row| {
+                Ok(NoteRevision {
+                    revision: row.try_get("revision")?,
+                    status: row.try_get::<String, _>("status")?.parse()?,
+                    title: row
+                        .try_get::<Option<String>, _>("title")?
+                        .unwrap_or_default(),
+                    written_at: row.try_get("written_at")?,
+                })
+            })
+            .collect()
     }
 
     pub async fn notes(&self, domain: Option<&str>, include_legacy: bool) -> Result<Vec<Note>> {
@@ -139,6 +175,25 @@ impl Store {
         ensure!(
             rows.len() <= MAX_NOTES as usize,
             "More than {MAX_NOTES} memories in this scope; choose a narrower domain before loading the graph"
+        );
+        rows.iter().map(decode_note).collect()
+    }
+
+    /// Notes of several domains at once, for searching a whole vault. The
+    /// same limit as [`Store::notes`] applies to all of them together.
+    pub async fn notes_in(&self, domains: &[String], include_legacy: bool) -> Result<Vec<Note>> {
+        let rows = sqlx::query(
+            "SELECT * FROM memory_notes WHERE domain = ANY($1)
+             AND ($2 OR status='active') ORDER BY domain,note_key LIMIT $3",
+        )
+        .bind(domains)
+        .bind(include_legacy)
+        .bind(MAX_NOTES + 1)
+        .fetch_all(&self.pool)
+        .await?;
+        ensure!(
+            rows.len() <= MAX_NOTES as usize,
+            "More than {MAX_NOTES} memories in this vault; search one of its domains instead"
         );
         rows.iter().map(decode_note).collect()
     }
@@ -164,11 +219,34 @@ impl Store {
         )
     }
 
+    /// Each domain with each distinct note lock its notes carry (empty for
+    /// no lock), sorted by domain: enough to tell which domains hold a note
+    /// a session may see without loading the notes.
+    pub async fn domain_locks(&self) -> Result<Vec<(String, Vec<String>)>> {
+        let rows = sqlx::query(
+            "SELECT DISTINCT domain, COALESCE(input->'lock', '[]'::jsonb) AS lock
+             FROM memory_notes ORDER BY domain",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter()
+            .map(|row| {
+                let lock: Value = row.try_get("lock")?;
+                Ok((
+                    row.try_get("domain")?,
+                    serde_json::from_value(lock).context("Stored memory has an invalid lock")?,
+                ))
+            })
+            .collect()
+    }
+
     /// Keys of active notes explicitly linked to each of `ids`, both directions,
-    /// at most ten per note.
+    /// at most ten per note. Only neighbors whose id passes `keep` are listed,
+    /// so callers can leave out notes a session may not see.
     pub async fn neighbor_keys(
         &self,
         ids: &[Uuid],
+        keep: impl Fn(Uuid) -> bool,
     ) -> Result<std::collections::HashMap<Uuid, Vec<String>>> {
         let mut out: std::collections::HashMap<Uuid, Vec<String>> =
             std::collections::HashMap::new();
@@ -190,19 +268,21 @@ impl Store {
         for row in rows {
             let source: Uuid = row.try_get("source")?;
             let target: Uuid = row.try_get("target")?;
-            for (from, other_key, other_status) in [
+            for (from, other, other_key, other_status) in [
                 (
                     source,
+                    target,
                     row.try_get::<String, _>("target_key")?,
                     row.try_get::<String, _>("target_status")?,
                 ),
                 (
                     target,
+                    source,
                     row.try_get::<String, _>("source_key")?,
                     row.try_get::<String, _>("source_status")?,
                 ),
             ] {
-                if ids.contains(&from) && other_status == "active" {
+                if ids.contains(&from) && other_status == "active" && keep(other) {
                     let keys = out.entry(from).or_default();
                     if keys.len() < 10 && !keys.contains(&other_key) {
                         keys.push(other_key);
@@ -225,16 +305,6 @@ impl Store {
             .collect()
     }
 
-    /// Keys in a domain, for suggesting near matches to a mistyped key.
-    pub async fn keys(&self, domain: &str) -> Result<Vec<String>> {
-        Ok(sqlx::query_scalar(
-            "SELECT note_key FROM memory_notes WHERE domain = $1 ORDER BY note_key LIMIT 10001",
-        )
-        .bind(domain)
-        .fetch_all(&self.pool)
-        .await?)
-    }
-
     pub async fn get(&self, id: Uuid) -> Result<Option<Note>> {
         sqlx::query("SELECT * FROM memory_notes WHERE id=$1")
             .bind(id)
@@ -255,20 +325,21 @@ impl Store {
         .bind(domain)
         .fetch_all(&self.pool)
         .await?;
-        ensure!(
-            rows.len() <= 1_000_000,
-            "Graph has too many edges; choose a narrower domain"
-        );
-        rows.iter()
-            .map(|r| {
-                Ok(Edge {
-                    source: r.try_get("source")?,
-                    target: r.try_get("target")?,
-                    kind: r.try_get("kind")?,
-                    weight: r.try_get("weight")?,
-                })
-            })
-            .collect()
+        decode_edges(&rows)
+    }
+
+    /// Links within each of several domains, for searching a whole vault.
+    pub async fn edges_in(&self, domains: &[String]) -> Result<Vec<Edge>> {
+        let rows = sqlx::query(
+            "SELECT e.source,e.target,e.kind,e.weight FROM memory_edges e
+             JOIN memory_notes s ON s.id=e.source JOIN memory_notes t ON t.id=e.target
+             WHERE s.domain=t.domain AND s.domain = ANY($1)
+             ORDER BY e.source,e.target,e.kind LIMIT 1000001",
+        )
+        .bind(domains)
+        .fetch_all(&self.pool)
+        .await?;
+        decode_edges(&rows)
     }
 
     pub async fn replace_edges(&self, domain: &str, edges: &[Edge]) -> Result<()> {
@@ -398,22 +469,28 @@ impl Store {
             score.is_finite() && (0.0..=1.0).contains(&score),
             "invalid retention score"
         );
+        let mut tx = self.pool.begin().await?;
         let result = sqlx::query("UPDATE memory_notes SET retention_score=$2,status=$3,last_decay_at=$4,
             vector_synced=CASE WHEN status IS DISTINCT FROM $3 THEN false ELSE vector_synced END WHERE id=$1")
-            .bind(id).bind(score).bind(status.as_str()).bind(at).execute(&self.pool).await?;
+            .bind(id).bind(score).bind(status.as_str()).bind(at).execute(&mut *tx).await?;
         ensure!(result.rows_affected() == 1, "Memory not found");
+        record_revision(&mut tx, id).await?;
+        tx.commit().await?;
         Ok(())
     }
 
     pub async fn restore(&self, id: Uuid) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
         let result = sqlx::query(
             "UPDATE memory_notes SET status='active',retention_score=GREATEST(retention_score,0.5),
             last_accessed_at=now(),last_decay_at=now(),vector_synced=false WHERE id=$1",
         )
         .bind(id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
         ensure!(result.rows_affected() == 1, "Memory not found");
+        record_revision(&mut tx, id).await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -433,6 +510,46 @@ impl Store {
             "domains": row.try_get::<i64,_>("domains")?, "edges": edges, "feedback_events": feedback}),
         )
     }
+}
+
+/// Append the note's current content and status to its history, unless its
+/// latest entry already holds them (an identical save, or a retention update
+/// that kept the status). Run it in the transaction that wrote the note, after
+/// that write: the row lock serializes concurrent writers of the same note.
+async fn record_revision(tx: &mut Transaction<'static, Postgres>, id: Uuid) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO memory_note_revisions(note_id, revision, input, status)
+         SELECT n.id, n.revision, n.input, n.status FROM memory_notes n
+         WHERE n.id = $1 AND NOT EXISTS (
+             SELECT 1 FROM (
+                 SELECT revision, status FROM memory_note_revisions
+                 WHERE note_id = n.id ORDER BY id DESC LIMIT 1
+             ) latest
+             WHERE latest.revision = n.revision AND latest.status = n.status
+         )",
+    )
+    .bind(id)
+    .execute(&mut **tx)
+    .await
+    .context("cannot record the memory's history")?;
+    Ok(())
+}
+
+fn decode_edges(rows: &[PgRow]) -> Result<Vec<Edge>> {
+    ensure!(
+        rows.len() <= 1_000_000,
+        "Graph has too many edges; choose a narrower domain"
+    );
+    rows.iter()
+        .map(|r| {
+            Ok(Edge {
+                source: r.try_get("source")?,
+                target: r.try_get("target")?,
+                kind: r.try_get("kind")?,
+                weight: r.try_get("weight")?,
+            })
+        })
+        .collect()
 }
 
 fn decode_note(row: &PgRow) -> Result<Note> {

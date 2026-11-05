@@ -152,6 +152,31 @@ pub fn resolve_edges(notes: &[Note]) -> Vec<Edge> {
     resolve_edges_with_report(notes).0
 }
 
+/// The references of note `id` that don't resolve against `notes`, by the
+/// rules of [`resolve_edges_with_report`], sorted by reference. `notes` must
+/// include the note itself; without it there is nothing to report.
+pub fn unresolved_for(notes: &[Note], id: Uuid) -> Vec<UnresolvedRelation> {
+    let Some(note) = notes.iter().find(|note| note.id == id) else {
+        return Vec::new();
+    };
+    let index = LabelIndex::build(notes);
+    let mut unresolved: Vec<UnresolvedRelation> = note
+        .input
+        .related
+        .iter()
+        .filter_map(|reference| {
+            let reason = index.resolve(&note.input.domain, reference).err()?;
+            Some(UnresolvedRelation {
+                source: id,
+                reference: reference.clone(),
+                reason: reason.to_owned(),
+            })
+        })
+        .collect();
+    unresolved.sort_by(|a, b| a.reference.cmp(&b.reference));
+    unresolved
+}
+
 /// Query-personalized PageRank over explicit relationships, traversed in both
 /// directions. `restart` is the probability of jumping back to the seeds at
 /// each step: higher values keep the mass near the seeds. This measures
@@ -281,6 +306,28 @@ mod tests {
         assert_eq!(edges.len(), 1); // exact database key still resolves
         assert_eq!(unresolved.len(), 1);
         assert_eq!(unresolved[0].reason, "ambiguous");
+    }
+
+    #[test]
+    fn one_notes_unresolved_references_follow_the_same_rules() {
+        let mut a = note("checkout", "shop");
+        let mut b = note("database", "shop");
+        b.input.aliases = vec!["Banco".into()];
+        let mut c = note("ledger", "shop");
+        c.input.aliases = vec!["banco".into()];
+        c.input.related = vec!["nowhere".into()];
+        a.input.related = vec!["zeta".into(), "database".into(), "banco".into()];
+        let notes = [a.clone(), b, c];
+        let mine = unresolved_for(&notes, a.id);
+        let refs: Vec<(&str, &str)> = mine
+            .iter()
+            .map(|u| (u.reference.as_str(), u.reason.as_str()))
+            .collect();
+        assert_eq!(refs, [("banco", "ambiguous"), ("zeta", "not_found")]);
+        assert!(mine.iter().all(|u| u.source == a.id));
+        let (_, everything) = resolve_edges_with_report(&notes);
+        assert_eq!(everything.len(), 3, "the domain report also has ledger's");
+        assert!(unresolved_for(&notes[1..], a.id).is_empty());
     }
 
     #[test]

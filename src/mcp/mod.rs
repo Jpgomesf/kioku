@@ -39,7 +39,9 @@ use rmcp::{ErrorData, RoleServer, ServerHandler, prompt_handler, tool_handler};
 use crate::access::Principal;
 use crate::app::App;
 use crate::error::UserError;
-use crate::trace::Tracer;
+use crate::trace::TraceFiles;
+use crate::vault::Session;
+use dispatch::Caller;
 use legacy::upgrade_legacy;
 use output::error_text;
 use profile::{instructions_for, select_tools};
@@ -58,31 +60,65 @@ pub struct MemoryServer {
     app: App,
     tool_router: ToolRouter<Self>,
     prompt_router: PromptRouter<Self>,
-    tracer: Option<Tracer>,
+    tracer: Option<TraceFiles>,
     instructions: String,
-    /// The process's own principal: the stdio profile, or over HTTP one with
-    /// no scopes, so a request the HTTP layer didn't authenticate gets nothing.
-    principal: Arc<Principal>,
+    /// The process's own caller: the stdio profile and the vault its folder
+    /// places it in, or over HTTP a principal with no scopes, so a request the
+    /// HTTP layer didn't authenticate gets nothing.
+    caller: Arc<Caller>,
 }
 
 impl MemoryServer {
     /// Build a stdio server with the tools selected by `spec`: `core`
     /// (default), `all`, or a comma-separated list mixing those with tool
     /// names. Tools outside the process principal's scopes are not listed.
+    ///
+    /// With a vaults file, the session is placed by `KIOKU_SESSION_DIR`, else
+    /// the working directory, and declares its provider in `MEMORY_PROVIDER`.
     pub fn new(app: App, spec: Option<&str>) -> anyhow::Result<Self> {
         let principal = Arc::new(app.config.principal.clone());
-        Self::build(app, spec, principal)
+        let folder = app
+            .config
+            .session_dir
+            .clone()
+            .or_else(|| std::env::current_dir().ok());
+        let session = Session::for_folder(
+            app.config.vaults.as_ref(),
+            app.config.provider.as_deref(),
+            folder.as_deref(),
+        );
+        match &session {
+            Session::Open => {}
+            Session::Placed(placement) => tracing::info!(
+                vault = placement.vault(),
+                area = placement.area(),
+                provider = %placement.provider(),
+                "session placed in a vault"
+            ),
+            Session::Refused(reason) => {
+                tracing::warn!(reason = reason.as_str(), "this session gets no memories");
+            }
+        }
+        let server = Self::build(app, spec, Arc::new(Caller::new(principal, session)))?;
+        // Open this session's trace file now, so a bad path fails at startup.
+        if let Some(files) = &server.tracer {
+            files.tracer(server.caller.session.trace_label())?;
+        }
+        Ok(server)
     }
 
     /// Build a server for the HTTP transport. Each request carries its own
     /// principal, so every selected tool is routed and `tools/list` is
     /// filtered per request.
     pub fn new_http(app: App, spec: Option<&str>) -> anyhow::Result<Self> {
-        Self::build(app, spec, Arc::new(Principal::nobody()))
+        let nobody = Principal::nobody();
+        let session = Session::for_principal(app.config.vaults.as_ref(), &nobody);
+        Self::build(app, spec, Arc::new(Caller::new(Arc::new(nobody), session)))
     }
 
-    fn build(app: App, spec: Option<&str>, principal: Arc<Principal>) -> anyhow::Result<Self> {
+    fn build(app: App, spec: Option<&str>, caller: Arc<Caller>) -> anyhow::Result<Self> {
         let mut selected = select_tools(spec.unwrap_or(&app.config.tools))?;
+        let principal = &caller.principal;
         if !principal.scopes.is_empty() {
             selected.retain(|tool| principal.allows_tool(tool));
         }
@@ -92,7 +128,7 @@ impl MemoryServer {
             .config
             .trace_file
             .as_deref()
-            .map(Tracer::open)
+            .map(TraceFiles::open)
             .transpose()?;
         Ok(Self {
             app,
@@ -100,7 +136,7 @@ impl MemoryServer {
             prompt_router: Self::prompt_router(),
             tracer,
             instructions,
-            principal,
+            caller,
         })
     }
 
@@ -125,27 +161,50 @@ impl MemoryServer {
     }
 
     /// The requested domain, or the default one, if the caller may use it.
+    /// In vault mode the default is the session's area, else its vault's
+    /// default domain.
     fn domain(&self, domain: Option<&str>) -> anyhow::Result<String> {
-        let domain = self
-            .app
-            .domain(domain.map(str::trim).filter(|d| !d.is_empty()))
-            .to_owned();
+        let caller = self.caller();
+        let domain = match domain.map(str::trim).filter(|d| !d.is_empty()) {
+            Some(domain) => domain.to_owned(),
+            None => caller
+                .default_domain()
+                .unwrap_or(&self.app.config.default_domain)
+                .to_owned(),
+        };
         self.authorize_domain(&domain)?;
         Ok(domain)
     }
 
-    /// Refuse a domain outside the caller's patterns.
+    /// Every stored domain that holds a note the caller may see, in name
+    /// order. A domain whose every note is locked away from the caller is
+    /// left out, so its name is never shown.
+    async fn visible_domains(&self) -> anyhow::Result<Vec<String>> {
+        let caller = self.caller();
+        let mut visible: Vec<String> = Vec::new();
+        for (domain, lock) in self.app.store.domain_locks().await? {
+            if visible.last() == Some(&domain) || !caller.viewer.sees_domain(&domain)? {
+                continue;
+            }
+            if caller.viewer.sees_locked(&domain, &lock) {
+                visible.push(domain);
+            }
+        }
+        Ok(visible)
+    }
+
+    /// Refuse a domain outside the caller's patterns, its vault, or its locks.
     fn authorize_domain(&self, domain: &str) -> anyhow::Result<()> {
         let caller = self.caller();
-        if caller.allows_domain(domain) {
-            return Ok(());
+        if !caller.principal.allows_domain(domain) {
+            return Err(UserError::Refused(format!(
+                "domain {domain:?} is outside what this connection ({}) may use: {}. Use one of those domains",
+                caller.principal.subject,
+                caller.principal.describe_domains()
+            ))
+            .into());
         }
-        Err(UserError::Refused(format!(
-            "domain {domain:?} is outside what this connection ({}) may use: {}. Use one of those domains",
-            caller.subject,
-            caller.describe_domains()
-        ))
-        .into())
+        caller.viewer.check_domain(domain)
     }
 }
 

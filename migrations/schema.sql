@@ -42,3 +42,29 @@ CREATE TABLE IF NOT EXISTS memory_feedback (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS memory_feedback_note ON memory_feedback(note_id);
+
+-- Append-only history: every write that changes a note's content or status
+-- adds a row in the same transaction, so overwritten text stays recoverable.
+-- Rows go away only with their note. `revision` is the note's content
+-- revision; a status change appends a row at the same revision.
+CREATE TABLE IF NOT EXISTS memory_note_revisions (
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    note_id UUID NOT NULL REFERENCES memory_notes(id) ON DELETE CASCADE,
+    revision BIGINT NOT NULL CHECK (revision >= 1),
+    input JSONB NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('active', 'legacy')),
+    written_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS memory_note_revisions_note ON memory_note_revisions(note_id, id DESC);
+
+-- Notes saved before history existed start it with their current revision,
+-- and writes by an older binary that kept no history are caught up. Neither
+-- time is known exactly; the latest edit time is the best bound.
+INSERT INTO memory_note_revisions(note_id, revision, input, status, written_at)
+SELECT n.id, n.revision, n.input, n.status, GREATEST(n.updated_at, latest.written_at)
+FROM memory_notes n
+LEFT JOIN LATERAL (
+    SELECT r.revision, r.status, r.written_at FROM memory_note_revisions r
+    WHERE r.note_id = n.id ORDER BY r.id DESC LIMIT 1
+) latest ON true
+WHERE latest.revision IS DISTINCT FROM n.revision OR latest.status IS DISTINCT FROM n.status;

@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::time::Instant;
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
 
 use crate::app::{App, ContextRequest, SearchRequest};
@@ -103,7 +103,15 @@ pub async fn prepare(app: &App, dataset: &Dataset) -> Result<()> {
     let Some(corpus) = &dataset.corpus else {
         return Ok(());
     };
-    app.ingest(corpus, &dataset.domain).await?;
+    let report = app.ingest(corpus, &dataset.domain).await?;
+    if let Some(first) = report.failed.first() {
+        bail!(
+            "{} corpus file(s) could not be imported, so the results would not be comparable (first: {}: {})",
+            report.failed.len(),
+            first.path,
+            first.reason
+        );
+    }
     for key in &dataset.retire {
         let id = NoteInput::id_for(&dataset.domain, key);
         app.set_legacy(id, true, Some(&dataset.domain))
@@ -167,10 +175,12 @@ async fn run_queries(
             .search(&SearchRequest {
                 query: &query.query,
                 domain: Some(&dataset.domain),
+                domains: None,
                 limit: options.k,
                 include_legacy: query.include_legacy,
                 ranking,
                 edges,
+                viewer: None,
             })
             .await
             .with_context(|| format!("query {} failed", query.id))?
@@ -402,6 +412,7 @@ async fn context_sufficiency(app: &App, dataset: &Dataset, budget: usize) -> Res
                 include_legacy: query.include_legacy,
                 ranking: RankOptions::HYBRID_GRAPH,
                 record_access: false,
+                viewer: None,
             })
             .await
             .with_context(|| format!("context for {} failed", query.id))?;

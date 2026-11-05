@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use crate::config::{Config, EmbeddingProvider};
 
 /// Texts per request when embedding many documents.
-const BATCH: usize = 16;
+pub(crate) const BATCH: usize = 16;
 /// Attempts for transient failures (connection errors, 429, 5xx).
 const ATTEMPTS: u32 = 3;
 

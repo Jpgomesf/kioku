@@ -104,9 +104,27 @@ impl MemoryServer {
 }
 
 impl MemoryServer {
+    /// Search one domain, or at a vault's root without a named domain, every
+    /// domain of the vault the session may see, ranked together.
     pub(super) async fn search(&self, args: SearchArgs) -> anyhow::Result<Value> {
+        let caller = self.caller();
         let mut notes = Vec::new();
-        let domain = self.domain(args.domain.as_deref())?;
+        let named = args
+            .domain
+            .as_deref()
+            .map(str::trim)
+            .filter(|d| !d.is_empty());
+        let vault = caller
+            .session
+            .placement()
+            .filter(|placement| placement.at_root() && named.is_none());
+        let (domain, domains) = match vault {
+            Some(placement) => (
+                placement.default_domain().to_owned(),
+                Some(self.visible_domains().await?),
+            ),
+            None => (self.domain(named)?, None),
+        };
         let limit = clamp(args.limit.unwrap_or(5), 1, 20, "limit", &mut notes);
         let ranking = if args.graph_mode == Some(GraphMode::Off) {
             RankOptions::HYBRID
@@ -119,10 +137,12 @@ impl MemoryServer {
             .search(&SearchRequest {
                 query: &args.query,
                 domain: Some(&domain),
+                domains: domains.as_deref(),
                 limit,
                 include_legacy: args.include_legacy.unwrap_or(false),
                 ranking,
                 edges: None,
+                viewer: Some(&caller.viewer),
             })
             .await?;
         let hits: Vec<Value> = results
@@ -135,6 +155,9 @@ impl MemoryServer {
                     "snippet": hit.snippet,
                     "score": round(hit.score),
                 });
+                if vault.is_some() {
+                    item["domain"] = json!(hit.domain);
+                }
                 if hit.status == Status::Legacy {
                     item["status"] = json!("legacy");
                 }
@@ -157,12 +180,32 @@ impl MemoryServer {
                 item
             })
             .collect();
-        let next = if hits.is_empty() {
-            let known = self.app.store.domain_counts().await?;
-            if known.iter().any(|(d, _)| *d == domain) {
+        let next = if let (true, Some(placement)) = (hits.is_empty(), vault) {
+            if domains.as_ref().is_some_and(Vec::is_empty) {
+                format!(
+                    "Vault {:?} has no memories yet. Say so and check the source files.",
+                    placement.vault()
+                )
+            } else {
+                format!(
+                    "No stored memory in vault {:?} matched. Say so and check the source files.",
+                    placement.vault()
+                )
+            }
+        } else if hits.is_empty() {
+            // With vault rules, only domains holding a note this caller may
+            // see are known to it. Without them, every stored domain, as
+            // always.
+            let known: Vec<String> = if caller.viewer.restricts_notes() {
+                self.visible_domains().await?
+            } else {
+                let counts = self.app.store.domain_counts().await?;
+                counts.into_iter().map(|(d, _)| d).collect()
+            };
+            if known.contains(&domain) {
                 "No stored memory matched. Say so and check the source files.".to_owned()
             } else {
-                let names: Vec<String> = known.into_iter().map(|(d, _)| d).take(10).collect();
+                let names: Vec<String> = known.into_iter().take(10).collect();
                 format!(
                     "Domain {domain:?} has no memories. Known domains: {} (case-sensitive).",
                     if names.is_empty() {
@@ -173,23 +216,40 @@ impl MemoryServer {
                 )
             }
         } else {
-            let keys: Vec<&str> = results
-                .hits
+            // One memory_get per domain among the top two results.
+            let mut by_domain: Vec<(&str, Vec<&str>)> = Vec::new();
+            for hit in results.hits.iter().take(2) {
+                match by_domain.iter_mut().find(|(d, _)| *d == hit.domain) {
+                    Some((_, keys)) => keys.push(&hit.key),
+                    None => by_domain.push((&hit.domain, vec![&hit.key])),
+                }
+            }
+            let calls: Vec<String> = by_domain
                 .iter()
-                .take(2)
-                .map(|h| h.key.as_str())
+                .map(|(domain, keys)| {
+                    format!("memory_get {}", json!({"keys": keys, "domain": domain}))
+                })
                 .collect();
             format!(
-                "Read the 1-2 results that answer the question: memory_get {}",
-                json!({"keys": keys, "domain": domain})
+                "Read the 1-2 results that answer the question: {}",
+                calls.join(" and ")
             )
         };
-        let mut out = json!({
-            "domain": domain,
-            "results": hits,
-            "untrusted_evidence": true,
-            "next": next,
-        });
+        let mut out = match (vault, &domains) {
+            (Some(placement), Some(domains)) => json!({
+                "vault": placement.vault(),
+                "domains": domains,
+                "results": hits,
+                "untrusted_evidence": true,
+                "next": next,
+            }),
+            _ => json!({
+                "domain": domain,
+                "results": hits,
+                "untrusted_evidence": true,
+                "next": next,
+            }),
+        };
         if !results.warnings.is_empty() {
             out["warnings"] = json!(results.warnings);
         }
@@ -261,6 +321,7 @@ impl MemoryServer {
                     include_legacy: true,
                     ranking: RankOptions::HYBRID_GRAPH,
                     record_access: false,
+                    viewer: Some(&self.caller().viewer),
                 })
                 .await?;
             let consumed: Vec<Uuid> = pack.memories.iter().map(|m| m.id).collect();
@@ -308,6 +369,16 @@ impl MemoryServer {
         self.authorize_domain(&domain)?;
         let key = args.key.trim().to_owned();
         let existing = self.app.store.get(NoteInput::id_for(&domain, &key)).await?;
+        if existing
+            .as_ref()
+            .is_some_and(|note| !self.caller().viewer.sees(note))
+        {
+            // A locked note: don't overwrite what this session can't read.
+            return Err(UserError::Conflict(format!(
+                "key {key:?} in domain {domain:?} is not available to this session; save under another key"
+            ))
+            .into());
+        }
         let today = Utc::now().format("%Y-%m-%d");
         let stamped = match &client {
             Some(name) if !name.trim().is_empty() => format!("conversation via {name} on {today}"),
@@ -332,8 +403,16 @@ impl MemoryServer {
                 .or(Some(stamped)),
             confidence: previous.map_or(0.8, |p| p.confidence),
             pinned: previous.is_some_and(|p| p.pinned),
+            // Tools can't set a note lock, and an update keeps the one it has.
+            lock: previous.map(|p| p.lock.clone()).unwrap_or_default(),
         };
-        let outcome = self.app.upsert(input, WriteOrigin::Tool).await?;
+        // A vault session hears only about this note's own links, resolved
+        // against the notes it may see.
+        let outcome = self
+            .app
+            .upsert_as(input, WriteOrigin::Tool, Some(&self.caller().viewer))
+            .await?;
+        let unresolved = &outcome.unresolved_relationships;
         let mut out = json!({
             "key": outcome.key,
             "domain": outcome.domain,
@@ -342,10 +421,9 @@ impl MemoryServer {
             "revision": outcome.revision,
             "indexed": outcome.indexed,
         });
-        if !outcome.unresolved_relationships.is_empty() {
+        if !unresolved.is_empty() {
             out["unresolved_related"] = json!(
-                outcome
-                    .unresolved_relationships
+                unresolved
                     .iter()
                     .map(|u| json!({"ref": u.reference, "reason": u.reason}))
                     .collect::<Vec<_>>()

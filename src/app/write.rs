@@ -12,6 +12,7 @@ use crate::error::{UserError, conflict, invalid};
 use crate::graph::{self, UnresolvedRelation};
 use crate::model::{Note, NoteInput, Status};
 use crate::secrets;
+use crate::vault::Viewer;
 
 use super::{App, is_file_source};
 
@@ -36,8 +37,35 @@ pub struct UpsertOutcome {
     pub changed: bool,
     /// False when the note is saved but its vector could not be written yet.
     pub indexed: bool,
+    /// At most 20, counted in full by `unresolved_count`. Without vault rules,
+    /// the whole domain's; for a viewer with them, only this note's own.
     pub unresolved_relationships: Vec<UnresolvedRelation>,
     pub unresolved_count: usize,
+}
+
+/// Unresolved links a save reports, at most `limit`, and how many there are.
+/// Without vault rules, the whole domain's, as always. For a viewer with
+/// them, only the saved note's own, resolved against the notes it may see:
+/// a reference to a hidden note's key, title, or alias reads as not found,
+/// and one shared with a hidden note resolves to the visible one.
+fn save_report(
+    notes: Vec<Note>,
+    saved: Uuid,
+    domain_report: Vec<UnresolvedRelation>,
+    viewer: Option<&Viewer>,
+    limit: usize,
+) -> (Vec<UnresolvedRelation>, usize) {
+    let mut unresolved = match viewer.filter(|viewer| viewer.restricts_notes()) {
+        Some(viewer) => {
+            let visible: Vec<Note> = notes.into_iter().filter(|n| viewer.sees(n)).collect();
+            graph::unresolved_for(&visible, saved)
+        }
+        None => domain_report,
+    };
+    // Filter first, then cut, so the saved note's own entries survive.
+    let count = unresolved.len();
+    unresolved.truncate(limit);
+    (unresolved, count)
 }
 
 /// Decide whether `input` may be written over `existing`. A note's source owns
@@ -86,6 +114,18 @@ pub(super) fn check_ownership(
 
 impl App {
     pub async fn upsert(&self, input: NoteInput, origin: WriteOrigin) -> Result<UpsertOutcome> {
+        self.upsert_as(input, origin, None).await
+    }
+
+    /// Save a note for `viewer`, whose vault rules decide which unresolved
+    /// links the outcome reports (see [`save_report`]). The stored links are
+    /// the same for every viewer.
+    pub async fn upsert_as(
+        &self,
+        input: NoteInput,
+        origin: WriteOrigin,
+        viewer: Option<&Viewer>,
+    ) -> Result<UpsertOutcome> {
         if let Err(error) = input.validate() {
             invalid!("{error}");
         }
@@ -115,10 +155,9 @@ impl App {
         check_ownership(current.as_ref(), &input, origin)?;
         let note = self.store.upsert(&input).await?;
         let notes = self.store.notes(Some(&input.domain), true).await?;
-        let (edges, mut unresolved) = graph::resolve_edges_with_report(&notes);
-        let unresolved_count = unresolved.len();
-        unresolved.truncate(20);
+        let (edges, domain_report) = graph::resolve_edges_with_report(&notes);
         self.store.replace_edges(&input.domain, &edges).await?;
+        let (unresolved, unresolved_count) = save_report(notes, note.id, domain_report, viewer, 20);
         let mut indexed = true;
         if !note.vector_synced {
             let vector = match vector {
@@ -236,6 +275,92 @@ impl App {
 mod tests {
     use super::*;
     use crate::testing::sourced_note as note;
+
+    #[test]
+    fn a_vault_save_reports_its_own_links_as_its_viewer_sees_them() {
+        use crate::access::Principal;
+        use crate::vault::{Session, Vaults};
+        let vaults = std::sync::Arc::new(
+            Vaults::parse(
+                "[[vault]]\nname = \"p\"\ndomains = [\"test\"]\nproviders = [\"local\", \"anthropic\"]\ndefault_domain = \"test\"\n",
+                Path::new("/cfg/vaults.toml"),
+                None,
+            )
+            .unwrap(),
+        );
+        let viewer = |provider: &str| {
+            let principal = Principal::new("p", "read,write", "*")
+                .unwrap()
+                .with_vault(Some(provider), Some("p"))
+                .unwrap();
+            Viewer::new(
+                &principal,
+                &Session::for_principal(Some(&vaults), &principal),
+            )
+        };
+        let mut hidden = note("passport", "body");
+        hidden.input.title = "Passport renewal 2027".into();
+        hidden.input.aliases = vec!["shared label".into()];
+        hidden.input.lock = vec!["local".into()];
+        let mut visible = note("visa", "body");
+        visible.input.aliases = vec!["shared label".into()];
+        let mut probe = note("probe", "body");
+        probe.input.related = vec![
+            "Passport renewal 2027".into(),
+            "passport".into(),
+            "shared label".into(),
+            "visa".into(),
+            "nowhere".into(),
+        ];
+        // Other notes' dangling links, more than the report's limit.
+        let others: Vec<Note> = (0..30)
+            .map(|i| {
+                let mut other = note(&format!("other-{i:02}"), "body");
+                other.input.related = vec![format!("missing-{i}")];
+                other
+            })
+            .collect();
+        let mut notes = vec![hidden, visible, probe.clone()];
+        notes.extend(others);
+        let (_, domain_report) = graph::resolve_edges_with_report(&notes);
+        let report = |viewer: Option<&Viewer>| {
+            let (unresolved, count) =
+                save_report(notes.clone(), probe.id, domain_report.clone(), viewer, 20);
+            let refs: Vec<(String, String)> = unresolved
+                .iter()
+                .map(|u| (u.reference.clone(), u.reason.clone()))
+                .collect();
+            (refs, count)
+        };
+        let pair = |reference: &str, reason: &str| (reference.to_owned(), reason.to_owned());
+
+        let claude = viewer("anthropic");
+        let (refs, count) = report(Some(&claude));
+        assert_eq!(
+            refs,
+            [
+                pair("Passport renewal 2027", "not_found"),
+                pair("nowhere", "not_found"),
+                pair("passport", "not_found"),
+            ],
+            "hidden labels must read as missing, and shared ones resolve"
+        );
+        assert_eq!(count, 3);
+
+        let local = viewer("local");
+        let (refs, _) = report(Some(&local));
+        assert_eq!(
+            refs,
+            [
+                pair("nowhere", "not_found"),
+                pair("shared label", "ambiguous")
+            ]
+        );
+
+        // Without vault rules the report is the whole domain's, cut to 20.
+        let (refs, count) = report(None);
+        assert_eq!((refs.len(), count), (20, 32));
+    }
 
     #[test]
     fn ownership_rules() {
