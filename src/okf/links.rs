@@ -8,6 +8,8 @@ use regex::{Captures, Regex};
 
 use crate::text::truncate_chars;
 
+use super::split::Fences;
+
 /// `[label](href "title")`, with an optional leading `!` for images.
 static LINK: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"(!?)\[([^\]\n]*)\]\((<[^>\n]*>|[^)\s]+)(?:\s+"[^"\n]*")?\)"#)
@@ -44,7 +46,7 @@ pub(super) fn resolve(from: &str, href: &str) -> Href {
     if path.is_empty() {
         return Href::SameConcept;
     }
-    let path = path.replace("%20", " ");
+    let path = percent_decoded(path);
     let mut parts: Vec<&str> = if path.starts_with('/') {
         Vec::new()
     } else {
@@ -72,10 +74,40 @@ pub(super) fn resolve(from: &str, href: &str) -> Href {
     match parts.join("/").strip_suffix(".md") {
         Some(id) => Href::Concept {
             id: id.to_owned(),
-            anchor: anchor.filter(|a| !a.is_empty()).map(str::to_lowercase),
+            anchor: anchor
+                .filter(|a| !a.is_empty())
+                .map(|a| percent_decoded(a).to_lowercase()),
         },
         None => Href::Navigation,
     }
+}
+
+/// `%XX` escapes decoded as UTF-8; anything malformed is kept as written.
+fn percent_decoded(text: &str) -> String {
+    if !text.contains('%') {
+        return text.to_owned();
+    }
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = |b: u8| (b as char).to_digit(16);
+        match (
+            bytes[i],
+            bytes.get(i + 1).copied().and_then(hex),
+            bytes.get(i + 2).copied().and_then(hex),
+        ) {
+            (b'%', Some(high), Some(low)) => {
+                out.push((high * 16 + low) as u8);
+                i += 3;
+            }
+            (byte, _, _) => {
+                out.push(byte);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(out).unwrap_or_else(|_| text.to_owned())
 }
 
 /// What a link to a concept shows and reaches.
@@ -86,6 +118,8 @@ pub(super) struct Target {
     pub title: String,
     /// Heading anchors to the note holding that heading, for split concepts.
     pub anchors: HashMap<String, String>,
+    /// Providers the concept is locked to; empty means no lock.
+    pub lock: Vec<String>,
 }
 
 impl Target {
@@ -115,18 +149,22 @@ pub(super) struct Rewritten {
 /// adds the target's id when the words lack it, and records the target's key.
 /// A list item that is only links becomes a list of ids. Links inside code
 /// fences, images and external URLs are left as written.
-pub(super) fn rewrite(text: &str, from: &str, own: &str, targets: &Targets) -> Rewritten {
+///
+/// The words of a link to a locked concept are kept as the author wrote them,
+/// without the target's id or title, unless every provider that may read
+/// this note may also read the target (`lock` is this concept's lock).
+pub(super) fn rewrite(
+    text: &str,
+    from: &str,
+    own: &str,
+    lock: &[String],
+    targets: &Targets,
+) -> Rewritten {
     let mut out = Rewritten::default();
-    let mut fenced = false;
+    let mut fences = Fences::default();
     let mut lines = Vec::new();
     for line in text.split('\n') {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
-            fenced = !fenced;
-            lines.push(line.to_owned());
-            continue;
-        }
-        if fenced || !line.contains("](") {
+        if fences.code(line) || !line.contains("](") {
             lines.push(line.to_owned());
             continue;
         }
@@ -148,7 +186,13 @@ pub(super) fn rewrite(text: &str, from: &str, own: &str, targets: &Targets) -> R
                         if !own_key && !out.related.contains(&key) {
                             out.related.push(key);
                         }
-                        shown(label, target, compact)
+                        if reveals(lock, &target.lock) {
+                            shown(label, target, compact)
+                        } else if label.trim().is_empty() {
+                            "a linked note".to_owned()
+                        } else {
+                            label.to_owned()
+                        }
                     }
                     None => {
                         out.broken += 1;
@@ -162,6 +206,13 @@ pub(super) fn rewrite(text: &str, from: &str, own: &str, targets: &Targets) -> R
     }
     out.text = lines.join("\n");
     out
+}
+
+/// Whether a note locked to `reader` (empty: no lock) may show the name of a
+/// concept locked to `target`: only when everyone who may read the note may
+/// read the target too.
+fn reveals(reader: &[String], target: &[String]) -> bool {
+    target.is_empty() || (!reader.is_empty() && reader.iter().all(|p| target.contains(p)))
 }
 
 /// The words a link to `target` keeps.

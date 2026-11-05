@@ -26,6 +26,7 @@ const READ_KEYS: &[&str] = &[
     "sources",
     "usage_window",
     "lock",
+    "pinned",
     "okf_version",
 ];
 /// The longest value the facts line shows for one field.
@@ -84,6 +85,8 @@ pub(super) struct Concept {
     /// Other frontmatter fields with plain values, in file order.
     pub fields: Vec<(String, String)>,
     pub lock: Vec<String>,
+    /// Kioku's `pinned: true`: the concept's notes never age into legacy.
+    pub pinned: bool,
     pub body: String,
 }
 
@@ -217,8 +220,11 @@ pub(super) fn parse(path: &str, text: &str) -> Result<Concept> {
     let (yaml, body) = markdown::frontmatter(&normalized)?;
     let (pairs, lock) = match yaml {
         Some(yaml) if !yaml.trim().is_empty() => {
-            let Ordered(pairs) =
-                serde_saphyr::from_str(yaml).context("invalid YAML frontmatter")?;
+            let Ordered(pairs) = serde_saphyr::from_str_with_options(
+                yaml,
+                serde_saphyr::options! { strict_booleans: true },
+            )
+            .context("invalid YAML frontmatter")?;
             (pairs, markdown::frontmatter_lock(yaml)?)
         }
         _ => (Vec::new(), Vec::new()),
@@ -271,6 +277,7 @@ pub(super) fn parse(path: &str, text: &str) -> Result<Concept> {
         resource: get("resource").and_then(scalar),
         fields,
         lock,
+        pinned: matches!(get("pinned"), Some(Value::Bool(true))),
         body,
     })
 }

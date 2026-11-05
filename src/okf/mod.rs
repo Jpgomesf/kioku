@@ -52,32 +52,56 @@ const MAX_CONCEPTS: usize = 10_000;
 /// Kioku's limits on one note's lists and title.
 const MAX_RELATED: usize = 128;
 const MAX_LABELS: usize = 64;
-const MAX_TITLE_CHARS: usize = 500;
+const MAX_TITLE_BYTES: usize = 512;
+const MAX_KEY_BYTES: usize = 256;
+/// The hub shows at most this much of a long description.
+const HUB_DESCRIPTION_CHARS: usize = 600;
 
 /// The `okf_version` a bundle-root `index.md` declares, or `None` when `dir`
-/// has no such file or it declares no version.
-pub fn bundle_version(dir: &Path) -> Result<Option<String>> {
+/// has no such file, it can't be read, or it declares no version.
+pub fn bundle_version(dir: &Path) -> Option<String> {
     let index = dir.join("index.md");
     if !dir.is_dir() || !index.is_file() {
-        return Ok(None);
+        return None;
     }
-    let text = std::fs::read_to_string(&index)
-        .with_context(|| format!("cannot read {}", index.display()))?;
+    let text = std::fs::read_to_string(&index).ok()?;
     let text = text.trim_start_matches('\u{feff}').replace("\r\n", "\n");
     let Ok((Some(yaml), _)) = markdown::frontmatter(&text) else {
-        return Ok(None);
+        return None;
     };
     #[derive(serde::Deserialize, Default)]
     #[serde(default)]
     struct Root {
         okf_version: Option<serde_json::Value>,
     }
-    let root: Root = serde_saphyr::from_str(yaml).unwrap_or_default();
-    Ok(root.okf_version.and_then(|v| match v {
+    let root: Root =
+        serde_saphyr::from_str_with_options(yaml, serde_saphyr::options! { strict_booleans: true })
+            .unwrap_or_default();
+    root.okf_version.and_then(|v| match v {
         serde_json::Value::String(s) => Some(s.trim().to_owned()),
         serde_json::Value::Number(n) => Some(n.to_string()),
         _ => None,
-    }))
+    })
+}
+
+/// The bundle folder at or above `dir`, up to and including `stop`.
+pub fn enclosing_bundle(dir: &Path, stop: &Path) -> Option<PathBuf> {
+    dir.ancestors()
+        .take_while(|d| d.starts_with(stop))
+        .find(|d| bundle_version(d).is_some())
+        .map(Path::to_path_buf)
+}
+
+/// `text` cut to at most `max` bytes at a character boundary, ending in `…`
+/// when cut.
+fn truncate_bytes(text: &str, max: usize) -> String {
+    if text.len() <= max {
+        return text.to_owned();
+    }
+    format!(
+        "{}…",
+        split::prefix_bytes(text, max.saturating_sub('…'.len_utf8()))
+    )
 }
 
 /// The concept files of a bundle, read from disk.
@@ -103,7 +127,7 @@ impl Bundle {
             "an OKF bundle is a folder: {}",
             root.display()
         );
-        let version = bundle_version(&root)?;
+        let version = bundle_version(&root);
         let mut files = Vec::new();
         for entry in walkdir::WalkDir::new(&root)
             .follow_links(false)
@@ -237,6 +261,7 @@ pub fn convert(bundle: &Bundle, domain: &str) -> Conversion {
                 short: c.producer_id.clone(),
                 title: c.title.clone(),
                 anchors: HashMap::new(),
+                lock: c.lock.clone(),
             };
             (c.id.clone(), target)
         })
@@ -244,32 +269,34 @@ pub fn convert(bundle: &Bundle, domain: &str) -> Conversion {
     let mut plans: HashMap<String, Vec<split::Piece>> = HashMap::new();
     for concept in &concepts {
         let measure = |text: &str| {
-            links::rewrite(text, &concept.path, &concept.id, &targets)
+            links::rewrite(text, &concept.path, &concept.id, &concept.lock, &targets)
                 .text
                 .len()
         };
-        let single = NOTE_BYTES.saturating_sub(concept.facts().len() + 2);
-        if measure(&concept.body) <= single {
+        if measure(&concept.body) <= single_budget(concept) {
             continue;
         }
         let budget = NOTE_BYTES.saturating_sub(concept.section_facts().len() + 2);
-        let pieces = split::split(&concept.body, budget, &measure);
+        let max_anchor = MAX_KEY_BYTES.saturating_sub(concept.id.len() + 1);
+        let pieces = split::split(&concept.body, budget, max_anchor, &measure);
         plans.insert(concept.id.clone(), pieces);
     }
     for (id, pieces) in &plans {
         if let Some(target) = targets.get_mut(id) {
+            // Headings first, so a generated name (`intro`, `-part-2`) never
+            // takes the place of a real heading's anchor.
             for piece in pieces {
                 let key = format!("{id}#{}", piece.anchor);
-                target
-                    .anchors
-                    .entry(piece.anchor.clone())
-                    .or_insert_with(|| key.clone());
                 for anchor in &piece.anchors {
                     target
                         .anchors
                         .entry(anchor.clone())
                         .or_insert_with(|| key.clone());
                 }
+            }
+            for piece in pieces {
+                let key = format!("{id}#{}", piece.anchor);
+                target.anchors.entry(piece.anchor.clone()).or_insert(key);
             }
         }
     }
@@ -286,7 +313,13 @@ pub fn convert(bundle: &Bundle, domain: &str) -> Conversion {
         };
         match plans.get(&concept.id) {
             None => {
-                let rewritten = links::rewrite(&concept.body, &concept.path, &concept.id, &targets);
+                let rewritten = links::rewrite(
+                    &concept.body,
+                    &concept.path,
+                    &concept.id,
+                    &concept.lock,
+                    &targets,
+                );
                 summary.links += rewritten.links;
                 summary.broken_links += rewritten.broken;
                 let mut body = concept.facts();
@@ -311,8 +344,13 @@ pub fn convert(bundle: &Bundle, domain: &str) -> Conversion {
                 summary.sections += pieces.len();
                 notes.push(maker.hub(pieces, &mut summary));
                 for piece in pieces {
-                    let rewritten =
-                        links::rewrite(&piece.text, &concept.path, &concept.id, &targets);
+                    let rewritten = links::rewrite(
+                        &piece.text,
+                        &concept.path,
+                        &concept.id,
+                        &concept.lock,
+                        &targets,
+                    );
                     summary.links += rewritten.links;
                     summary.broken_links += rewritten.broken;
                     let mut related = vec![concept.id.clone()];
@@ -331,6 +369,15 @@ pub fn convert(bundle: &Bundle, domain: &str) -> Conversion {
     }
 }
 
+/// Room for a concept's text in a note of its own: what the facts line, the
+/// description (when the body doesn't open with it) and separators leave.
+fn single_budget(concept: &Concept) -> usize {
+    let description = concept
+        .description_unless_repeated()
+        .map_or(0, |d| d.len() + 1);
+    NOTE_BYTES.saturating_sub(concept.facts().len() + description + 2)
+}
+
 struct Maker<'a> {
     bundle: &'a Bundle,
     concept: &'a Concept,
@@ -344,7 +391,7 @@ impl Maker<'_> {
         let mut body = concept.facts();
         if let Some(description) = &concept.description {
             body.push_str("\n\n");
-            body.push_str(description);
+            body.push_str(&truncate_chars(description, HUB_DESCRIPTION_CHARS));
         }
         body.push_str(&format!(
             "\n\nThis concept is split into {} sections, each a note keyed {}#<anchor>:",
@@ -413,14 +460,14 @@ impl Maker<'_> {
             input: NoteInput {
                 domain: self.domain.to_owned(),
                 key,
-                title: truncate_chars(&title, MAX_TITLE_CHARS),
+                title: truncate_bytes(&title, MAX_TITLE_BYTES),
                 body,
                 aliases,
                 related,
                 tags,
                 source: Some(self.bundle.source(&concept.path, anchor)),
                 confidence: concept.confidence(),
-                pinned: false,
+                pinned: concept.pinned,
                 lock: concept.lock.clone(),
             },
             deprecated: concept.deprecated(),

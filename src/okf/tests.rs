@@ -77,19 +77,16 @@ fn note<'a>(conversion: &'a Conversion, key: &str) -> &'a OkfNote {
 #[test]
 fn a_bundle_is_recognized_by_its_root_index() {
     let tree = bundle();
-    assert_eq!(bundle_version(tree.path()).unwrap().as_deref(), Some("0.2"));
+    assert_eq!(bundle_version(tree.path()).as_deref(), Some("0.2"));
     let unquoted = Tree::new();
     unquoted.write("index.md", "---\nokf_version: 0.2\n---\n# KBs\n");
-    assert_eq!(
-        bundle_version(unquoted.path()).unwrap().as_deref(),
-        Some("0.2")
-    );
+    assert_eq!(bundle_version(unquoted.path()).as_deref(), Some("0.2"));
     let plain = Tree::new();
     plain
         .write("index.md", "# Just an index\n")
         .write("a.md", "# A\n");
-    assert_eq!(bundle_version(plain.path()).unwrap(), None);
-    assert_eq!(bundle_version(&plain.path().join("a.md")).unwrap(), None);
+    assert_eq!(bundle_version(plain.path()), None);
+    assert_eq!(bundle_version(&plain.path().join("a.md")), None);
 }
 
 #[test]
@@ -391,7 +388,7 @@ fn split_respects_the_budget_for_sentences_and_unbroken_text() {
     let long_sentence = "word ".repeat(400);
     let unbroken = "x".repeat(1_000);
     let body = format!("# A\n\n{long_sentence}\n\n# B\n\n{unbroken}");
-    let pieces = split::split(&body, 300, &measure);
+    let pieces = split::split(&body, 300, 64, &measure);
     assert!(
         pieces.iter().all(|p| p.text.len() <= 300),
         "{:?}",
@@ -439,4 +436,229 @@ fn links_resolve_like_the_spec_says() {
     assert_eq!(resolve("kb/a.md", "inventory.csv"), Href::Navigation);
     assert_eq!(resolve("kb/a.md", "#section"), Href::SameConcept);
     assert_eq!(resolve("kb/a.md", "https://x.example/a.md"), Href::External);
+}
+
+fn small_bundle(files: &[(&str, &str)]) -> Tree {
+    let tree = Tree::new();
+    tree.write("index.md", "---\nokf_version: \"0.2\"\n---\n");
+    for (path, text) in files {
+        tree.write(path, text);
+    }
+    tree
+}
+
+fn converted(tree: &Tree) -> Conversion {
+    let conversion = convert(&Bundle::read(tree.path()).unwrap(), "d");
+    assert!(conversion.failed.is_empty(), "{:?}", conversion.failed);
+    for note in &conversion.notes {
+        assert!(
+            note.input.body.len() <= NOTE_BYTES,
+            "{} has {} bytes",
+            note.input.key,
+            note.input.body.len()
+        );
+        note.input.validate().unwrap();
+    }
+    conversion
+}
+
+#[test]
+fn a_long_code_block_is_fenced_again_in_every_part_and_links_after_it_still_count() {
+    let code: String = (0..300)
+        .map(|n| format!("step_{n} = run({n})  # a long line of code\n"))
+        .collect();
+    let text = format!(
+        "---\ntype: Code\n---\n# Code\n\nIntro.\n\n```python\n{code}```\n\nThe result feeds [the target](/target.md) every night.\n"
+    );
+    let tree = small_bundle(&[
+        ("code.md", &text),
+        ("target.md", "---\ntype: Note\n---\nTarget.\n"),
+    ]);
+    let conversion = converted(&tree);
+    let parts: Vec<&OkfNote> = conversion
+        .notes
+        .iter()
+        .filter(|n| n.input.key.starts_with("code#"))
+        .collect();
+    assert!(
+        parts.len() >= 3,
+        "{:?}",
+        parts.iter().map(|p| &p.input.key).collect::<Vec<_>>()
+    );
+    for part in &parts {
+        let opens = part.input.body.matches("```python").count();
+        let fences = part.input.body.matches("```").count();
+        assert_eq!(
+            fences,
+            opens * 2,
+            "unbalanced fences in {}:\n{}",
+            part.input.key,
+            part.input.body
+        );
+    }
+    assert!(
+        parts
+            .iter()
+            .any(|p| p.input.related.contains(&"target".to_owned())),
+        "the link after the code block reaches the graph"
+    );
+}
+
+#[test]
+fn a_fence_inside_a_longer_fence_is_code_not_a_heading() {
+    let filler = "Some words about the template. ".repeat(140);
+    let text = format!(
+        "---\ntype: Guide\n---\n# Template\n\n{filler}\n\n````markdown\n## Setup\n\n```bash\n# install dependencies\nmake install\n```\n````\n\n# After\n\n{filler}\n"
+    );
+    let tree = small_bundle(&[("guide.md", &text)]);
+    let keys: Vec<String> = converted(&tree)
+        .notes
+        .iter()
+        .map(|n| n.input.key.clone())
+        .collect();
+    assert!(
+        keys.iter()
+            .all(|k| !k.contains("install") && !k.contains("setup")),
+        "{keys:?}"
+    );
+    assert!(keys.contains(&"guide#after".to_owned()), "{keys:?}");
+}
+
+#[test]
+fn headings_in_a_short_lead_and_real_intro_headings_keep_their_anchors() {
+    let long = "A sentence of section text that takes room. ".repeat(60);
+    let text = format!(
+        "---\ntype: Topic\n---\n{long}\n\n# Intro\n\nThe real intro heading.\n\n# Parts\n\nLead.\n\n#### Note\n\nA short note.\n\n## Router\n\n{long}\n\n## Workers\n\n{long}\n"
+    );
+    let tree = small_bundle(&[
+        ("topic.md", &text),
+        (
+            "pointer.md",
+            "---\ntype: Note\n---\nSee [the note](/topic.md#note) and [the intro](/topic.md#intro).\n",
+        ),
+    ]);
+    let conversion = converted(&tree);
+    let pointer = note(&conversion, "pointer");
+    assert_eq!(
+        pointer.input.related,
+        ["topic#router", "topic#intro"],
+        "{:?}",
+        pointer.input.related
+    );
+    // The text before any heading gets a generated name that avoids the real `intro`.
+    assert!(
+        conversion
+            .notes
+            .iter()
+            .any(|n| n.input.key == "topic#intro-2")
+    );
+}
+
+#[test]
+fn titles_and_keys_stay_within_kioku_limits() {
+    let heading = "Ação ".repeat(120);
+    let long = "Texto da seção que ocupa espaço suficiente. ".repeat(60);
+    let text = format!(
+        "---\ntype: Topic\ntitle: {}\n---\n# {heading}\n\n{long}\n\n# Outra\n\n{long}\n",
+        "Título ".repeat(60)
+    );
+    let tree = small_bundle(&[("t.md", &text)]);
+    let conversion = converted(&tree);
+    assert!(conversion.notes.len() >= 3);
+    assert!(
+        conversion
+            .notes
+            .iter()
+            .all(|n| n.input.title.len() <= 512 && n.input.key.len() <= 256)
+    );
+}
+
+#[test]
+fn a_long_description_still_fits_one_note_or_splits() {
+    let description = "A description that the body does not repeat, and it is long. ".repeat(4);
+    let body = "Body text that fills most of a note. ".repeat(100);
+    let text = format!("---\ntype: Note\ndescription: {description}\n---\n{body}\n");
+    let tree = small_bundle(&[("n.md", &text)]);
+    converted(&tree);
+}
+
+#[test]
+fn yaml_yes_and_no_stay_words_and_pinned_is_read() {
+    let tree = small_bundle(&[(
+        "q.md",
+        "---\ntype: Question\nanswer: no\nurgent: yes\npinned: true\n---\nShould we?\n",
+    )]);
+    let conversion = converted(&tree);
+    let q = note(&conversion, "q");
+    assert!(
+        q.input
+            .body
+            .starts_with("Question · unverified · answer: no · urgent: yes\n"),
+        "{}",
+        q.input.body
+    );
+    assert!(q.input.pinned);
+}
+
+#[test]
+fn anchors_come_from_rendered_text_and_percent_escapes() {
+    assert_eq!(
+        split::anchor("See [the router](/x.md) and **bold** `code`"),
+        "see-the-router-and-bold-code"
+    );
+    assert_eq!(
+        split::anchor("_Emphasis_ and snake_case"),
+        "emphasis-and-snake_case"
+    );
+    assert_eq!(
+        links::resolve("a.md", "/kb/b.md#a%C3%A7%C3%A3o"),
+        links::Href::Concept {
+            id: "kb/b".into(),
+            anchor: Some("ação".into())
+        }
+    );
+}
+
+#[test]
+fn a_locked_concepts_name_never_reaches_an_unlocked_note() {
+    let tree = small_bundle(&[
+        (
+            "secret.md",
+            "---\ntype: Decision\nid: SEC-1\ntitle: The secret plan\nlock: local\n---\nOnly local.\n",
+        ),
+        (
+            "open.md",
+            "---\ntype: Note\n---\nSee [this](/secret.md), and [](/secret.md).\n\n* Items: [a](/secret.md), [b](/other.md), [c](/other2.md)\n",
+        ),
+        (
+            "also-local.md",
+            "---\ntype: Note\nlock: [local]\n---\nSee [this](/secret.md).\n",
+        ),
+        ("other.md", "---\ntype: Note\nid: O-1\n---\nOther.\n"),
+        ("other2.md", "---\ntype: Note\nid: O-2\n---\nOther 2.\n"),
+    ]);
+    let conversion = converted(&tree);
+    let open = note(&conversion, "open");
+    assert!(
+        !open.input.body.contains("SEC-1") && !open.input.body.contains("secret plan"),
+        "{}",
+        open.input.body
+    );
+    assert!(
+        open.input.body.contains("See this, and a linked note."),
+        "{}",
+        open.input.body
+    );
+    assert!(
+        open.input.body.contains("* Items: a, O-1, O-2"),
+        "{}",
+        open.input.body
+    );
+    // A note locked to the same providers may name it.
+    assert!(
+        note(&conversion, "also-local")
+            .input
+            .body
+            .contains("this (SEC-1)")
+    );
 }
