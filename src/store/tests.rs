@@ -251,6 +251,25 @@ async fn lifecycle_checks(store: &Store) -> Result<()> {
     );
     assert_eq!(store.edges(Some(&domain)).await?, vec![edge]);
     assert!(store.edges(Some(&other.domain)).await?.is_empty());
+    // A whole vault's domains load together.
+    let both = [domain.clone(), other.domain.clone()];
+    assert_eq!(store.notes_in(&both, true).await?.len(), 3);
+    assert_eq!(
+        store.notes_in(&both, false).await?.len(),
+        2,
+        "the legacy note is left out"
+    );
+    assert_eq!(
+        store.edges_in(&both).await?,
+        store.edges(Some(&domain)).await?
+    );
+    assert!(store.notes_in(&[], true).await?.is_empty());
+    let neighbors = store.neighbor_keys(&[note.id], |_| true).await?;
+    assert_eq!(
+        neighbors.get(&note.id).map(Vec::as_slice),
+        Some(&["neighbor".to_owned()][..])
+    );
+    assert!(store.neighbor_keys(&[note.id], |_| false).await?.is_empty());
     // Concurrent retries must record exactly one event, not merely avoid
     // duplicate rows while incrementing the counter twice.
     let concurrent_id = Uuid::new_v4().to_string();
