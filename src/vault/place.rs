@@ -3,7 +3,10 @@
 //!
 //! The remote is read from the nearest enclosing repository's `config` file
 //! (worktrees and submodules included). No network and no `git` binary are
-//! needed, and a repository that can't be read simply has no remotes.
+//! needed, and a repository that can't be read simply has no remotes. An
+//! SSH remote whose host is a `Host` alias in `~/.ssh/config` (such as
+//! `git@github-work:org/repo`) is matched both as written and with the
+//! alias's `HostName`, as `ssh` would connect.
 
 use std::path::{Path, PathBuf};
 
@@ -22,7 +25,12 @@ impl Vaults {
     /// Place a session started in `folder`. `Err` explains an ambiguity.
     pub(super) fn place(&self, folder: &Path) -> Result<Option<Spot>, String> {
         let forms = spellings(folder);
-        let vault = match self.by_remote(&remotes(folder))? {
+        let ssh = self
+            .home
+            .as_ref()
+            .and_then(|home| std::fs::read_to_string(home.join(".ssh/config")).ok())
+            .unwrap_or_default();
+        let vault = match self.by_remote(&remotes(folder, &ssh))? {
             Some(vault) => Some(vault),
             None => self.by_folder(&forms)?,
         };
@@ -33,20 +41,28 @@ impl Vaults {
     }
 
     /// The vault whose `git_remotes` match the first remote that matches any.
-    fn by_remote(&self, remotes: &[String]) -> Result<Option<usize>, String> {
-        for remote in remotes {
+    /// A remote matches by any of its spellings; spellings that match two
+    /// vaults are an ambiguity, never a choice.
+    fn by_remote(&self, remotes: &[Vec<String>]) -> Result<Option<usize>, String> {
+        for spellings in remotes {
             let matching: Vec<usize> = (0..self.vaults.len())
                 .filter(|i| {
                     self.vaults[*i]
                         .git_remotes
                         .iter()
-                        .any(|pattern| pattern.matches(remote))
+                        .any(|pattern| spellings.iter().any(|remote| pattern.matches(remote)))
                 })
                 .collect();
             match matching.as_slice() {
                 [] => {}
                 [only] => return Ok(Some(*only)),
                 several => {
+                    let remote = match spellings.as_slice() {
+                        [written, resolved] => {
+                            format!("{written} (through ~/.ssh/config, {resolved})")
+                        }
+                        _ => spellings.join(", "),
+                    };
                     return Err(format!(
                         "its git remote {remote} matches the git_remotes of vaults {}",
                         self.names(several)
@@ -136,22 +152,106 @@ fn spellings(folder: &Path) -> Vec<PathBuf> {
 }
 
 /// Normalized remotes of the repository enclosing `folder`: `origin` first,
-/// then the others in file order.
-pub(super) fn remotes(folder: &Path) -> Vec<String> {
+/// then the others in file order. Each remote lists its spellings: as
+/// written, then with its SSH host alias resolved through `ssh_config`.
+pub(super) fn remotes(folder: &Path, ssh_config: &str) -> Vec<Vec<String>> {
     let Some(text) = git_config(folder).and_then(|path| std::fs::read_to_string(path).ok()) else {
         return Vec::new();
     };
     let mut listed = parse_remotes(&text);
     listed.sort_by_key(|(name, _)| name != "origin");
-    let mut out: Vec<String> = Vec::new();
+    let mut out: Vec<Vec<String>> = Vec::new();
     for (_, url) in listed {
-        if let Some(remote) = normalize_remote(&url)
-            && !out.contains(&remote)
+        let Some(remote) = parse_remote(&url) else {
+            continue;
+        };
+        let mut spellings = vec![remote.spelled(&remote.host)];
+        if remote.ssh
+            && let Some(real) = ssh_host_name(ssh_config, &remote.host)
         {
-            out.push(remote);
+            let resolved = remote.spelled(&real);
+            if !spellings.contains(&resolved) {
+                spellings.push(resolved);
+            }
+        }
+        if !out.contains(&spellings) {
+            out.push(spellings);
         }
     }
     out
+}
+
+/// The `HostName` that `ssh` would use for `host`, if `config` (the text of
+/// `~/.ssh/config`) gives one: the first value from a `Host` block whose
+/// patterns match. `Match` blocks can't be evaluated here and are skipped,
+/// and `Include` is not followed.
+pub(super) fn ssh_host_name(config: &str, host: &str) -> Option<String> {
+    let host = host.to_lowercase();
+    // Options before the first Host line apply to every host.
+    let mut applies = true;
+    for line in config.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let (keyword, value) = line
+            .split_once(|c: char| c.is_whitespace() || c == '=')
+            .unwrap_or((line, ""));
+        let value = value
+            .trim_start_matches(|c: char| c.is_whitespace() || c == '=')
+            .trim();
+        if keyword.eq_ignore_ascii_case("host") {
+            applies = host_matches(value, &host);
+        } else if keyword.eq_ignore_ascii_case("match") {
+            applies = false;
+        } else if applies && keyword.eq_ignore_ascii_case("hostname") {
+            let name = value.split_whitespace().next()?.trim_matches('"');
+            let name = name.replace("%h", &host).replace("%%", "%");
+            return (!name.is_empty()).then_some(name);
+        }
+    }
+    None
+}
+
+/// Whether an ssh `Host` pattern list matches `host`: any pattern matches
+/// and no negated (`!`) one does.
+fn host_matches(patterns: &str, host: &str) -> bool {
+    let mut matched = false;
+    for pattern in patterns.split_whitespace() {
+        let pattern = pattern.trim_matches('"').to_lowercase();
+        match pattern.strip_prefix('!') {
+            Some(negated) if glob(negated.as_bytes(), host.as_bytes()) => return false,
+            Some(_) => {}
+            None => matched |= glob(pattern.as_bytes(), host.as_bytes()),
+        }
+    }
+    matched
+}
+
+/// ssh's wildcards: `*` for any run of characters, `?` for one.
+fn glob(pattern: &[u8], text: &[u8]) -> bool {
+    match (pattern.split_first(), text.split_first()) {
+        (None, _) => text.is_empty(),
+        (Some((b'*', rest)), _) => (0..=text.len()).any(|skip| glob(rest, &text[skip..])),
+        (Some((b'?', rest)), Some((_, more))) => glob(rest, more),
+        (Some((p, rest)), Some((t, more))) if p == t => glob(rest, more),
+        _ => false,
+    }
+}
+
+/// A remote URL's host and repository path, before lowercasing.
+struct RemoteUrl {
+    host: String,
+    path: String,
+    /// Reached over SSH, so `~/.ssh/config` can rename the host.
+    ssh: bool,
+}
+
+impl RemoteUrl {
+    /// `host/path` in lowercase.
+    fn spelled(&self, host: &str) -> String {
+        format!("{host}/{}", self.path).to_lowercase()
+    }
 }
 
 /// The `config` file of the nearest repository at or above `folder`.
@@ -237,24 +337,29 @@ fn config_value(raw: &str) -> String {
     out.trim().to_owned()
 }
 
-/// `host/owner/repo` in lowercase for a remote URL, from `https://`,
+/// The host and `owner/repo` path of a remote URL, from `https://`,
 /// `ssh://`, `git://`, or scp-like `user@host:owner/repo` forms. Credentials,
 /// ports, and a trailing `.git` are dropped. Local paths have no host and
 /// give `None`.
-pub(super) fn normalize_remote(url: &str) -> Option<String> {
+fn parse_remote(url: &str) -> Option<RemoteUrl> {
     let url = url.trim();
-    let (authority, path) = if let Some((scheme, rest)) = url.split_once("://") {
+    let (authority, path, ssh) = if let Some((scheme, rest)) = url.split_once("://") {
         if scheme.eq_ignore_ascii_case("file") {
             return None;
         }
-        rest.split_once('/')?
+        let ssh = scheme
+            .to_ascii_lowercase()
+            .split('+')
+            .any(|part| part == "ssh");
+        let (authority, path) = rest.split_once('/')?;
+        (authority, path, ssh)
     } else {
         // scp-like syntax applies only when no slash comes before the colon.
         let (authority, path) = url.split_once(':')?;
         if authority.contains('/') {
             return None;
         }
-        (authority, path)
+        (authority, path, true)
     };
     let host = authority.rsplit('@').next()?;
     let host = match host.strip_prefix('[') {
@@ -269,12 +374,20 @@ pub(super) fn normalize_remote(url: &str) -> Option<String> {
     if host.is_empty() || path.is_empty() {
         return None;
     }
-    Some(format!("{host}/{path}").to_lowercase())
+    Some(RemoteUrl {
+        host: host.to_owned(),
+        path: path.to_owned(),
+        ssh,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn normalize_remote(url: &str) -> Option<String> {
+        parse_remote(url).map(|remote| remote.spelled(&remote.host))
+    }
 
     #[test]
     fn remotes_normalize_to_host_owner_repo() {
@@ -307,6 +420,75 @@ mod tests {
         ] {
             assert_eq!(normalize_remote(local), None, "{local}");
         }
+    }
+
+    #[test]
+    fn ssh_host_aliases_resolve_like_ssh_does() {
+        let config = r#"
+# Personal and work identities on one host.
+Host github-work github-fundable
+    HostName github.com
+    IdentityFile ~/.ssh/work
+Host=gh-*
+  HostName=%h.example.com
+Host *.internal !secret.internal
+    HostName jump.example.com
+Match host other
+    HostName never.example.com
+Host github-work
+    HostName second.example.com
+"#;
+        assert_eq!(
+            ssh_host_name(config, "github-work").as_deref(),
+            Some("github.com")
+        );
+        assert_eq!(
+            ssh_host_name(config, "GitHub-Fundable").as_deref(),
+            Some("github.com")
+        );
+        assert_eq!(
+            ssh_host_name(config, "gh-a").as_deref(),
+            Some("gh-a.example.com")
+        );
+        assert_eq!(
+            ssh_host_name(config, "db.internal").as_deref(),
+            Some("jump.example.com")
+        );
+        assert_eq!(ssh_host_name(config, "secret.internal"), None);
+        assert_eq!(ssh_host_name(config, "other"), None);
+        assert_eq!(ssh_host_name(config, "github.com"), None);
+        assert_eq!(
+            ssh_host_name("HostName everywhere.example.com\n", "x").as_deref(),
+            Some("everywhere.example.com")
+        );
+        assert_eq!(ssh_host_name("", "github-work"), None);
+    }
+
+    #[test]
+    fn a_remote_through_an_ssh_alias_has_both_spellings() {
+        let dir = std::env::temp_dir().join(format!("kioku-remote-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        std::fs::write(
+            dir.join(".git/config"),
+            "[remote \"origin\"]\n\turl = git@github-work:Fundable-AI/api.git\n[remote \"web\"]\n\turl = https://github-work/o/r\n",
+        )
+        .unwrap();
+        let ssh = "Host github-work\n  HostName github.com\n";
+        let found = remotes(&dir, ssh);
+        let plain = remotes(&dir, "");
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(
+            found,
+            [
+                vec![
+                    "github-work/fundable-ai/api".to_owned(),
+                    "github.com/fundable-ai/api".to_owned()
+                ],
+                vec!["github-work/o/r".to_owned()],
+            ],
+            "only SSH remotes go through ~/.ssh/config"
+        );
+        assert_eq!(plain[0], ["github-work/fundable-ai/api"]);
     }
 
     #[test]

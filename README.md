@@ -299,7 +299,11 @@ the client started Kioku in.
 - If that folder is in a git repository whose remote matches a vault's
   `git_remotes`, that vault wins. Remotes are compared as `host/owner/repo` in
   lowercase, `origin` first. Kioku reads `.git/config` itself; it needs no
-  network and no `git`.
+  network and no `git`. An SSH remote through a `Host` alias in
+  `~/.ssh/config` (`git@github-work:fundable-ai/api.git`) also matches as its
+  `HostName` (`github.com/fundable-ai/api`). Kioku doesn't follow `Include`
+  or `Match` there, nor git's `insteadOf` rewrites; for those, a host-agnostic
+  glob such as `*/fundable-ai/*` matches the remote on any host.
 - Otherwise the vault with the longest matching `paths` entry wins.
 - Inside an area's folder, calls without a domain use that area. At the
   vault's root they use `default_domain`, and `memory_search` without a domain

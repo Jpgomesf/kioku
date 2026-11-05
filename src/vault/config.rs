@@ -56,6 +56,9 @@ struct LockToml {
 #[derive(Debug)]
 pub struct Vaults {
     file: PathBuf,
+    /// Where `~/.ssh/config` is looked for, to resolve SSH host aliases in
+    /// git remotes.
+    pub(super) home: Option<PathBuf>,
     pub(super) vaults: Vec<Vault>,
     pub(super) areas: Vec<Area>,
     locks: Vec<Lock>,
@@ -359,6 +362,7 @@ impl Vaults {
             .collect::<Result<_>>()?;
         Ok(Self {
             file: file.to_path_buf(),
+            home: home.map(Path::to_path_buf),
             vaults,
             areas,
             locks,

@@ -160,6 +160,40 @@ fn a_git_remote_overrides_the_folder() {
 }
 
 #[test]
+fn an_ssh_host_alias_in_a_remote_still_finds_its_vault() {
+    let tree = Tree::new();
+    // A work repository cloned through a second GitHub identity, outside the
+    // work vault's folders and inside the personal catch-all.
+    let repo = tree.repo("code/api", &[("origin", "git@github-acme:ACME/api.git")]);
+    let text = |home: &Path| {
+        let root = home.display();
+        format!(
+            "[[vault]]\nname = \"personal\"\npaths = [\"{root}\"]\ndomains = [\"personal\"]\nproviders = [\"openai\"]\ndefault_domain = \"personal\"\n[[vault]]\nname = \"work\"\ngit_remotes = [\"github.com/acme/*\"]\ndomains = [\"work\"]\nproviders = [\"openai\"]\ndefault_domain = \"work\"\n"
+        )
+    };
+    let load = || {
+        Arc::new(
+            Vaults::parse(&text(&tree.0), Path::new("/cfg/vaults.toml"), Some(&tree.0)).unwrap(),
+        )
+    };
+    assert_eq!(
+        placed(&place(&load(), "openai", &repo)),
+        ("personal", None, "personal"),
+        "without the alias the folder decides"
+    );
+    std::fs::create_dir_all(tree.0.join(".ssh")).unwrap();
+    std::fs::write(
+        tree.0.join(".ssh/config"),
+        "Host github-acme\n    HostName github.com\n    IdentityFile ~/.ssh/acme\n",
+    )
+    .unwrap();
+    assert_eq!(
+        placed(&place(&load(), "openai", &repo)),
+        ("work", None, "work")
+    );
+}
+
+#[test]
 fn unplaced_and_undeclared_sessions_get_nothing() {
     let tree = Tree::new();
     let vaults = vaults(&tree);
