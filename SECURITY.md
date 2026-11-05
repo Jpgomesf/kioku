@@ -44,7 +44,11 @@ that machine's trust; stdio is not a sandbox.
   ranking (search, get, inspect, links, stats, import reports, older tool
   names), so a hidden note is never returned and never shifts the ranking of
   visible ones. Writes may target only visible domains, and a save can't
-  overwrite a hidden note. A session that isn't placed, or declares no
+  overwrite a hidden note. One notes folder serves every vault, so a vault
+  session's import reads only files whose frontmatter names their domain; a
+  file without one can't be copied into the session's domain. A note lock
+  that lists no provider, or a misspelled `lock` key, fails the file instead
+  of leaving the note readable. A session that isn't placed, or declares no
   provider, gets nothing. A broken vaults file stops the server, and a domain
   claimed by two vaults is an error, never shared.
 - **The provider is declared, not proven.** `MEMORY_PROVIDER` comes from the

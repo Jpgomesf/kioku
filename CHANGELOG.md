@@ -15,9 +15,25 @@ All notable changes to this project are documented here. The format follows
   directory), and declares its model provider with `MEMORY_PROVIDER`. Area
   locks in the file and `lock` in note frontmatter limit which providers may
   read notes. Search, get, inspect, links, stats, imports, and the older
-  `rag_*` tools all filter before ranking. A session that isn't placed, or
-  names no provider, gets a `refused` error from every tool. Without the file,
-  nothing changes.
+  `rag_*` tools all filter before ranking, and the vector index leaves hidden
+  notes out of its candidates. Domain lists (a vault-wide search's `domains`,
+  the empty-search hint, `memory_stats`) name only domains holding a note the
+  session may see, and a save's unresolved `related` links are checked
+  against those notes too. A session that isn't placed, or names no
+  provider, gets a `refused` error from every tool. Without the file, nothing
+  changes.
+- In vault mode, `memory_import` imports only files whose frontmatter names
+  their `domain`: one notes folder serves every vault, so a file without one
+  is counted as failed instead of joining the session's domain. Files of
+  notes the session may not see, or whose vault can't be told, are counted in
+  `failed_count` but not named, and a `hint` says so.
+- Note locks fail closed: `lock: []`, an empty `lock:`, and near misses such
+  as `Lock`, `locks`, or `locked` fail the file instead of importing the note
+  unlocked.
+- Placement by git remote resolves SSH host aliases from `~/.ssh/config`, so
+  `git@github-work:org/repo` matches `github.com/org/*`. Without `HOME`, the
+  default vaults file is found through the account's home folder, and Kioku
+  warns when it can't find one.
 - Vault-wide search: at a vault's root, `memory_search` without a domain
   searches every visible domain of the vault together, and each result names
   its domain.
@@ -54,8 +70,6 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
-- When a search finds nothing, the hint lists only domains the connection may
-  use. It used to list every domain, even for a restricted profile.
 - The README's Kilo example now passes variables under `environment`, the key
   Kilo reads, instead of `env`.
 - Imports skip the files they can't import (unreadable, invalid frontmatter
@@ -66,8 +80,9 @@ All notable changes to this project are documented here. The format follows
   checked for every file before any is written.
 - Background upkeep no longer retires notes. It still repairs the index
   daily, but only logs the notes whose retention fell below
-  `MEMORY_LEGACY_THRESHOLD`; `kioku maintenance` and `memory_maintenance` with
-  `dry_run: false` still apply aging. Retention stays a ranking prior.
+  `MEMORY_LEGACY_THRESHOLD`, as a warning so the default log filter shows it;
+  `kioku maintenance` and `memory_maintenance` with `dry_run: false` still
+  apply aging. Retention stays a ranking prior.
 - Context packs fill their budget in three passes: the query-matching
   sentences of the strongest notes and the notes they link to, then those notes
   in full, then the rest. Left-out text shows as `…`. Packs drop the UUID, the
@@ -77,6 +92,13 @@ All notable changes to this project are documented here. The format follows
   `kioku eval --context-budget` takes several budgets (default 800,1500,3000).
 - Source split into focused modules (`app/`, `mcp/`, `eval/`, `rank/`,
   `store/`, `markdown`, `lifecycle`, `text`) with no behavior change.
+
+### Known issues
+
+- The `memory_maintenance` tool description still says the server ages
+  memories daily. Background upkeep now only previews aging, but the
+  description is part of the snapshot-tested tool contract
+  (`tests/snapshots/tools-all.json`), so it changes in a deliberate re-bless.
 
 ## [0.2.0] - 2026-11-03
 

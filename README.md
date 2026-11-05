@@ -267,6 +267,8 @@ area or a note.
 
 Vaults are off until `~/.config/kioku/vaults.toml` exists (or the file named
 by `MEMORY_VAULTS_FILE`). Without that file, Kioku works exactly as before.
+When a client starts Kioku without `HOME`, `~` is the account's home folder;
+if even that is unknown, Kioku warns that it runs without vaults.
 
 ```toml
 [[vault]]
@@ -327,8 +329,13 @@ lock in frontmatter (`lock: local`, or `lock: [local, anthropic]`);
 `memory_save` keeps a note's lock but can't set one.
 
 - A note a session may not see is missing everywhere: search, `memory_get`,
-  `memory_inspect`, links, `memory_stats`, import reports, and the older
-  `rag_*` tools. Hidden notes never shift the ranking of visible ones.
+  `memory_inspect`, links, `memory_stats`, import reports, the unresolved
+  links a save reports, and the older `rag_*` tools. Hidden notes never shift
+  the ranking of visible ones; the vector index leaves them out of its
+  candidates.
+- Domain lists (a vault-wide search's `domains`, the hint when a domain has
+  no memories, `memory_stats`) name only domains that hold a note the session
+  may see.
 - `memory_save` and `memory_import` may write only to visible domains.
 - `memory_import` reads only files whose frontmatter names their `domain`.
   One notes folder serves every vault, so a file without one could belong to
@@ -370,15 +377,17 @@ file, and every record names its vault. Sessions that were refused write to
 
 `reindex` embeds every memory into a new collection, switches the database to
 it, and prints the settings to put in `.env`; close MCP clients first. While
-it runs, the server repairs the index in the background and logs the notes
-whose retention fell below `MEMORY_LEGACY_THRESHOLD`, but never retires them:
-only `kioku maintenance` or `memory_maintenance` with `dry_run: false` does.
+it runs, the server repairs the index in the background and logs a warning
+naming the notes whose retention fell below `MEMORY_LEGACY_THRESHOLD`, but
+never retires them: only `kioku maintenance` or `memory_maintenance` with
+`dry_run: false` does.
 
 ## Development
 
 ```sh
 make check   # fmt, clippy with warnings denied, unit and contract tests
-make smoke   # 108 checks over stdio and 20 over HTTP; SMOKE_ENV must name test storage
+make test-db # PostgreSQL tests (history, aging, store); MEMORY_TEST_DATABASE_URL must allow CREATE DATABASE
+make smoke   # 125 checks over stdio and 20 over HTTP; SMOKE_ENV must name test storage
 make eval    # retrieval quality in isolated storage
 ```
 
