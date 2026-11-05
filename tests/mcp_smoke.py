@@ -8,7 +8,9 @@ The env file must name a PostgreSQL database and a Qdrant collection whose
 names contain "smoke" or "test". The script writes fixture notes and feedback
 there; it never deletes databases, collections, or memories. It runs the server
 with every tool enabled, its own notes folder, and a trace file, all in a
-temporary directory. No Python packages are needed.
+temporary directory. A last phase writes a temporary vaults.toml with two vaults
+over smoke-a and smoke-b domains and checks that nothing crosses between them
+and that locks hide notes by model provider. No Python packages are needed.
 """
 
 from __future__ import annotations
@@ -34,7 +36,7 @@ CONFIG_ENV = {
     "MEMORY_LEGACY_THRESHOLD", "MEMORY_DEFAULT_DOMAIN", "MEMORY_NOTES_ROOT", "MEMORY_TOOLS",
     "MEMORY_TRACE_FILE", "MEMORY_TRACE_RUN", "MEMORY_BACKGROUND_UPKEEP", "KIOKU_ENV_FILE", "RUST_LOG",
     "MEMORY_PRINCIPAL", "MEMORY_SCOPES", "MEMORY_DOMAINS", "MEMORY_TRACE_CONTENT", "MEMORY_TRACE_SALT",
-    "MEMORY_ACCESS_FILE", "MEMORY_LOG_FORMAT",
+    "MEMORY_ACCESS_FILE", "MEMORY_LOG_FORMAT", "MEMORY_VAULTS_FILE", "MEMORY_PROVIDER", "KIOKU_SESSION_DIR",
 }
 
 
@@ -87,14 +89,14 @@ def write_env(values: dict[str, str], path: Path) -> None:
 
 
 class StdioClient:
-    def __init__(self, binary: Path, env_file: Path, timeout: float):
+    def __init__(self, binary: Path, env_file: Path, timeout: float, cwd: Path | None = None):
         # Inherited settings must not override the isolated test configuration.
         env = {key: value for key, value in os.environ.items() if key not in CONFIG_ENV}
         env["RUST_LOG"] = "error"
         self.process = subprocess.Popen(
             [str(binary), "--env-file", str(env_file), "serve"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            env=env, bufsize=0,
+            env=env, bufsize=0, cwd=cwd,
         )
         self.selector = selectors.DefaultSelector()
         self.selector.register(self.process.stdout, selectors.EVENT_READ, "stdout")
@@ -466,6 +468,175 @@ def run_restricted(client: StdioClient, checks: Checks, trace_path: Path) -> Non
                  and searches[0]["arguments"].get("domain") == "smoke")
 
 
+VAULTS_TOML = """
+[[vault]]
+name = "smoke-a"
+paths = [{vault_a}]
+domains = ["smoke-a", "smoke-a/*"]
+providers = ["local", "anthropic"]
+default_domain = "smoke-a"
+
+[[vault]]
+name = "smoke-b"
+paths = [{vault_b}]
+domains = ["smoke-b", "smoke-b/*"]
+providers = ["local", "anthropic"]
+default_domain = "smoke-b"
+
+[[area]]
+domain = "smoke-a/project"
+paths = [{area}]
+
+[[lock]]
+domains = ["smoke-a/sealed"]
+providers = ["local"]
+"""
+
+
+def run_vaults(binary: Path, values: dict[str, str], root: Path, timeout: float, checks: Checks) -> None:
+    """Two vaults over smoke domains: nothing crosses between them in either
+    direction, and locks hide notes from providers they leave out."""
+    tag = uuid.uuid4().hex[:10]
+    vault_a, vault_b, outside = root / "vault-a", root / "vault-b", root / "elsewhere"
+    area = vault_a / "project"
+    for folder in (area, vault_b, outside):
+        folder.mkdir(parents=True)
+    notes = root / "vault-notes"
+    notes.mkdir()
+    canary_a, canary_b, locked_key, sealed_key = (f"{name}-{tag}" for name in ("canary-a", "canary-b", "locked", "sealed"))
+    word_a, word_b, word_locked = (f"{name}{tag}" for name in ("ALPHACANARY", "BRAVOCANARY", "SEALEDCANARY"))
+    (notes / "locked.md").write_text(
+        f"---\nkey: {locked_key}\ndomain: smoke-a\ntitle: Locked note {tag}\nlock: [local]\n---\n"
+        f"The locked fact {word_locked} is for local models only.\n", encoding="utf-8")
+    vaults_file = root / "vaults.toml"
+    vaults_file.write_text(VAULTS_TOML.format(
+        vault_a=json.dumps(str(vault_a)), vault_b=json.dumps(str(vault_b)), area=json.dumps(str(area))), encoding="utf-8")
+    base = {**values, "MEMORY_VAULTS_FILE": str(vaults_file), "MEMORY_TOOLS": "all", "MEMORY_BACKGROUND_UPKEEP": "false",
+            "MEMORY_NOTES_ROOT": str(notes), "MEMORY_TRACE_FILE": str(root / "vault-trace-{vault}.jsonl")}
+    clients: list[StdioClient] = []
+
+    def session(name: str, provider: str | None, folder: Path | None, cwd: Path | None = None) -> StdioClient:
+        env = dict(base)
+        if provider:
+            env["MEMORY_PROVIDER"] = provider
+        if folder:
+            env["KIOKU_SESSION_DIR"] = str(folder)
+        env_file = root / f"{name}.env"
+        write_env(env, env_file)
+        client = StdioClient(binary, env_file, timeout, cwd=cwd)
+        clients.append(client)
+        client.request("initialize", {
+            "protocolVersion": "2025-11-25", "capabilities": {},
+            "clientInfo": {"name": "kioku-smoke-vault", "version": "1.0.0"},
+        })
+        client.send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+        return client
+
+    def refused(client: StdioClient, tool: str, arguments: dict, category: str = "refused") -> str:
+        _, text, error = client.call_raw(tool, arguments)
+        return text if error and text.startswith(category) else ""
+
+    try:
+        b = session("vault-b", "local", vault_b)
+        saved = b.call("memory_save", {"key": canary_b, "title": f"Bravo canary {tag}", "domain": "smoke-b",
+                                       "body": f"The bravo vault canary {word_b} must never reach vault A."})
+        checks.check("a session in vault B saves in its own vault", saved["key"] == canary_b and saved["indexed"] is True)
+        canary_b_id = b.call("memory_inspect", {"key": canary_b, "domain": "smoke-b"})["id"]
+        checks.check("vault B cannot search vault A", bool(refused(b, "memory_search", {"query": word_a, "domain": "smoke-a"})))
+
+        def clean(value: dict) -> bool:
+            text = json.dumps(value)
+            return all(marker not in text for marker in (word_b, canary_b, canary_b_id, '"smoke-b'))
+
+        local = session("vault-a-local", "local", vault_a)
+        local.call("memory_save", {"key": canary_a, "title": f"Alpha canary {tag}", "domain": "smoke-a",
+                                   "body": f"The alpha vault canary {word_a} lives in vault A."})
+        local.call("memory_save", {"key": sealed_key, "title": f"Sealed area note {tag}", "domain": "smoke-a/sealed",
+                                   "body": f"The sealed area also holds {word_locked}, for local models only."})
+        imported = local.call("memory_import", {"domain": "smoke-a"})
+        checks.check("a local session imports a note locked to local",
+                     imported["imported"] == 1 and [n["key"] for n in imported["notes"]] == [locked_key])
+        found = local.call("memory_search", {"query": word_locked, "domain": "smoke-a"})
+        checks.check("a note locked to local is visible to provider local", locked_key in keys(found["results"]))
+        sealed = local.call("memory_search", {"query": word_locked, "domain": "smoke-a/sealed"})
+        checks.check("an area locked to local is visible to provider local", sealed_key in keys(sealed["results"]))
+
+        a = session("vault-a", "anthropic", vault_a)
+        wide = a.call("memory_search", {"query": word_b, "limit": 20})
+        checks.check("a vault-wide search covers only this vault's visible domains",
+                     wide.get("vault") == "smoke-a" and "smoke-a" in wide.get("domains", [])
+                     and all(d.startswith("smoke-a") and d != "smoke-a/sealed" for d in wide["domains"]))
+        checks.check("a vault-wide search never returns another vault's canary", clean(wide))
+        own = a.call("memory_search", {"query": word_a})
+        checks.check("a vault-wide search finds this vault's notes, with their domain",
+                     any(r["key"] == canary_a and r.get("domain") == "smoke-a" for r in own["results"])
+                     and "memory_get" in own.get("next", ""))
+        checks.check("search refuses another vault's domain", bool(refused(a, "memory_search", {"query": word_b, "domain": "smoke-b"})))
+        checks.check("get refuses another vault's domain", bool(refused(a, "memory_get", {"keys": [canary_b], "domain": "smoke-b"})))
+        checks.check("get cannot reach another vault's note by id or key",
+                     bool(refused(a, "memory_get", {"keys": [canary_b_id, canary_b]}, "not_found")))
+        checks.check("inspect refuses another vault's domain", bool(refused(a, "memory_inspect", {"key": canary_b, "domain": "smoke-b"})))
+        checks.check("inspect cannot reach another vault's note by id", bool(refused(a, "memory_inspect", {"key": canary_b_id}, "not_found")))
+        stats = a.call("memory_stats")
+        checks.check("stats cover only this vault's visible notes",
+                     stats.get("vault") == "smoke-a" and stats["by_domain"].get("smoke-a", 0) >= 1
+                     and all(d.startswith("smoke-a") and d != "smoke-a/sealed" for d in stats["by_domain"])
+                     and stats["total"] == sum(stats["by_domain"].values()) and clean(stats))
+        checks.check("legacy rag_search stays inside the vault", clean(a.call("rag_search", {"query": word_b, "limit": 10})))
+        checks.check("legacy rag_search refuses another vault's domain",
+                     bool(refused(a, "rag_search", {"query": word_b, "domain_filter": "smoke-b"})))
+        checks.check("legacy rag_context packs nothing from another vault", clean(a.call("rag_context", {"query": word_b})))
+        checks.check("save refuses another vault's domain", bool(refused(a, "memory_save", {
+            "key": f"intruder-{tag}", "title": "Intruder", "domain": "smoke-b", "body": "A vault A session must not write into vault B."})))
+        checks.check("maintenance is refused to vault sessions", bool(refused(a, "memory_maintenance", {})))
+
+        hidden = a.call("memory_search", {"query": word_locked, "domain": "smoke-a", "limit": 20})
+        checks.check("a note locked to local is invisible to provider anthropic",
+                     locked_key not in keys(hidden["results"]) and word_locked not in json.dumps(hidden))
+        checks.check("get cannot read a note locked to another provider",
+                     bool(refused(a, "memory_get", {"keys": [locked_key], "domain": "smoke-a"}, "not_found")))
+        checks.check("inspect cannot see a note locked to another provider",
+                     bool(refused(a, "memory_inspect", {"key": locked_key, "domain": "smoke-a"}, "not_found")))
+        checks.check("save cannot overwrite a note locked to another provider", bool(refused(a, "memory_save", {
+            "key": locked_key, "title": "Overwrite", "domain": "smoke-a", "body": "Must not replace a locked note."}, "conflict")))
+        checks.check("an area locked to local is refused to provider anthropic",
+                     "locked" in refused(a, "memory_search", {"query": word_locked, "domain": "smoke-a/sealed"}))
+        checks.check("a vault-wide search skips locked notes and areas",
+                     word_locked not in json.dumps(a.call("memory_search", {"query": word_locked, "limit": 20})))
+
+        inside = session("vault-a-area", "anthropic", area)
+        checks.check("a session inside an area searches that area by default",
+                     inside.call("memory_search", {"query": word_a}).get("domain") == "smoke-a/project")
+        checks.check("an area session may still name another visible domain",
+                     canary_a in keys(inside.call("memory_search", {"query": word_a, "domain": "smoke-a"})["results"]))
+        by_cwd = session("by-cwd", "anthropic", None, cwd=vault_a)
+        placed = by_cwd.call("memory_search", {"query": word_a})
+        checks.check("without KIOKU_SESSION_DIR the working directory places the session",
+                     placed.get("vault") == "smoke-a" and canary_a in keys(placed["results"]))
+
+        stray = session("unplaced", "local", outside)
+        text = refused(stray, "memory_search", {"query": word_a})
+        checks.check("an unplaced session is refused, told its folder and the vaults file",
+                     str(outside) in text and "vaults.toml" in text)
+        checks.check("an unplaced session gets nothing from any tool", bool(refused(stray, "memory_stats", {})))
+        anonymous = session("no-provider", None, vault_a)
+        checks.check("a session without MEMORY_PROVIDER is refused",
+                     "MEMORY_PROVIDER" in refused(anonymous, "memory_search", {"query": word_a}))
+    finally:
+        for client in clients:
+            client.close()
+
+    traces = {name: [json.loads(line) for line in (root / f"vault-trace-{name}.jsonl").read_text(encoding="utf-8").splitlines()]
+              for name in ("smoke-a", "smoke-b", "_unplaced")}
+    checks.check("each vault has its own trace file, and its records name the vault",
+                 traces["smoke-a"] and traces["smoke-b"] and traces["_unplaced"]
+                 and all(r.get("vault") == "smoke-a" for r in traces["smoke-a"])
+                 and all(r.get("vault") == "smoke-b" for r in traces["smoke-b"])
+                 and all("vault" not in r for r in traces["_unplaced"]))
+    checks.check("vault A's trace never records vault B's results",
+                 all(canary_b not in r["result_keys"] and canary_b_id not in r["result_ids"] for r in traces["smoke-a"]))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path, required=True)
@@ -501,7 +672,10 @@ def main() -> int:
         outside.write_text("# Outside allowed notes\nThis file must never be imported.\n", encoding="utf-8")
         (notes_root / "escape.md").symlink_to(outside)
         # Never touch the user's real notes, and run everything the server offers.
+        # A vaults file that doesn't exist keeps these phases in compatibility
+        # mode even if the user has one in ~/.config/kioku.
         values.update({
+            "MEMORY_VAULTS_FILE": str(fixture_root / "no-vaults.toml"),
             "MEMORY_NOTES_ROOT": str(notes_root),
             "MEMORY_TOOLS": "all",
             "MEMORY_TRACE_FILE": str(trace_path),
@@ -522,6 +696,12 @@ def main() -> int:
         write_env(values, reader_env)
         client = StdioClient(binary, reader_env, args.timeout)
         run_restricted(client, checks, reader_trace)
+        client.close()
+        client = None
+        for name in ("MEMORY_PRINCIPAL", "MEMORY_SCOPES", "MEMORY_DOMAINS", "MEMORY_DEFAULT_DOMAIN",
+                     "MEMORY_TRACE_CONTENT", "MEMORY_TRACE_FILE"):
+            values.pop(name, None)
+        run_vaults(binary, values, fixture_root, args.timeout, checks)
     except (SmokeFailure, OSError, KeyError, TypeError, ValueError, IndexError) as error:
         # Never print arbitrary exceptions or server payloads; they can hold connection strings.
         message = str(error) if isinstance(error, SmokeFailure) else type(error).__name__

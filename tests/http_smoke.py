@@ -7,7 +7,9 @@
 Uses the same test-storage env file as tests/mcp_smoke.py (names must contain
 "smoke" or "test"). It creates two tokens with `kioku token`, starts the server
 on a free loopback port, and checks authentication, DNS-rebinding defenses,
-per-principal tool lists, scopes, and domain patterns. Stdlib only.
+per-principal tool lists, scopes, and domain patterns. A second server runs
+with a vaults file and checks that each token's provider and vault are
+enforced. Stdlib only.
 """
 
 from __future__ import annotations
@@ -44,8 +46,8 @@ def free_port() -> int:
         return s.getsockname()[1]
 
 
-def make_token(binary: Path, subject: str, scopes: str, domains: str) -> tuple[str, str]:
-    out = subprocess.run([str(binary), "token", subject, "--scopes", scopes, "--domains", domains],
+def make_token(binary: Path, subject: str, scopes: str, domains: str, *extra: str) -> tuple[str, str]:
+    out = subprocess.run([str(binary), "token", subject, "--scopes", scopes, "--domains", domains, *extra],
                          capture_output=True, text=True, timeout=30, check=True)
     value = json.loads(out.stdout)
     return value["token"], value["access_file_entry"]
@@ -121,6 +123,85 @@ def wait_for(port: int, process: subprocess.Popen, seconds: float) -> None:
     raise Failure("the HTTP server did not start listening")
 
 
+def start(binary: Path, env_file: Path, access: Path, env: dict, timeout: float) -> tuple[subprocess.Popen, str]:
+    port = free_port()
+    server = subprocess.Popen([str(binary), "--env-file", str(env_file), "serve", "--http", f"127.0.0.1:{port}",
+                               "--access-file", str(access)],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, env=env)
+    try:
+        wait_for(port, server, timeout)
+    except Failure:
+        stop(server)
+        raise
+    return server, f"http://127.0.0.1:{port}/mcp"
+
+
+def stop(server: subprocess.Popen) -> None:
+    server.terminate()
+    try:
+        server.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        server.kill()
+
+
+VAULTS = """
+[[vault]]
+name = "smoke-a"
+domains = ["smoke-a", "smoke-a/*"]
+providers = ["anthropic"]
+default_domain = "smoke-a"
+
+[[vault]]
+name = "smoke-b"
+domains = ["smoke-b", "smoke-b/*"]
+providers = ["anthropic"]
+default_domain = "smoke-b"
+"""
+
+
+def run_vaults(binary: Path, values: dict, root: Path, env: dict, timeout: float, checks: smoke.Checks) -> None:
+    """With a vaults file, a token works only with a provider and a vault, and only inside that vault."""
+    vaults = root / "vaults.toml"
+    vaults.write_text(VAULTS, encoding="utf-8")
+    vault_token, vault_entry = make_token(binary, "http-vault-a", "read,write", "*", "--provider", "anthropic", "--vault", "smoke-a")
+    bare_token, bare_entry = make_token(binary, "http-bare", "read,write", "*")
+    _, stray_entry = make_token(binary, "http-stray", "read", "*", "--provider", "anthropic", "--vault", "nowhere")
+    access = root / "vault-access.toml"
+    access.write_text(vault_entry + "\n" + bare_entry, encoding="utf-8")
+    access.chmod(0o600)
+    server_env = root / "vault-server.env"
+    smoke.write_env({**values, "MEMORY_VAULTS_FILE": str(vaults)}, server_env)
+
+    stray = root / "stray-access.toml"
+    stray.write_text(stray_entry, encoding="utf-8")
+    stray.chmod(0o600)
+    refused = subprocess.run([str(binary), "--env-file", str(server_env), "serve", "--http", "127.0.0.1:1",
+                              "--access-file", str(stray)], capture_output=True, text=True, timeout=60, env=env)
+    checks.check("HTTP refuses to start when a token names a vault the vaults file lacks",
+                 refused.returncode != 0 and "does not define" in refused.stderr)
+
+    server, url = start(binary, server_env, access, env, timeout)
+    try:
+        bare = HttpClient(url, bare_token, timeout)
+        bare.initialize()
+        text, error = bare.call("memory_search", {"query": "anything", "domain": "smoke-a"})
+        checks.check("in vault mode a token without provider and vault gets nothing",
+                     error and text.startswith("refused") and "provider" in text)
+        client = HttpClient(url, vault_token, timeout)
+        client.initialize()
+        key = "http-vault-" + uuid.uuid4().hex[:10]
+        text, error = client.call("memory_save", {"key": key, "title": "HTTP vault note", "domain": "smoke-a",
+                                                  "body": f"The HTTP vault smoke test saved {key} in vault smoke-a."})
+        checks.check("a vault token saves in its vault", not error)
+        text, error = client.call("memory_search", {"query": key})
+        value = json.loads(text) if not error else {}
+        checks.check("a vault token searches its whole vault", value.get("vault") == "smoke-a" and key in text)
+        text, error = client.call("memory_search", {"query": key, "domain": "smoke-b"})
+        checks.check("a vault token cannot reach another vault", error and text.startswith("refused"))
+    finally:
+        stop(server)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path, required=True)
@@ -144,6 +225,9 @@ def main() -> int:
         access.write_text(reader_entry + "\n" + writer_entry, encoding="utf-8")
         access.chmod(0o600)
         values.update({"MEMORY_DEFAULT_DOMAIN": "smoke", "MEMORY_BACKGROUND_UPKEEP": "false", "MEMORY_TOOLS": "all"})
+        compat = dict(values)
+        # A vaults file that doesn't exist keeps the first server in compatibility mode.
+        values["MEMORY_VAULTS_FILE"] = str(root / "no-vaults.toml")
         server_env = root / "server.env"
         smoke.write_env(values, server_env)
 
@@ -202,17 +286,17 @@ def main() -> int:
         checks.check("a reader can't search another domain", error and text.startswith("refused"))
         text, error = reader.call("memory_maintenance", {})
         checks.check("a reader can't run admin tools", error and text.startswith("refused"))
+        stop(server)
+        server = None
+        compat.pop("MEMORY_DEFAULT_DOMAIN")
+        run_vaults(binary, compat, root, env, args.timeout, checks)
     except (Failure, smoke.SmokeFailure, OSError, KeyError, ValueError, subprocess.SubprocessError) as error:
         message = str(error) if isinstance(error, (Failure, smoke.SmokeFailure)) else type(error).__name__
         print(f"FAIL after {checks.count} checks: {message}", file=sys.stderr)
         return 1
     finally:
         if server is not None:
-            server.terminate()
-            try:
-                server.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                server.kill()
+            stop(server)
         workdir.cleanup()
     print(json.dumps({"result": "passed", "checks": checks.count, "transport": "http", "services": "real"}, sort_keys=True))
     return 0
