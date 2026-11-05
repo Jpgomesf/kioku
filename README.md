@@ -98,7 +98,7 @@ The default `core` profile exposes three tools; `MEMORY_TOOLS=all` (or
 | `memory_search` | core | Ranked previews (key, title, snippet, score) for a question |
 | `memory_get` | core | Full text of chosen memories by key, with links, within a byte budget |
 | `memory_save` | core | Create or update one memory by key; refuses credentials and file-backed notes |
-| `memory_inspect` | all | Provenance, lifecycle, usage, and links of one memory |
+| `memory_inspect` | all | Provenance, lifecycle, usage, links, and recent history of one memory |
 | `memory_feedback` | all | Record that a memory proved right or wrong |
 | `memory_retire` / `memory_restore` | all | Move a memory to legacy and back; nothing is deleted |
 | `memory_import` | all | Import Markdown notes from `MEMORY_NOTES_ROOT` |
@@ -132,6 +132,9 @@ It replaces the retired batch-worker.
 
 - `related` links resolve within the domain by key, then title, then alias;
   `[[wiki links]]` work. Missing or ambiguous references are reported.
+- Saving a key again replaces its text, but nothing is lost: every save,
+  edit, retirement, and restore appends the note's content and status to
+  `memory_note_revisions`, and `memory_inspect` lists the ten latest entries.
 - Import with `memory_import` (paths stay inside `MEMORY_NOTES_ROOT`) or
   `kioku ingest --path DIR --domain DOMAIN`. A file's path is its provenance;
   agents can't overwrite file-backed notes through `memory_save`.

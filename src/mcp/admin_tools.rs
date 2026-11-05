@@ -14,6 +14,9 @@ use super::{
     FEEDBACK_EXAMPLE, IMPORT_EXAMPLE, KEY_EXAMPLE, MAINTENANCE_EXAMPLE, MemoryServer, schema,
 };
 
+/// History entries memory_inspect shows, newest first.
+const INSPECT_HISTORY: i64 = 10;
+
 #[tool_router(router = admin_router, vis = "pub(super)")]
 impl MemoryServer {
     #[tool(
@@ -219,6 +222,7 @@ impl MemoryServer {
             .await?;
         let note = self.app.require_note(id, Some(&domain)).await?;
         let graph = self.app.graph_context(id, Some(&domain), true).await?;
+        let history = self.app.store.revisions(id, INSPECT_HISTORY).await?;
         let retention = lifecycle::retention(&note, Utc::now(), self.app.config.half_life_days);
         let source = self.display_source(note.input.source.as_deref());
         let origin = if note
@@ -252,6 +256,7 @@ impl MemoryServer {
             "links": graph["neighbors"],
             "links_total": graph["total_neighbors"],
             "truncated": graph["truncated"],
+            "history": history,
         }))
     }
 

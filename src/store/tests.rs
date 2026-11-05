@@ -56,6 +56,115 @@ async fn postgres_preserves_lifecycle_and_rejects_cross_domain_edges() -> Result
     outcome
 }
 
+/// Creates and drops its own database on the server in MEMORY_TEST_DATABASE_URL.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; set MEMORY_TEST_DATABASE_URL"]
+async fn postgres_keeps_append_only_note_history() -> Result<()> {
+    let scratch = ScratchDatabase::create().await?;
+    let store = Store::connect(&scratch.url).await?;
+    let outcome = history_checks(&store).await;
+    store.pool.close().await;
+    scratch.drop_database().await?;
+    outcome
+}
+
+async fn history_checks(store: &Store) -> Result<()> {
+    store.migrate().await?;
+    let mut input = NoteInput {
+        domain: "history".into(),
+        key: "service".into(),
+        title: "Service v1".into(),
+        body: "Service runs on the old cluster.".into(),
+        aliases: vec![],
+        related: vec![],
+        tags: vec![],
+        source: None,
+        confidence: 0.8,
+        pinned: false,
+    };
+    let note = store.upsert(&input).await?;
+    // Writes that change nothing add nothing.
+    store.upsert(&input).await?;
+    store
+        .set_retention(note.id, 0.5, Status::Active, Utc::now())
+        .await?;
+    assert_eq!(store.revisions(note.id, 10).await?.len(), 1);
+
+    input.title = "Service v2".into();
+    input.body = "Service moved to the new cluster.".into();
+    store.upsert(&input).await?;
+    store
+        .set_retention(note.id, 0.1, Status::Legacy, Utc::now())
+        .await?;
+    store.restore(note.id).await?;
+    let history = store.revisions(note.id, 10).await?;
+    let summary: Vec<_> = history
+        .iter()
+        .map(|entry| (entry.revision, entry.status, entry.title.as_str()))
+        .collect();
+    assert_eq!(
+        summary,
+        vec![
+            (2, Status::Active, "Service v2"),
+            (2, Status::Legacy, "Service v2"),
+            (2, Status::Active, "Service v2"),
+            (1, Status::Active, "Service v1"),
+        ]
+    );
+    assert!(
+        history
+            .windows(2)
+            .all(|w| w[0].written_at >= w[1].written_at)
+    );
+    // The overwritten text is kept.
+    let first: Value = sqlx::query_scalar(
+        "SELECT input FROM memory_note_revisions WHERE note_id=$1 ORDER BY id LIMIT 1",
+    )
+    .bind(note.id)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(first["body"], "Service runs on the old cluster.");
+    assert_eq!(store.revisions(note.id, 2).await?.len(), 2);
+    assert!(store.revisions(note.id, 0).await.is_err());
+
+    // A write by an older binary, which kept no history, is caught up once.
+    sqlx::query("UPDATE memory_notes SET status='legacy' WHERE id=$1")
+        .bind(note.id)
+        .execute(&store.pool)
+        .await?;
+    store.migrate().await?;
+    store.migrate().await?;
+    let caught_up = store.revisions(note.id, 10).await?;
+    assert_eq!(caught_up.len(), 5);
+    assert_eq!(
+        (caught_up[0].revision, caught_up[0].status),
+        (2, Status::Legacy)
+    );
+    assert!(caught_up[0].written_at >= caught_up[1].written_at);
+
+    // Notes saved before history existed get their current revision, once.
+    sqlx::query("DELETE FROM memory_note_revisions WHERE note_id=$1")
+        .bind(note.id)
+        .execute(&store.pool)
+        .await?;
+    store.migrate().await?;
+    store.migrate().await?;
+    let backfilled = store.revisions(note.id, 10).await?;
+    assert_eq!(backfilled.len(), 1);
+    assert_eq!(
+        (backfilled[0].revision, backfilled[0].status),
+        (2, Status::Legacy)
+    );
+
+    // History goes away only with its note.
+    sqlx::query("DELETE FROM memory_notes WHERE id=$1")
+        .bind(note.id)
+        .execute(&store.pool)
+        .await?;
+    assert!(store.revisions(note.id, 10).await?.is_empty());
+    Ok(())
+}
+
 async fn lifecycle_checks(store: &Store) -> Result<()> {
     store.migrate().await?;
     let _guard = store.mutation_lock().await?;

@@ -8,6 +8,11 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Note history: every write that changes a note's content or status appends
+  it to the append-only `memory_note_revisions` table in the same transaction,
+  so overwritten text stays recoverable. Existing notes start their history at
+  their current revision. `memory_inspect` shows the ten latest entries
+  (revision, status, title, time).
 - Graph evaluation: shuffled-link and dropped-link ablations (5 seeds each),
   complete multi-hop support (`required` notes per query), graph-slot
   precision against the same positions without links, hub exposure per note,

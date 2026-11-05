@@ -160,6 +160,16 @@ pub struct Note {
     pub revision: i64,
 }
 
+/// One entry of a note's append-only history: what a write left behind.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct NoteRevision {
+    /// The note's content revision. A status change keeps the revision.
+    pub revision: i64,
+    pub status: Status,
+    pub title: String,
+    pub written_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Edge {
     pub source: Uuid,
