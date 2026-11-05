@@ -154,6 +154,9 @@ impl MemoryServer {
                 if let Some(hint) = report.unnamed_failures() {
                     out["hint"] = json!(hint);
                 }
+                if report.not_sent_to_embedder > 0 {
+                    out["not_sent_to_embedder"] = json!(report.not_sent_to_embedder);
+                }
                 ok(out)
             }
             Err(error) => error_text(render_error("memory_import", &error)),
@@ -265,7 +268,7 @@ impl MemoryServer {
         } else {
             "agent"
         };
-        Ok(json!({
+        let mut out = json!({
             "key": note.input.key,
             "id": note.id,
             "domain": note.input.domain,
@@ -287,7 +290,12 @@ impl MemoryServer {
             "links_total": graph["total_neighbors"],
             "truncated": graph["truncated"],
             "history": history,
-        }))
+        });
+        // Without a vector, search finds the note only by keyword and link.
+        if !self.app.embedder_reads(&note.input) {
+            out["not_sent_to_embedder"] = json!(true);
+        }
+        Ok(out)
     }
 
     /// Statistics over the notes a vault session may see, and nothing else:

@@ -68,6 +68,9 @@ pub async fn isolate_storage(config: &mut Config, database: &str, collection: &s
     .context("cannot create the evaluation database")?;
     admin.close().await?;
     config.database_url = config.with_database(database)?;
+    // The dataset belongs to no vault, so vault rules, including which notes
+    // a hosted embedding service may read, don't apply to it.
+    config.vaults = None;
     Qdrant::new(
         &config.qdrant_url,
         collection,

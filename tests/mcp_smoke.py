@@ -17,6 +17,7 @@ the older rag_* tools, and lifecycle tools. No Python packages are needed.
 from __future__ import annotations
 
 import argparse
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
@@ -25,7 +26,10 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+import urllib.error
+import urllib.request
 from urllib.parse import unquote, urlsplit
 import uuid
 
@@ -33,7 +37,7 @@ import uuid
 CONFIG_ENV = {
     "DATABASE_URL", "QDRANT_URL", "QDRANT_COLLECTION", "QDRANT_API_KEY",
     "EMBEDDING_PROVIDER", "EMBEDDING_URL", "EMBEDDING_MODEL", "EMBEDDING_DIM",
-    "EMBEDDING_API_KEY", "ALLOW_REMOTE_EMBEDDINGS", "MEMORY_HALF_LIFE_DAYS",
+    "EMBEDDING_API_KEY", "ALLOW_REMOTE_EMBEDDINGS", "EMBEDDING_READER", "MEMORY_HALF_LIFE_DAYS",
     "MEMORY_LEGACY_THRESHOLD", "MEMORY_DEFAULT_DOMAIN", "MEMORY_NOTES_ROOT", "MEMORY_TOOLS",
     "MEMORY_TRACE_FILE", "MEMORY_TRACE_RUN", "MEMORY_BACKGROUND_UPKEEP", "KIOKU_ENV_FILE", "RUST_LOG",
     "MEMORY_PRINCIPAL", "MEMORY_SCOPES", "MEMORY_DOMAINS", "MEMORY_TRACE_CONTENT", "MEMORY_TRACE_SALT",
@@ -737,6 +741,149 @@ def run_vaults(binary: Path, values: dict[str, str], root: Path, timeout: float,
                  all(canary_b not in r["result_keys"] and canary_b_id not in r["result_ids"] for r in traces["smoke-a"]))
 
 
+READER_VAULTS_TOML = """
+[[vault]]
+name = "smoke-r"
+paths = [{r}]
+domains = ["smoke-r", "smoke-r/*"]
+providers = ["local", "openai"]
+default_domain = "smoke-r"
+
+[[vault]]
+name = "smoke-q"
+paths = [{q}]
+domains = ["smoke-q"]
+providers = ["local", "anthropic"]
+default_domain = "smoke-q"
+
+[[lock]]
+domains = ["smoke-r/private"]
+providers = ["local"]
+"""
+
+
+class RecordingEmbedder:
+    """A pass-through embedding service on this machine that records every
+    text it receives: what a hosted service would see."""
+
+    def __init__(self, upstream: str):
+        self.texts: list[str] = []
+        recorder = self
+        # Never route the test's own traffic through a proxy from the environment.
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:
+                body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+                try:
+                    inputs = json.loads(body).get("input", [])
+                except ValueError:
+                    inputs = []
+                recorder.texts.extend([inputs] if isinstance(inputs, str) else inputs)
+                request = urllib.request.Request(upstream.rstrip("/") + self.path, data=body, method="POST",
+                                                 headers={"Content-Type": "application/json"})
+                try:
+                    with opener.open(request, timeout=120) as response:
+                        status, data = response.status, response.read()
+                except urllib.error.HTTPError as error:
+                    status, data = error.code, error.read()
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def log_message(self, *args) -> None:
+                pass
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.url = f"http://127.0.0.1:{self.server.server_port}"
+
+    def saw(self, word: str) -> bool:
+        return any(word in text for text in self.texts)
+
+    def close(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+
+
+def run_embedder_reader(binary: Path, values: dict[str, str], root: Path, timeout: float, checks: Checks) -> None:
+    """A hosted embedding service is a reader like any model: with
+    EMBEDDING_READER=openai it receives only what provider openai may read,
+    and search finds the other notes by keyword."""
+    tag = uuid.uuid4().hex[:10]
+    word = {name: f"{name.upper()}WORD{tag}" for name in ("open", "notelock", "area", "vault", "query")}
+    folder_r, folder_q, notes = root / "reader-r", root / "reader-q", root / "reader-notes"
+    for folder in (folder_r, folder_q, notes):
+        folder.mkdir()
+    notelock_key, open_key, area_key, vault_key = (f"{name}-{tag}" for name in ("notelock", "open", "area", "vault"))
+    (notes / f"{notelock_key}.md").write_text(
+        f"---\nkey: {notelock_key}\ndomain: smoke-r\ntitle: Note-locked fact {tag}\nlock: [local]\n---\n"
+        f"The note-locked fact {word['notelock']} stays on this machine.\n", encoding="utf-8")
+    vaults_file = root / "reader-vaults.toml"
+    vaults_file.write_text(READER_VAULTS_TOML.format(r=json.dumps(str(folder_r)), q=json.dumps(str(folder_q))),
+                           encoding="utf-8")
+    recorder = RecordingEmbedder(values["EMBEDDING_URL"])
+    base = {**values, "MEMORY_VAULTS_FILE": str(vaults_file), "MEMORY_NOTES_ROOT": str(notes), "MEMORY_TOOLS": "all",
+            "MEMORY_BACKGROUND_UPKEEP": "false", "EMBEDDING_URL": recorder.url, "EMBEDDING_READER": "openai",
+            "MEMORY_PROVIDER": "local"}
+    clients: list[StdioClient] = []
+
+    def session(name: str, folder: Path) -> StdioClient:
+        env_file = root / f"{name}.env"
+        write_env({**base, "KIOKU_SESSION_DIR": str(folder)}, env_file)
+        client = StdioClient(binary, env_file, timeout)
+        clients.append(client)
+        client.request("initialize", {
+            "protocolVersion": "2025-11-25", "capabilities": {},
+            "clientInfo": {"name": "kioku-smoke-reader", "version": "1.0.0"},
+        })
+        client.send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+        return client
+
+    try:
+        r, q = session("reader-r", folder_r), session("reader-q", folder_q)
+        r.call("memory_save", {"key": open_key, "title": f"Open fact {tag}", "domain": "smoke-r",
+                               "body": f"The open fact {word['open']} may go to provider openai."})
+        checks.check("a hosted embedding service receives a note its provider may read", recorder.saw(word["open"]))
+        r.call("memory_save", {"key": area_key, "title": f"Area fact {tag}", "domain": "smoke-r/private",
+                               "body": f"The area fact {word['area']} is locked to local models."})
+        imported = r.call("memory_import", {"domain": "smoke-r"})
+        q.call("memory_save", {"key": vault_key, "title": f"Vault fact {tag}", "domain": "smoke-q",
+                               "body": f"The vault fact {word['vault']} belongs to a vault without openai."})
+        checks.check("an import counts the notes it kept from the embedding service",
+                     imported["imported"] == 1 and imported.get("not_sent_to_embedder") == 1)
+        checks.check("notes in a locked area, under a note lock, or in a vault without the provider are never sent",
+                     not any(recorder.saw(word[name]) for name in ("notelock", "area", "vault")))
+        # Ranked first among notes that have vectors: its lexical rank stands
+        # in for the dense rank it can't have.
+        checks.check("search ranks a note-locked note first for its own keyword",
+                     keys(r.call("memory_search", {"query": word["notelock"], "domain": "smoke-r"})["results"])[:1] == [notelock_key])
+        checks.check("search finds a note in a locked area by keyword",
+                     area_key in keys(r.call("memory_search", {"query": word["area"], "domain": "smoke-r/private"})["results"]))
+        checks.check("search finds a note in a vault without the provider by keyword",
+                     vault_key in keys(q.call("memory_search", {"query": word["vault"]})["results"]))
+        checks.check("a search of domains the service may not read never sends the query",
+                     not recorder.saw(word["area"]) and not recorder.saw(word["vault"]))
+        r.call("memory_search", {"query": f"which fact mentions {word['query']}", "domain": "smoke-r"})
+        checks.check("a search of a domain the service may read sends the query", recorder.saw(word["query"]))
+        locked = r.call("memory_inspect", {"key": notelock_key, "domain": "smoke-r"})
+        sent = r.call("memory_inspect", {"key": open_key, "domain": "smoke-r"})
+        checks.check("inspect says which notes were not sent to the embedding service",
+                     locked.get("not_sent_to_embedder") is True and locked["indexed"] is True
+                     and "not_sent_to_embedder" not in sent)
+        retired = r.call("memory_retire", {"key": area_key, "domain": "smoke-r/private"})
+        restored = r.call("memory_restore", {"key": area_key, "domain": "smoke-r/private"})
+        checks.check("a note without a vector retires and restores",
+                     retired["status"] == "legacy" and restored["status"] == "active"
+                     and not recorder.saw(word["area"]))
+    finally:
+        for client in clients:
+            client.close()
+        recorder.close()
+
+
 def okf_concept(kind: str, producer_id: str, title: str, body: str, status: str = "stable") -> str:
     return (f"---\ntype: {kind}\nid: {producer_id}\ntitle: {title}\nstatus: {status}\n"
             f"generated: {{ by: \"human:smoke\", at: 2026-11-04T10:00:00-03:00 }}\n---\n{body}\n")
@@ -905,6 +1052,7 @@ def main() -> int:
             values.pop(name, None)
         run_vaults(binary, values, fixture_root, args.timeout, checks)
         run_okf(binary, values, fixture_root, args.timeout, checks)
+        run_embedder_reader(binary, values, fixture_root, args.timeout, checks)
     except (SmokeFailure, OSError, KeyError, TypeError, ValueError, IndexError) as error:
         # Never print arbitrary exceptions or server payloads; they can hold connection strings.
         message = str(error) if isinstance(error, SmokeFailure) else type(error).__name__

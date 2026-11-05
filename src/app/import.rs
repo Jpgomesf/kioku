@@ -92,6 +92,10 @@ pub struct ImportReport {
     /// What an OKF bundle import read and changed; absent for Markdown notes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub okf: Option<OkfImport>,
+    /// Notes saved without a vector because the embedding service may not
+    /// read them (`EMBEDDING_READER`); search finds them by keyword and link.
+    #[serde(skip_serializing_if = "super::is_zero")]
+    pub not_sent_to_embedder: usize,
 }
 
 /// How an import reads its path.
@@ -336,7 +340,10 @@ impl App {
                 failed.push(candidate.fail(format!("{error:#}"), viewer));
                 continue;
             }
-            if !existing.is_some_and(|note| note.input == candidate.input && note.vector_synced) {
+            // A note the embedding service may not read is never sent to it.
+            if self.embedder.reads(&candidate.input)
+                && !existing.is_some_and(|note| note.input == candidate.input && note.vector_synced)
+            {
                 changed.push(owned.len());
             }
             owned.push(candidate);
@@ -411,19 +418,33 @@ impl App {
             }
         }
         let mut batch = Vec::new();
+        let mut unsent = Vec::new();
         for note in saved.iter().filter(|note| !note.vector_synced) {
+            if !self.embedder.reads(&note.input) {
+                unsent.push(note);
+                continue;
+            }
             let vector = match pending.remove(&note.id) {
                 Some(vector) => vector,
                 None => self.embed_note(&note.input).await?,
             };
             batch.push((note.clone(), vector));
         }
+        let unsent_ids: Vec<Uuid> = unsent.iter().map(|note| note.id).collect();
         self.vector.upsert_many(&batch).await.context(
             "the notes are saved, but the vector index could not be updated; it will be repaired automatically",
         )?;
-        for (note, _) in &batch {
+        self.vector.delete(&unsent_ids).await.context(
+            "the notes are saved, but the vector index could not be updated; it will be repaired automatically",
+        )?;
+        for note in batch
+            .iter()
+            .map(|(note, _)| note)
+            .chain(unsent.iter().copied())
+        {
             self.store.mark_synced(note.id, note.revision).await?;
         }
+        let not_sent_to_embedder = unsent.len();
         let unresolved_count = unresolved.len();
         unresolved.truncate(50);
         let hidden_failures = failed.iter().filter(|f| f.hidden).count();
@@ -448,6 +469,7 @@ impl App {
             failed,
             hidden_failures,
             okf: None,
+            not_sent_to_embedder,
         })
     }
 
@@ -981,6 +1003,7 @@ mod tests {
             failed: Vec::new(),
             hidden_failures,
             okf: None,
+            not_sent_to_embedder: 0,
         };
         assert_eq!(report(0).unnamed_failures(), None);
         let hint = report(2).unnamed_failures().unwrap();

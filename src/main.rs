@@ -175,14 +175,19 @@ enum Command {
     /// then point the database at it. Close MCP clients first.
     Reindex {
         /// Embedding model to switch to, for example qwen3-embedding:0.6b.
-        #[arg(long)]
-        embedding_model: String,
+        #[arg(long, required_unless_present = "to_env_file", requires_all = ["embedding_dim", "collection"])]
+        embedding_model: Option<String>,
         /// Its vector size, for example 1024.
-        #[arg(long)]
-        embedding_dim: usize,
+        #[arg(long, requires = "embedding_model")]
+        embedding_dim: Option<usize>,
         /// New, empty Qdrant collection for the new vectors.
-        #[arg(long)]
-        collection: String,
+        #[arg(long, requires = "embedding_model")]
+        collection: Option<String>,
+        /// Take the new embedding service, model, and collection from this env
+        /// file instead, to move to another service, such as a hosted one.
+        /// Settings it leaves out keep their current values.
+        #[arg(long, conflicts_with = "embedding_model")]
+        to_env_file: Option<PathBuf>,
     },
 }
 
@@ -445,20 +450,51 @@ async fn main() -> Result<()> {
             embedding_model,
             embedding_dim,
             collection,
+            to_env_file,
         } => {
-            let mut target = app.config.clone();
-            target.embedding_prompts = kioku::config::EmbeddingPrompts::for_model(&embedding_model);
-            target.embedding_model = embedding_model;
-            target.embedding_dim = embedding_dim;
-            target.collection = collection;
-            let report = app.reindex(&target).await?;
-            json!({
-                "report": report,
-                "next": format!(
-                    "Set EMBEDDING_MODEL={}, EMBEDDING_DIM={}, and QDRANT_COLLECTION={} in your env file, then restart MCP clients. The previous collection {} is kept until you delete it.",
-                    report.embedding_model, report.embedding_dim, report.collection, report.previous_collection
+            let target = match (&to_env_file, embedding_model, embedding_dim, collection) {
+                (Some(file), ..) => {
+                    let entries: std::collections::HashMap<String, String> =
+                        dotenvy::from_path_iter(file)
+                            .and_then(|entries| entries.collect())
+                            .with_context(|| format!("cannot read env file {}", file.display()))?;
+                    let target = Config::from_env_with(&entries)
+                        .with_context(|| format!("invalid settings in {}", file.display()))?;
+                    ensure!(
+                        target.database_url == app.config.database_url,
+                        "{} names another database, but reindex switches this one; make its DATABASE_URL match or leave it out",
+                        file.display()
+                    );
+                    target
+                }
+                (None, Some(model), Some(dim), Some(collection)) => {
+                    let mut target = app.config.clone();
+                    target.embedding_prompts = kioku::config::EmbeddingPrompts::for_model(&model);
+                    target.embedding_model = model;
+                    target.embedding_dim = dim;
+                    target.collection = collection;
+                    target
+                }
+                _ => anyhow::bail!(
+                    "name --embedding-model, --embedding-dim, and --collection, or --to-env-file"
                 ),
-            })
+            };
+            let report = app.reindex(&target).await?;
+            let next = match &to_env_file {
+                Some(file) => format!(
+                    "Use the settings in {} as your env file (copy them into .env), then restart MCP clients. The previous collection {} is kept until you delete it.",
+                    file.display(),
+                    report.previous_collection
+                ),
+                None => format!(
+                    "Set EMBEDDING_MODEL={}, EMBEDDING_DIM={}, and QDRANT_COLLECTION={} in your env file, then restart MCP clients. The previous collection {} is kept until you delete it.",
+                    report.embedding_model,
+                    report.embedding_dim,
+                    report.collection,
+                    report.previous_collection
+                ),
+            };
+            json!({"report": report, "next": next})
         }
         Command::Eval(_) | Command::Token { .. } => unreachable!("handled before connecting"),
     };

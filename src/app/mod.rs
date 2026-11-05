@@ -51,6 +51,11 @@ fn document_text(input: &NoteInput) -> String {
     )
 }
 
+/// For `skip_serializing_if`: counts that are usually zero stay out of reports.
+fn is_zero(count: &usize) -> bool {
+    *count == 0
+}
+
 fn is_file_source(source: &str) -> bool {
     Path::new(source).is_absolute()
 }
@@ -120,6 +125,12 @@ impl App {
         Some(relative.unwrap_or_else(|| source.to_owned()))
     }
 
+    /// Whether the embedding service may receive this note; see
+    /// [`Embedder::reads`].
+    pub fn embedder_reads(&self, input: &NoteInput) -> bool {
+        self.embedder.reads(input)
+    }
+
     async fn embed_note(&self, input: &NoteInput) -> Result<Vec<f32>> {
         let mut vectors = self
             .embedder
@@ -148,6 +159,7 @@ impl App {
             "embeddings": "ok",
             "embedding_model": self.config.embedding_model,
             "embedding_prompts": self.config.embedding_prompts.profile,
+            "embedding_reader": self.config.embedding_reader.as_str(),
             "dimensions": probe.len(),
             "stats": self.store.stats().await?,
         }))

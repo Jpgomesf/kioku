@@ -103,6 +103,9 @@ pub struct RankInput<'a> {
     /// Cosine similarity per note from the vector index, already checked for
     /// freshness by the caller.
     pub dense: &'a HashMap<Uuid, f64>,
+    /// Notes the embedding service may not read, which have no vector by
+    /// design. Each is ranked on the signals that can rank it.
+    pub unembedded: &'a HashSet<Uuid>,
     pub query: &'a str,
     pub limit: usize,
     pub now: DateTime<Utc>,
@@ -134,6 +137,14 @@ pub fn rank(input: &RankInput<'_>, options: RankOptions) -> Vec<Ranked> {
     let mut fused: HashMap<Uuid, f64> = HashMap::new();
     for list in [&dense, &lexical] {
         for (rank, (id, _)) in list.iter().enumerate() {
+            *fused.entry(*id).or_default() += rrf(rank);
+        }
+    }
+    // A note without a vector by design can't have a dense rank. Its lexical
+    // rank stands in for it, so it competes on the signals that can rank it
+    // instead of losing to every note that has both.
+    for (rank, (id, _)) in lexical.iter().enumerate() {
+        if input.unembedded.contains(id) {
             *fused.entry(*id).or_default() += rrf(rank);
         }
     }
@@ -325,11 +336,45 @@ mod tests {
             notes,
             edges,
             dense,
+            unembedded: &NONE,
             query,
             limit,
             now: now(),
             half_life_days: 90.0,
         }
+    }
+
+    static NONE: std::sync::LazyLock<HashSet<Uuid>> = std::sync::LazyLock::new(HashSet::new);
+
+    #[test]
+    fn a_note_without_a_vector_by_design_ranks_on_its_lexical_signal() {
+        let embedded = note("ledger-a", "Ledger", "The ledger keeps entries.", &[]);
+        let kept = note(
+            "ledger-b",
+            "Retention policy",
+            "The ledger retention is ninety days.",
+            &[],
+        );
+        let notes = vec![embedded.clone(), kept.clone()];
+        let dense = HashMap::from([(embedded.id, 0.9)]);
+        let plain = rank(
+            &input(&notes, &[], &dense, "ledger retention", 2),
+            RankOptions::HYBRID,
+        );
+        assert_eq!(
+            plain[0].id, embedded.id,
+            "dense and lexical outrank lexical alone"
+        );
+        let unembedded = HashSet::from([kept.id]);
+        let fair = rank(
+            &RankInput {
+                unembedded: &unembedded,
+                ..input(&notes, &[], &dense, "ledger retention", 2)
+            },
+            RankOptions::HYBRID,
+        );
+        assert_eq!(fair[0].id, kept.id, "the best keyword match ranks first");
+        assert!(fair[0].score > fair[1].score);
     }
 
     #[test]

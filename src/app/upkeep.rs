@@ -31,6 +31,10 @@ const LOGGED_CANDIDATES: usize = 20;
 pub struct RepairReport {
     pub reindexed: usize,
     pub failures: Vec<RepairFailure>,
+    /// Notes left without a vector because the embedding service may not
+    /// read them; any vector they had is removed.
+    #[serde(skip_serializing_if = "super::is_zero")]
+    pub not_sent_to_embedder: usize,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -42,6 +46,9 @@ pub struct ReindexReport {
     pub embedding_model: String,
     pub embedding_dim: usize,
     pub previous_collection: String,
+    /// Notes the new embedding service may not read, left without a vector.
+    #[serde(skip_serializing_if = "super::is_zero")]
+    pub not_sent_to_embedder: usize,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -85,7 +92,22 @@ impl App {
                     .replace_edges(&domain, &graph::resolve_edges(&notes))
                     .await?;
             }
-            let targets: Vec<&Note> = notes.iter().filter(|n| all || !n.vector_synced).collect();
+            let (targets, unsent): (Vec<&Note>, Vec<&Note>) = notes
+                .iter()
+                .filter(|n| all || !n.vector_synced)
+                .partition(|n| self.embedder.reads(&n.input));
+            if !unsent.is_empty() {
+                // Never sent to the embedding service: drop any vector, then
+                // mark each note synced at the revision read, so a note edited
+                // meanwhile stays pending.
+                let _guard = self.store.mutation_lock().await?;
+                let ids: Vec<Uuid> = unsent.iter().map(|n| n.id).collect();
+                self.vector.delete(&ids).await?;
+                for note in &unsent {
+                    self.store.mark_synced(note.id, note.revision).await?;
+                }
+                report.not_sent_to_embedder += unsent.len();
+            }
             for chunk in targets.chunks(REPAIR_BATCH) {
                 let mut embedded = Vec::new();
                 for note in chunk {
@@ -143,9 +165,13 @@ impl App {
             );
         }
         let embedder = Embedder::new(target)?;
+        // Notes the new service may not read are never sent to it: they are
+        // counted as indexed, with no vector.
         let embed = |notes: Vec<Note>| {
             let embedder = embedder.clone();
             async move {
+                let (notes, unsent): (Vec<Note>, Vec<Note>) =
+                    notes.into_iter().partition(|n| embedder.reads(&n.input));
                 let texts: Vec<String> = notes.iter().map(|n| document_text(&n.input)).collect();
                 let vectors = embedder.embed_documents(&texts).await.map_err(|error| {
                     match crate::embedding::failed_index(&error).and_then(|i| notes.get(i)) {
@@ -153,16 +179,19 @@ impl App {
                         None => error,
                     }
                 })?;
-                anyhow::Ok(notes.into_iter().zip(vectors).collect::<Vec<_>>())
+                anyhow::Ok((notes.into_iter().zip(vectors).collect::<Vec<_>>(), unsent))
             }
         };
         let mut indexed: HashMap<Uuid, (i64, Status)> = HashMap::new();
+        let mut unsent_ids = std::collections::HashSet::new();
         for domain in self.store.domains().await? {
             let notes = self.store.notes(Some(&domain), true).await?;
             for chunk in notes.chunks(REPAIR_BATCH) {
-                let batch = embed(chunk.to_vec()).await?;
+                let (batch, unsent) = embed(chunk.to_vec()).await?;
                 qdrant.upsert_many(&batch).await?;
                 indexed.extend(batch.iter().map(|(n, _)| (n.id, (n.revision, n.status))));
+                indexed.extend(unsent.iter().map(|n| (n.id, (n.revision, n.status))));
+                unsent_ids.extend(unsent.iter().map(|n| n.id));
             }
         }
         // Catch up with edits made while embedding, then switch atomically.
@@ -177,9 +206,17 @@ impl App {
         }
         let refreshed = changed.len();
         for chunk in changed.chunks(REPAIR_BATCH) {
-            let batch = embed(chunk.to_vec()).await?;
+            let (batch, unsent) = embed(chunk.to_vec()).await?;
+            // A note edited during the run may have gained or lost a lock.
+            let ids: Vec<Uuid> = unsent.iter().map(|n| n.id).collect();
+            qdrant.delete(&ids).await?;
             qdrant.upsert_many(&batch).await?;
+            for (note, _) in &batch {
+                unsent_ids.remove(&note.id);
+            }
             indexed.extend(batch.iter().map(|(n, _)| (n.id, (n.revision, n.status))));
+            indexed.extend(unsent.iter().map(|n| (n.id, (n.revision, n.status))));
+            unsent_ids.extend(ids);
         }
         self.store
             .set_embedding_identity(&target.embedding_identity())
@@ -194,6 +231,7 @@ impl App {
             embedding_model: target.embedding_model.clone(),
             embedding_dim: target.embedding_dim,
             previous_collection: self.config.collection.clone(),
+            not_sent_to_embedder: unsent_ids.len(),
         })
     }
 
@@ -286,7 +324,11 @@ impl App {
                         .set_retention(note.id, score, status, now)
                         .await?;
                     if status != note.status && note.vector_synced {
-                        self.vector.set_status(note.id, status).await?;
+                        if self.embedder.reads(&note.input) {
+                            self.vector.set_status(note.id, status).await?;
+                        } else {
+                            self.vector.delete(&[note.id]).await?;
+                        }
                         self.store.mark_synced(note.id, note.revision).await?;
                     }
                 }

@@ -226,11 +226,17 @@ impl App {
         }
         let edges: &[Edge] = &edges;
         stats.links = edges.len();
+        let unembedded: HashSet<Uuid> = notes
+            .iter()
+            .filter(|note| !self.embedder.reads(&note.input))
+            .map(|note| note.id)
+            .collect();
         let ranked = rank::rank(
             &RankInput {
                 notes: &notes,
                 edges,
                 dense: &dense,
+                unembedded: &unembedded,
                 query,
                 limit: request.limit,
                 now: Utc::now(),
@@ -289,6 +295,18 @@ impl App {
         hidden: &HashSet<Uuid>,
         request: &SearchRequest<'_>,
     ) -> Result<Dense> {
+        // The query goes to the embedding service only if that service may
+        // read a searched domain; otherwise none of their notes has a vector.
+        if !domains
+            .iter()
+            .any(|domain| self.embedder.reads_domain(domain))
+        {
+            return Ok(Dense {
+                scores: HashMap::new(),
+                candidates: 0,
+                stale: 0,
+            });
+        }
         let vector = self.embedder.embed_query(query).await?;
         let domains: Vec<&str> = domains.iter().map(String::as_str).collect();
         let mut exclude: Vec<Uuid> = hidden.iter().copied().collect();
