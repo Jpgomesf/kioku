@@ -72,6 +72,15 @@ fn save_report(
 /// its key. Tools may not touch notes that live in Markdown files, and an
 /// import may take over a key only when the old file no longer exists (it was
 /// moved or renamed).
+/// Whether the file a file source names still exists. A section of an OKF
+/// concept records `<file>.md#<anchor>`, which belongs to its concept file.
+fn source_file_exists(source: &str) -> bool {
+    Path::new(source).exists()
+        || source
+            .rsplit_once('#')
+            .is_some_and(|(file, _)| file.ends_with(".md") && Path::new(file).exists())
+}
+
 pub(super) fn check_ownership(
     existing: Option<&Note>,
     input: &NoteInput,
@@ -100,7 +109,7 @@ pub(super) fn check_ownership(
         None => Ok(()),
         Some(old) if Some(old) == new_source => Ok(()),
         Some(old)
-            if origin == WriteOrigin::Import && is_file_source(old) && !Path::new(old).exists() =>
+            if origin == WriteOrigin::Import && is_file_source(old) && !source_file_exists(old) =>
         {
             Ok(())
         }
@@ -275,6 +284,28 @@ impl App {
 mod tests {
     use super::*;
     use crate::testing::sourced_note as note;
+
+    #[test]
+    fn a_section_source_belongs_to_its_concept_file() {
+        let dir = std::env::temp_dir().join(format!("kioku-owner-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("architecture.md");
+        std::fs::write(&file, "text").unwrap();
+        let section = format!("{}#router", file.display());
+        assert!(
+            source_file_exists(&section),
+            "a section is owned while its file exists"
+        );
+        let mut existing = note("kb/architecture#router", "Router section");
+        existing.input.source = Some(section.clone());
+        let mut claim = existing.input.clone();
+        claim.source = Some("/another/bundle/architecture.md#router".into());
+        assert!(check_ownership(Some(&existing), &claim, WriteOrigin::Import).is_err());
+        std::fs::remove_file(&file).unwrap();
+        assert!(!source_file_exists(&section));
+        assert!(check_ownership(Some(&existing), &claim, WriteOrigin::Import).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn a_vault_save_reports_its_own_links_as_its_viewer_sees_them() {
