@@ -47,6 +47,9 @@ pub struct SearchRequest<'a> {
 pub struct SearchHit {
     pub id: Uuid,
     pub key: String,
+    /// The note's domain, for vault-wide searches. Not serialized, so
+    /// `kioku search` prints what it always has.
+    #[serde(skip)]
     pub domain: String,
     pub title: String,
     pub status: Status,
@@ -373,5 +376,45 @@ impl App {
             "total_neighbors": total,
             "truncated": total > 50,
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn search_hits_serialize_as_before_vaults() {
+        let hit = SearchHit {
+            id: Uuid::nil(),
+            key: "k".into(),
+            domain: "local".into(),
+            title: "T".into(),
+            status: Status::Active,
+            source: None,
+            snippet: "s".into(),
+            score: 0.5,
+            kind: MatchKind::Search,
+            linked_from: None,
+            signals: Signals {
+                dense: None,
+                lexical: Some(1.0),
+                retention: 0.8,
+            },
+        };
+        let value = serde_json::to_value(&hit).unwrap();
+        let mut fields: Vec<&str> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        fields.sort_unstable();
+        assert_eq!(
+            fields,
+            [
+                "id", "key", "match", "score", "signals", "snippet", "status", "title"
+            ]
+        );
     }
 }
