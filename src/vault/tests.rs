@@ -292,6 +292,13 @@ fn viewers_see_only_their_vault_minus_locks() {
     assert!(claude.sees(&note("plain", "personal/health")));
     assert!(!claude.sees(&note("x", "work")));
     assert!(claude.restricts_notes());
+    // A domain and a lock alone decide, as for a whole note.
+    let local_only = ["local".to_owned()];
+    assert!(!claude.sees_locked("personal/health", &local_only));
+    assert!(claude.sees_locked("personal/health", &[]));
+    assert!(viewer("local", &everyone).sees_locked("personal/health", &local_only));
+    assert!(!claude.sees_locked("work", &[]));
+    assert!(!claude.sees_locked("personal/citizenship", &[]));
 
     // The access profile narrows the vault further.
     let narrow = Principal::new("narrow", "read", "personal/health").unwrap();

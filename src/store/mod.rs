@@ -219,6 +219,27 @@ impl Store {
         )
     }
 
+    /// Each domain with each distinct note lock its notes carry (empty for
+    /// no lock), sorted by domain: enough to tell which domains hold a note
+    /// a session may see without loading the notes.
+    pub async fn domain_locks(&self) -> Result<Vec<(String, Vec<String>)>> {
+        let rows = sqlx::query(
+            "SELECT DISTINCT domain, COALESCE(input->'lock', '[]'::jsonb) AS lock
+             FROM memory_notes ORDER BY domain",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter()
+            .map(|row| {
+                let lock: Value = row.try_get("lock")?;
+                Ok((
+                    row.try_get("domain")?,
+                    serde_json::from_value(lock).context("Stored memory has an invalid lock")?,
+                ))
+            })
+            .collect()
+    }
+
     /// Keys of active notes explicitly linked to each of `ids`, both directions,
     /// at most ten per note. Only neighbors whose id passes `keep` are listed,
     /// so callers can leave out notes a session may not see.

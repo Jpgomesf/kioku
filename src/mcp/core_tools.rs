@@ -193,25 +193,19 @@ impl MemoryServer {
                 )
             }
         } else if hits.is_empty() {
-            // Counts include notes this caller may not see, so in vault mode
-            // only the visible notes the search ranked tell whether any exist.
-            let known: Vec<(String, i64)> = self
-                .app
-                .store
-                .domain_counts()
-                .await?
-                .into_iter()
-                .filter(|(d, _)| caller.viewer.sees_domain(d).unwrap_or(false))
-                .collect();
-            let has_notes = if caller.viewer.restricts_notes() {
-                results.stats.notes > 0
+            // With vault rules, only domains holding a note this caller may
+            // see are known to it. Without them, every stored domain, as
+            // always.
+            let known: Vec<String> = if caller.viewer.restricts_notes() {
+                self.visible_domains().await?
             } else {
-                known.iter().any(|(d, _)| *d == domain)
+                let counts = self.app.store.domain_counts().await?;
+                counts.into_iter().map(|(d, _)| d).collect()
             };
-            if has_notes {
+            if known.contains(&domain) {
                 "No stored memory matched. Say so and check the source files.".to_owned()
             } else {
-                let names: Vec<String> = known.into_iter().map(|(d, _)| d).take(10).collect();
+                let names: Vec<String> = known.into_iter().take(10).collect();
                 format!(
                     "Domain {domain:?} has no memories. Known domains: {} (case-sensitive).",
                     if names.is_empty() {

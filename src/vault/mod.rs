@@ -408,14 +408,19 @@ impl Viewer {
     /// note lock, if any, lists the session's provider. Fails closed: a domain
     /// claimed by two vaults hides the note.
     pub fn sees_input(&self, input: &NoteInput) -> bool {
-        if !matches!(self.verdict(&input.domain), Verdict::Visible) {
+        self.sees_locked(&input.domain, &input.lock)
+    }
+
+    /// Whether this viewer may read a note of `domain` with note lock `lock`
+    /// (empty for none), as [`Viewer::sees_input`] decides.
+    pub fn sees_locked(&self, domain: &str, lock: &[String]) -> bool {
+        if !matches!(self.verdict(domain), Verdict::Visible) {
             return false;
         }
         match &self.scope {
             Scope::Vault(placement) => {
-                input.lock.is_empty()
-                    || input
-                        .lock
+                lock.is_empty()
+                    || lock
                         .iter()
                         .any(|name| Provider::parse(name).is_ok_and(|p| p == placement.provider))
             }

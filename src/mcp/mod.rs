@@ -176,12 +176,17 @@ impl MemoryServer {
         Ok(domain)
     }
 
-    /// Every stored domain the caller may see, in name order.
+    /// Every stored domain that holds a note the caller may see, in name
+    /// order. A domain whose every note is locked away from the caller is
+    /// left out, so its name is never shown.
     async fn visible_domains(&self) -> anyhow::Result<Vec<String>> {
         let caller = self.caller();
-        let mut visible = Vec::new();
-        for domain in self.app.store.domains().await? {
-            if caller.viewer.sees_domain(&domain)? {
+        let mut visible: Vec<String> = Vec::new();
+        for (domain, lock) in self.app.store.domain_locks().await? {
+            if visible.last() == Some(&domain) || !caller.viewer.sees_domain(&domain)? {
+                continue;
+            }
+            if caller.viewer.sees_locked(&domain, &lock) {
                 visible.push(domain);
             }
         }
