@@ -9,7 +9,6 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use super::args::{EmptyArgs, FeedbackArgs, ImportArgs, KeyArgs, MaintenanceArgs, parse};
-use crate::app::ImportedNote;
 use crate::error::UserError;
 use crate::lifecycle;
 
@@ -135,14 +134,10 @@ impl MemoryServer {
             Ok(domain) => domain,
             Err(error) => return error_text(render_error("memory_import", &error)),
         };
-        let imported = async {
-            let mut report = self
-                .app
-                .hydrate(args.path.as_deref(), Some(&domain))
-                .await?;
-            self.hide_imported(&mut report.notes).await?;
-            anyhow::Ok(report)
-        };
+        let caller = self.caller();
+        let imported = self
+            .app
+            .hydrate(args.path.as_deref(), Some(&domain), Some(&caller.viewer));
         match imported.await {
             Ok(report) => ok(json!({
                 "domain": domain,
@@ -152,7 +147,7 @@ impl MemoryServer {
                 "unresolved_related": report.unresolved_relationships.iter().take(20).map(|u| json!({"ref": u.reference, "reason": u.reason})).collect::<Vec<_>>(),
                 "unresolved_count": report.unresolved_count,
                 "failed": report.failed.iter().take(20).collect::<Vec<_>>(),
-                "failed_count": report.failed.len(),
+                "failed_count": report.failed.len() + report.hidden_failures,
             })),
             Err(error) => error_text(render_error("memory_import", &error)),
         }
@@ -286,29 +281,6 @@ impl MemoryServer {
             "truncated": graph["truncated"],
             "history": history,
         }))
-    }
-
-    /// In vault mode, leave notes this session may not read out of an
-    /// import's listing. The count still includes them.
-    async fn hide_imported(&self, notes: &mut Vec<ImportedNote>) -> anyhow::Result<()> {
-        let caller = self.caller();
-        if !caller.viewer.restricts_notes() {
-            return Ok(());
-        }
-        let mut visible = Vec::with_capacity(notes.len());
-        for imported in notes.drain(..) {
-            if self
-                .app
-                .store
-                .get(imported.id)
-                .await?
-                .is_some_and(|note| caller.viewer.sees(&note))
-            {
-                visible.push(imported);
-            }
-        }
-        *notes = visible;
-        Ok(())
     }
 
     /// Statistics over the notes a vault session may see, and nothing else:

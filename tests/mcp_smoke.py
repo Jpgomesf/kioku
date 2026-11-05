@@ -508,6 +508,9 @@ def run_vaults(binary: Path, values: dict[str, str], root: Path, timeout: float,
     (notes / "locked.md").write_text(
         f"---\nkey: {locked_key}\ndomain: smoke-a\ntitle: Locked note {tag}\nlock: [local]\n---\n"
         f"The locked fact {word_locked} is for local models only.\n", encoding="utf-8")
+    # One notes folder serves every vault: vault A's imports must not name this file.
+    (notes / f"bravo-{tag}.md").write_text(
+        f"---\nkey: {canary_b}-file\ndomain: smoke-b\ntitle: Bravo file\n---\nVault B's file {word_b}.\n", encoding="utf-8")
     vaults_file = root / "vaults.toml"
     vaults_file.write_text(VAULTS_TOML.format(
         vault_a=json.dumps(str(vault_a)), vault_b=json.dumps(str(vault_b)), area=json.dumps(str(area))), encoding="utf-8")
@@ -556,6 +559,8 @@ def run_vaults(binary: Path, values: dict[str, str], root: Path, timeout: float,
         imported = local.call("memory_import", {"domain": "smoke-a"})
         checks.check("a local session imports a note locked to local",
                      imported["imported"] == 1 and [n["key"] for n in imported["notes"]] == [locked_key])
+        checks.check("an import counts another vault's file but never names it",
+                     imported["failed"] == [] and imported["failed_count"] == 1 and clean(imported))
         found = local.call("memory_search", {"query": word_locked, "domain": "smoke-a"})
         checks.check("a note locked to local is visible to provider local", locked_key in keys(found["results"]))
         sealed = local.call("memory_search", {"query": word_locked, "domain": "smoke-a/sealed"})

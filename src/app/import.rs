@@ -3,6 +3,10 @@
 //! A file that cannot be read, parsed, validated, owned, or embedded is
 //! skipped and reported in [`ImportReport::failed`]; the other files import
 //! normally. Only when every file fails is the import an error.
+//!
+//! One notes folder serves every vault, so an import for a vault session
+//! lists only the notes, links, and failures of notes that session may see.
+//! The others are counted, never named.
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -17,6 +21,7 @@ use crate::error::{UserError, invalid, not_found};
 use crate::graph::{self, UnresolvedRelation};
 use crate::markdown;
 use crate::model::{NoteInput, Status};
+use crate::vault::Viewer;
 
 use super::write::{WriteOrigin, check_ownership};
 use super::{App, document_text};
@@ -44,6 +49,28 @@ pub struct ImportFailure {
     /// given directory (or a given file's directory) for `kioku ingest`.
     pub path: String,
     pub reason: String,
+    /// The viewer may not see this file's note, or the import couldn't tell
+    /// whose note it is: counted, but never listed.
+    #[serde(skip)]
+    hidden: bool,
+}
+
+impl ImportFailure {
+    fn new(path: String, reason: String, hidden: bool) -> Self {
+        Self {
+            path,
+            reason,
+            hidden,
+        }
+    }
+}
+
+/// Whether a failure about `input` (`None` when the file didn't parse) may
+/// be listed to `viewer`. Without vault rules, everything is.
+fn listed(viewer: Option<&Viewer>, input: Option<&NoteInput>) -> bool {
+    viewer.is_none_or(|viewer| {
+        !viewer.restricts_notes() || input.is_some_and(|input| viewer.sees_input(input))
+    })
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -55,6 +82,9 @@ pub struct ImportReport {
     pub unresolved_count: usize,
     /// Skipped files, sorted by path.
     pub failed: Vec<ImportFailure>,
+    /// Skipped files whose notes the viewer may not see, left out of `failed`.
+    #[serde(skip)]
+    pub hidden_failures: usize,
 }
 
 /// A parsed, valid note and the path it is reported under.
@@ -64,11 +94,9 @@ struct Candidate {
 }
 
 impl Candidate {
-    fn fail(self, reason: String) -> ImportFailure {
-        ImportFailure {
-            path: self.path,
-            reason,
-        }
+    fn fail(self, reason: String, viewer: Option<&Viewer>) -> ImportFailure {
+        let hidden = !listed(viewer, Some(&self.input));
+        ImportFailure::new(self.path, reason, hidden)
     }
 }
 
@@ -82,18 +110,20 @@ struct MarkdownTree {
 
 impl App {
     pub async fn ingest(&self, root: &Path, domain: &str) -> Result<ImportReport> {
-        self.ingest_scoped(root, domain, false, None).await
+        self.ingest_scoped(root, domain, false, None, None).await
     }
 
     /// Import every Markdown file under `root`. With `strict_domain`, files
     /// whose frontmatter names another domain fail. Failure paths are shown
-    /// relative to `base`, or to the root when it is `None`.
+    /// relative to `base`, or to the root when it is `None`. With a viewer,
+    /// the report names only notes it may see.
     async fn ingest_scoped(
         &self,
         root: &Path,
         domain: &str,
         strict_domain: bool,
         base: Option<&Path>,
+        viewer: Option<&Viewer>,
     ) -> Result<ImportReport> {
         let root = root.to_path_buf();
         // Directory walks and file reads block, so keep them off the async executor.
@@ -104,7 +134,7 @@ impl App {
             not_found!("no Markdown notes found there");
         }
         let base = base.map_or(tree.base, Path::to_path_buf);
-        let (candidates, mut failed) = prepare(tree.files, &base, domain, strict_domain);
+        let (candidates, mut failed) = prepare(tree.files, &base, domain, strict_domain, viewer);
 
         // Check ownership and embed changed notes before writing anything.
         let mut owned = Vec::with_capacity(candidates.len());
@@ -114,7 +144,7 @@ impl App {
             if let Err(error) =
                 check_ownership(existing.as_ref(), &candidate.input, WriteOrigin::Import)
             {
-                failed.push(candidate.fail(format!("{error:#}")));
+                failed.push(candidate.fail(format!("{error:#}"), viewer));
                 continue;
             }
             if !existing.is_some_and(|note| note.input == candidate.input && note.vector_synced) {
@@ -147,7 +177,7 @@ impl App {
         for (index, candidate) in owned.into_iter().enumerate() {
             if too_long.contains(&index) {
                 let reason = too_long_reason(&candidate.input);
-                failed.push(candidate.fail(reason));
+                failed.push(candidate.fail(reason, viewer));
             } else {
                 ready.push(candidate);
             }
@@ -163,7 +193,7 @@ impl App {
             let current = self.store.get(candidate.input.id()).await?;
             match check_ownership(current.as_ref(), &candidate.input, WriteOrigin::Import) {
                 Ok(()) => accepted.push(candidate),
-                Err(error) => failed.push(candidate.fail(format!("{error:#}"))),
+                Err(error) => failed.push(candidate.fail(format!("{error:#}"), viewer)),
             }
         }
         if accepted.is_empty() {
@@ -179,7 +209,17 @@ impl App {
             let domain_notes = self.store.notes(Some(&domain), true).await?;
             let (edges, missing) = graph::resolve_edges_with_report(&domain_notes);
             self.store.replace_edges(&domain, &edges).await?;
-            unresolved.extend(missing);
+            match viewer.filter(|viewer| viewer.restricts_notes()) {
+                Some(viewer) => {
+                    let visible: HashSet<Uuid> = domain_notes
+                        .iter()
+                        .filter(|note| viewer.sees(note))
+                        .map(|note| note.id)
+                        .collect();
+                    unresolved.extend(missing.into_iter().filter(|u| visible.contains(&u.source)));
+                }
+                None => unresolved.extend(missing),
+            }
         }
         let mut batch = Vec::new();
         for note in saved.iter().filter(|note| !note.vector_synced) {
@@ -197,11 +237,14 @@ impl App {
         }
         let unresolved_count = unresolved.len();
         unresolved.truncate(50);
+        let hidden_failures = failed.iter().filter(|f| f.hidden).count();
+        failed.retain(|f| !f.hidden);
         failed.sort_by(|a, b| a.path.cmp(&b.path));
         Ok(ImportReport {
             imported: saved.len(),
             notes: saved
                 .into_iter()
+                .filter(|note| listed(viewer, Some(&note.input)))
                 .map(|note| ImportedNote {
                     id: note.id,
                     key: note.input.key,
@@ -214,13 +257,17 @@ impl App {
             unresolved_relationships: unresolved,
             unresolved_count,
             failed,
+            hidden_failures,
         })
     }
 
+    /// Import from `MEMORY_NOTES_ROOT` for a tool: paths stay inside it, and
+    /// every file must belong to `domain`.
     pub async fn hydrate(
         &self,
         relative_path: Option<&str>,
         domain: Option<&str>,
+        viewer: Option<&Viewer>,
     ) -> Result<ImportReport> {
         let root = self
             .config
@@ -253,7 +300,13 @@ impl App {
             );
         }
         let mut report = self
-            .ingest_scoped(&selected, self.domain(domain), true, Some(root.as_path()))
+            .ingest_scoped(
+                &selected,
+                self.domain(domain),
+                true,
+                Some(root.as_path()),
+                viewer,
+            )
             .await?;
         report.truncated = report.notes.len() > 20;
         report.notes.truncate(20);
@@ -269,17 +322,26 @@ fn prepare(
     base: &Path,
     domain: &str,
     strict_domain: bool,
+    viewer: Option<&Viewer>,
 ) -> (Vec<Candidate>, Vec<ImportFailure>) {
     let mut candidates = Vec::new();
     let mut failed = Vec::new();
     for (source, text) in files {
         let path = relative_path(base, &source);
-        match text.and_then(|text| parse_file(&source, &text, domain, strict_domain)) {
+        match text.and_then(|text| parse_file(&source, &text, domain)) {
+            Ok(input) if strict_domain && input.domain != domain => {
+                let reason = format!(
+                    "declares domain {:?}, but the import is for domain {domain:?}",
+                    input.domain
+                );
+                let hidden = !listed(viewer, Some(&input));
+                failed.push(ImportFailure::new(path, reason, hidden));
+            }
             Ok(input) => candidates.push(Candidate { path, input }),
-            Err(error) => failed.push(ImportFailure {
-                path,
-                reason: format!("{error:#}"),
-            }),
+            Err(error) => {
+                let hidden = !listed(viewer, None);
+                failed.push(ImportFailure::new(path, format!("{error:#}"), hidden));
+            }
         }
     }
     let mut paths_by_id: HashMap<Uuid, Vec<String>> = HashMap::new();
@@ -309,20 +371,15 @@ fn prepare(
             candidate.input.domain,
             others.join(", ")
         );
-        failed.push(candidate.fail(reason));
+        failed.push(candidate.fail(reason, viewer));
     }
     unique.sort_by(|a, b| (&a.input.domain, &a.input.key).cmp(&(&b.input.domain, &b.input.key)));
     (unique, failed)
 }
 
 /// One file's note. Its provenance is its real location, never its frontmatter.
-fn parse_file(source: &str, text: &str, domain: &str, strict_domain: bool) -> Result<NoteInput> {
+fn parse_file(source: &str, text: &str, domain: &str) -> Result<NoteInput> {
     let mut input = markdown::parse_markdown(text, source, domain)?;
-    ensure!(
-        !strict_domain || input.domain == domain,
-        "declares domain {:?}, but the import is for domain {domain:?}",
-        input.domain
-    );
     input.source = Some(source.to_owned());
     input.validate()?;
     Ok(input)
@@ -350,6 +407,8 @@ fn too_long_reason(input: &NoteInput) -> String {
 /// The error for an import in which every file failed.
 fn nothing_imported(mut failed: Vec<ImportFailure>) -> anyhow::Error {
     failed.sort_by(|a, b| a.path.cmp(&b.path));
+    let hidden = failed.iter().filter(|f| f.hidden).count();
+    failed.retain(|f| !f.hidden);
     let mut listed: Vec<String> = failed
         .iter()
         .take(LISTED_FAILURES)
@@ -357,6 +416,11 @@ fn nothing_imported(mut failed: Vec<ImportFailure>) -> anyhow::Error {
         .collect();
     if failed.len() > LISTED_FAILURES {
         listed.push(format!("and {} more", failed.len() - LISTED_FAILURES));
+    }
+    if hidden > 0 {
+        listed.push(format!(
+            "and {hidden} more of notes this session may not see"
+        ));
     }
     UserError::InvalidArgument(format!(
         "nothing was imported; every file failed. {}",
@@ -506,7 +570,7 @@ mod tests {
                 )),
             ),
         ];
-        let (candidates, failed) = prepare(files, Path::new("/notes"), "local", true);
+        let (candidates, failed) = prepare(files, Path::new("/notes"), "local", true, None);
         assert_eq!(
             candidates
                 .iter()
@@ -540,6 +604,58 @@ mod tests {
     }
 
     #[test]
+    fn a_vault_session_hears_only_about_its_own_notes() {
+        use crate::access::Principal;
+        use crate::vault::{Session, Vaults};
+        let vaults = std::sync::Arc::new(
+            Vaults::parse(
+                "[[vault]]\nname = \"a\"\ndomains = [\"a\"]\nproviders = [\"anthropic\"]\ndefault_domain = \"a\"\n[[vault]]\nname = \"b\"\ndomains = [\"b\"]\nproviders = [\"anthropic\"]\ndefault_domain = \"b\"\n",
+                Path::new("/cfg/vaults.toml"),
+                None,
+            )
+            .unwrap(),
+        );
+        let principal = Principal::new("p", "read", "*")
+            .unwrap()
+            .with_vault(Some("anthropic"), Some("a"))
+            .unwrap();
+        let viewer = Viewer::new(
+            &principal,
+            &Session::for_principal(Some(&vaults), &principal),
+        );
+        let files = || {
+            let locked = "---\nkey: secret\ndomain: a\nlock: [local]\n---\nBody.\n";
+            vec![
+                file("/notes/a1.md", "---\nkey: twin\ndomain: a\n---\nBody.\n"),
+                file("/notes/a2.md", "---\nkey: twin\ndomain: a\n---\nBody.\n"),
+                file("/notes/s1.md", locked),
+                file("/notes/s2.md", locked),
+                file("/notes/theirs.md", "---\nkey: t\ndomain: b\n---\nBody.\n"),
+                file("/notes/broken.md", "---\nkey: [x\n---\nBody.\n"),
+            ]
+        };
+        let (_, failed) = prepare(files(), Path::new("/notes"), "a", true, Some(&viewer));
+        let shown: Vec<&str> = failed
+            .iter()
+            .filter(|f| !f.hidden)
+            .map(|f| f.path.as_str())
+            .collect();
+        assert_eq!(shown, ["a1.md", "a2.md"]);
+        assert_eq!(failed.iter().filter(|f| f.hidden).count(), 4);
+        let message = nothing_imported(failed).to_string();
+        assert!(
+            message.contains("and 4 more of notes this session may not see"),
+            "{message}"
+        );
+        assert!(
+            !message.contains("theirs") && !message.contains("s1.md"),
+            "{message}"
+        );
+        let (_, everything) = prepare(files(), Path::new("/notes"), "a", true, None);
+        assert!(everything.iter().all(|f| !f.hidden) && everything.len() == 6);
+    }
+
+    #[test]
     fn a_plain_ingest_accepts_frontmatter_domains_and_sorts_notes() {
         let files = vec![
             file("/notes/z.md", &note("zeta")),
@@ -549,7 +665,7 @@ mod tests {
             ),
             file("/notes/a.md", &note("alpha")),
         ];
-        let (candidates, failed) = prepare(files, Path::new("/notes"), "local", false);
+        let (candidates, failed) = prepare(files, Path::new("/notes"), "local", false, None);
         assert!(failed.is_empty(), "{failed:?}");
         let order: Vec<_> = candidates
             .iter()
@@ -573,10 +689,7 @@ mod tests {
     fn an_import_where_every_file_failed_is_an_invalid_argument() {
         let failed: Vec<ImportFailure> = (0..25)
             .rev()
-            .map(|i| ImportFailure {
-                path: format!("note-{i:02}.md"),
-                reason: "broken".into(),
-            })
+            .map(|i| ImportFailure::new(format!("note-{i:02}.md"), "broken".into(), false))
             .collect();
         let error = nothing_imported(failed);
         let message = error.to_string();

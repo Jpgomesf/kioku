@@ -413,6 +413,14 @@ impl MemoryServer {
             lock: previous.map(|p| p.lock.clone()).unwrap_or_default(),
         };
         let outcome = self.app.upsert(input, WriteOrigin::Tool).await?;
+        // The domain's other notes may be locked to other providers, so a
+        // vault session hears only about this note's own links.
+        let own_links_only = self.caller().viewer.restricts_notes();
+        let unresolved: Vec<_> = outcome
+            .unresolved_relationships
+            .iter()
+            .filter(|u| !own_links_only || u.source == outcome.id)
+            .collect();
         let mut out = json!({
             "key": outcome.key,
             "domain": outcome.domain,
@@ -421,10 +429,9 @@ impl MemoryServer {
             "revision": outcome.revision,
             "indexed": outcome.indexed,
         });
-        if !outcome.unresolved_relationships.is_empty() {
+        if !unresolved.is_empty() {
             out["unresolved_related"] = json!(
-                outcome
-                    .unresolved_relationships
+                unresolved
                     .iter()
                     .map(|u| json!({"ref": u.reference, "reason": u.reason}))
                     .collect::<Vec<_>>()
