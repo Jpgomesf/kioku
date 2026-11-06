@@ -4,9 +4,9 @@ import {
   type CommandError,
   type Finding,
   getNote,
+  kindLabel,
   listReflectRuns,
   type Note,
-  type NoteKind,
   type ReflectRun,
   toCommandError,
 } from "../../api";
@@ -33,19 +33,6 @@ type Load =
   | { state: "loading" }
   | { state: "error"; error: CommandError }
   | { state: "ready"; note: Note; findings: NoteFinding[] };
-
-const KIND_LABEL: Record<NoteKind, string> = {
-  decision: "Decision",
-  question: "Question",
-  item: "Item",
-  fix: "Fix",
-  convention: "Convention",
-  preference: "Preference",
-  note: "Note",
-  topic: "Topic",
-  ticket: "Ticket",
-  "pull-request": "Pull request",
-};
 
 const MAX_CALLOUTS = 2;
 const HISTORY_SHOWN = 5;
@@ -183,7 +170,7 @@ function NoteView({
       <article className="note-column">
         <header className="k-note-head">
           <p className="k-meta">
-            <span className="k-key">{note.key}</span> · {KIND_LABEL[note.kind]},{" "}
+            <span className="k-key">{note.key}</span> · {kindLabel(note.kind)},{" "}
             {shortDate(note.updatedAt)}
           </p>
           <h1 id="note-title" tabIndex={-1} ref={titleRef}>

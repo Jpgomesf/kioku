@@ -155,15 +155,43 @@
   stroke: var(--fg);
   stroke-width: 1.5;
 }
-/* type-item is under 3:1 on light grounds; a darker outline keeps tickets and PRs legible. */
-.graph-dot-work {
-  stroke: color-mix(in srgb, var(--type-item) 55%, var(--fg));
+/* type-2 and type-3 are under 3:1 on light grounds; a darker outline keeps their dots legible. */
+.graph-dot.graph-dot-2 {
+  stroke: color-mix(in srgb, var(--type-2) 55%, var(--fg));
+}
+.graph-dot.graph-dot-3 {
+  stroke: color-mix(in srgb, var(--type-3) 55%, var(--fg));
 }
 .graph-ring {
   fill: none;
   stroke: var(--type-topic);
   stroke-width: 2;
   opacity: 0.7;
+}
+/* A type hovered in the legend: everything else steps back. */
+.graph-dot,
+.graph-ring,
+.graph-edge,
+.graph-edge-strong {
+  transition: opacity var(--duration-view) var(--ease-standard);
+}
+.graph-dot.graph-dim,
+.graph-ring.graph-dim,
+.graph-edge.graph-dim {
+  opacity: 0.12;
+}
+/* Cards and their lines are already full strength, so they step back less.
+   Cards set this inline, since their show and hide opacity is inline too. */
+.graph-edge-strong.graph-dim {
+  opacity: 0.35;
+}
+@media (prefers-reduced-motion: reduce) {
+  .graph-dot,
+  .graph-ring,
+  .graph-edge,
+  .graph-edge-strong {
+    transition: none;
+  }
 }
 
 .graph-topic-label,

@@ -8,7 +8,7 @@ use kioku::model::{Edge, Note, NoteInput, NoteRevision, Status};
 use uuid::Uuid;
 
 use crate::commands::notes::{
-    Link, NoteKind, NoteOrigin, NoteQuery, NoteStatus, NoteSummary, Revision, StatusFilter,
+    Link, NoteOrigin, NoteQuery, NoteStatus, NoteSummary, Revision, StatusFilter,
 };
 use crate::error::{CommandError, CommandResult};
 
@@ -20,34 +20,54 @@ pub fn timestamp(at: DateTime<Utc>) -> String {
     at.to_rfc3339_opts(SecondsFormat::Secs, true)
 }
 
-/// A note's kind. An explicit `kind:` or `type:` tag wins; otherwise the
-/// last tag that names a kind, which is where kioku's OKF import puts the
-/// concept's type. Untagged notes are plain notes.
-pub fn kind_of(tags: &[String]) -> NoteKind {
-    let folded: Vec<String> = tags.iter().map(|t| t.trim().to_ascii_lowercase()).collect();
-    let explicit = folded.iter().find_map(|tag| {
-        tag.strip_prefix("kind:")
-            .or_else(|| tag.strip_prefix("type:"))
-            .and_then(kind_named)
+/// Type words a tag names on its own, in priority order. Exact matches only:
+/// a synonym such as `adr` or `pr` is a type only through a `kind:` tag.
+const KNOWN_TYPES: [&str; 12] = [
+    "decision",
+    "question",
+    "fix",
+    "gotcha",
+    "convention",
+    "preference",
+    "topic",
+    "item",
+    "issue",
+    "ticket",
+    "pull-request",
+    "todo",
+];
+
+/// What a note is called when nothing names its type.
+pub const UNTYPED: &str = "note";
+
+/// A note's type id. An explicit `kind:` or `type:` tag wins, then the type
+/// an OKF import gave it, then the first known type word among its tags.
+/// Runs once per listed note, so it allocates only the answer.
+pub fn kind_of(input: &NoteInput) -> String {
+    let explicit = input.tags.iter().find_map(|tag| {
+        let tag = tag.trim();
+        let (prefix, rest) = tag.split_at_checked(5)?;
+        // Check the prefix first, so untyped tags allocate nothing.
+        if !(prefix.eq_ignore_ascii_case("kind:") || prefix.eq_ignore_ascii_case("type:")) {
+            return None;
+        }
+        let kind = kioku::okf::type_tag(rest);
+        (!kind.is_empty()).then_some(kind)
     });
     explicit
-        .or_else(|| folded.iter().rev().find_map(|tag| kind_named(tag)))
-        .unwrap_or(NoteKind::Note)
-}
-
-fn kind_named(name: &str) -> Option<NoteKind> {
-    Some(match name {
-        "decision" | "adr" => NoteKind::Decision,
-        "question" => NoteKind::Question,
-        "item" | "todo" => NoteKind::Item,
-        "fix" | "bugfix" => NoteKind::Fix,
-        "convention" => NoteKind::Convention,
-        "preference" => NoteKind::Preference,
-        "topic" => NoteKind::Topic,
-        "ticket" | "issue" => NoteKind::Ticket,
-        "pull-request" | "pr" => NoteKind::PullRequest,
-        _ => return None,
-    })
+        .or_else(|| kioku::okf::imported_type(input))
+        .or_else(|| {
+            KNOWN_TYPES
+                .iter()
+                .find(|known| {
+                    input
+                        .tags
+                        .iter()
+                        .any(|tag| tag.trim().eq_ignore_ascii_case(known))
+                })
+                .map(|known| (*known).to_owned())
+        })
+        .unwrap_or_else(|| UNTYPED.to_owned())
 }
 
 pub fn status_of(status: Status) -> NoteStatus {
@@ -91,7 +111,7 @@ pub fn summary(note: &Note, link_count: u32, notes_root: Option<&Path>) -> NoteS
         key: input.key.clone(),
         domain: input.domain.clone(),
         title: input.title.clone(),
-        kind: kind_of(&input.tags),
+        kind: kind_of(input),
         status: status_of(note.status),
         origin: origin_of(input),
         tags: input.tags.clone(),
@@ -117,7 +137,7 @@ pub fn parse_since(text: &str) -> CommandResult<DateTime<Utc>> {
 
 /// The parsed parts of a [`NoteQuery`].
 pub struct NoteFilter {
-    kinds: Option<Vec<NoteKind>>,
+    kinds: Option<Vec<String>>,
     status: StatusFilter,
     origin: Option<NoteOrigin>,
     since: Option<DateTime<Utc>>,
@@ -168,7 +188,7 @@ impl NoteFilter {
             && self
                 .kinds
                 .as_ref()
-                .is_none_or(|kinds| kinds.contains(&kind_of(&input.tags)))
+                .is_none_or(|kinds| kinds.contains(&kind_of(input)))
             && self.origin.is_none_or(|origin| origin == origin_of(input))
             && self.since.is_none_or(|since| note.updated_at >= since)
             && self.text.as_ref().is_none_or(|text| {
@@ -273,29 +293,59 @@ pub(crate) mod tests {
         }
     }
 
+    fn kind(tags: &[&str], body: &str) -> String {
+        let mut n = note("demo", "k", tags, None);
+        n.input.body = body.into();
+        kind_of(&n.input)
+    }
+
     #[test]
-    fn kinds_come_from_tags() {
+    fn an_explicit_kind_tag_wins() {
         assert_eq!(
-            kind_of(&["rust".into(), "decision".into()]),
-            NoteKind::Decision
+            kind(&["decision", "Kind:Design Review"], ""),
+            "design-review"
         );
-        assert_eq!(kind_of(&["Type:PR".into()]), NoteKind::PullRequest);
-        assert_eq!(kind_of(&["rust".into()]), NoteKind::Note);
+        assert_eq!(kind(&["TYPE:PR"], ""), "pr");
+        // An explicit tag beats the imported type too.
         assert_eq!(
-            kind_of(&["fix".into(), "decision".into()]),
-            NoteKind::Decision
+            kind(&["runbook", "kind:fix"], "Runbook · unverified"),
+            "fix"
         );
+        // An empty one names nothing.
+        assert_eq!(kind(&["kind: - ", "fix"], ""), "fix");
+    }
+
+    #[test]
+    fn the_imported_type_comes_next() {
+        // The import writes the producer id as the first alias.
+        let mut n = note("demo", "k", &["decision", "design-review"], None);
+        n.input.body = "Design Review DR-1 · unverified\nText.".into();
+        n.input.aliases = vec!["DR-1".into()];
+        assert_eq!(kind_of(&n.input), "design-review");
+        // Without a trust label the line is not an import's facts line.
         assert_eq!(
-            kind_of(&["kind:fix".into(), "decision".into()]),
-            NoteKind::Fix
+            kind(&["design-review", "fix"], "Design Review · notes"),
+            "fix"
         );
+    }
+
+    #[test]
+    fn then_the_first_known_type_word_by_priority() {
+        assert_eq!(kind(&["rust", "fix", "Decision"], ""), "decision");
+        assert_eq!(kind(&["todo", "gotcha"], ""), "gotcha");
+        assert_eq!(kind(&["pull-request"], ""), "pull-request");
+        // No synonym merging.
+        for tag in ["adr", "bugfix", "pr"] {
+            assert_eq!(kind(&[tag], ""), UNTYPED);
+        }
+        assert_eq!(kind(&[], ""), "note");
     }
 
     #[test]
     fn summary_maps_origin_source_and_time() -> Result<(), serde_json::Error> {
         let n = note("personal/kioku", "k", &["fix"], Some("/notes/kioku/k.md"));
         let s = summary(&n, 3, Some(Path::new("/notes")));
-        assert_eq!(s.kind, NoteKind::Fix);
+        assert_eq!(s.kind, "fix");
         assert_eq!(s.origin, NoteOrigin::File);
         assert_eq!(s.source.as_deref(), Some("kioku/k.md"));
         let json = serde_json::to_value(&s)?;
@@ -319,6 +369,8 @@ pub(crate) mod tests {
         assert!(query(r#"{"domain":"demo","text":"TOKIO"}"#)?.keeps(&n));
         assert!(!query(r#"{"domain":"demo","text":"qdrant"}"#)?.keeps(&n));
         assert!(!query(r#"{"domain":"demo","kinds":["fix"]}"#)?.keeps(&n));
+        assert!(query(r#"{"domain":"demo","kinds":["runbook","decision"]}"#)?.keeps(&n));
+        assert!(!query(r#"{"domain":"demo","kinds":["Decision"]}"#)?.keeps(&n));
         assert!(query(r#"{"domain":"demo","origin":"agent"}"#)?.keeps(&n));
         assert!(!query(r#"{"domain":"demo","status":"legacy"}"#)?.keeps(&n));
         assert!(query(r#"{"domain":"demo","since":"2026-10-31"}"#)?.keeps(&n));

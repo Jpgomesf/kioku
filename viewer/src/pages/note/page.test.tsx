@@ -6,7 +6,7 @@ import { latestFindings, NotePage } from "./index";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-const control = vi.hoisted(() => ({ failNext: 0 }));
+const control = vi.hoisted(() => ({ failNext: 0, kind: null as string | null }));
 
 vi.mock("../../api", async (importOriginal) => {
   const real = await importOriginal<typeof import("../../api")>();
@@ -17,7 +17,9 @@ vi.mock("../../api", async (importOriginal) => {
         control.failNext -= 1;
         return Promise.reject({ code: "internal", message: "Store is busy." });
       }
-      return real.getNote(domain, key);
+      return real
+        .getNote(domain, key)
+        .then((n) => (control.kind ? { ...n, kind: control.kind } : n));
     },
   };
 });
@@ -42,6 +44,7 @@ async function settle(): Promise<void> {
 
 afterEach(() => {
   control.failNext = 0;
+  control.kind = null;
   for (const { root, container } of mounted.splice(0)) {
     act(() => root.unmount());
     container.remove();
@@ -57,6 +60,13 @@ describe("NotePage", () => {
       c.querySelector('a[href="#/graph?domain=personal%2Fkioku&focus=memory-stack"]'),
     ).not.toBeNull();
     expect(c.querySelector(".k-pill-unverified")).toBeNull();
+  });
+
+  it("labels the note's type in words", async () => {
+    control.kind = "design-review";
+    const c = await renderPage("personal/kioku", "memory-stack");
+    expect(c.textContent).toContain("Design review");
+    expect(c.textContent).not.toContain("design-review");
   });
 
   it("shows an empty state for an unknown key", async () => {

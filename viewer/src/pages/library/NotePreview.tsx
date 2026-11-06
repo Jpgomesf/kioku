@@ -5,6 +5,7 @@ import {
   type CommandError,
   type Finding,
   getNote,
+  kindLabel,
   type Note,
   type NoteSummary,
   toCommandError,
@@ -98,7 +99,7 @@ export function NotePreview({
           {findings.some((f) => f.state === "unverified") ? (
             <StatusPill tone="unverified">unverified</StatusPill>
           ) : null}
-          <span className="k-fact">{summary.kind}</span>
+          <span className="k-fact">{kindLabel(summary.kind)}</span>
           <span className="k-fact">{originText(summary.origin, summary.source)}</span>
         </div>
         <h2 id="library-note-title">

@@ -1,16 +1,12 @@
 // Vaults, areas and notes. Serde twins live in src-tauri/src/commands/{areas,notes}.rs.
 
-export type NoteKind =
-  | "decision"
-  | "question"
-  | "item"
-  | "fix"
-  | "convention"
-  | "preference"
-  | "note"
-  | "topic"
-  | "ticket"
-  | "pull-request";
+/**
+ * A note's type as a lowercase id, such as "decision" or "design-review". Open-ended: it comes
+ * from the note's source (an explicit kind: tag, a knowledge base's own type, or a type word
+ * among an agent note's tags), and is "note" when nothing names one. The Rust side derives it
+ * in src-tauri/src/data/notes.rs (kind_of); labels, plurals and counts come from ./kinds.
+ */
+export type NoteKind = string;
 export type NoteStatus = "active" | "legacy" | "draft";
 export type NoteOrigin = "file" | "agent";
 

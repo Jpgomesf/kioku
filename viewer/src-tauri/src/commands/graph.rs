@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::notes::{NoteKind, NoteStatus};
+use super::notes::NoteStatus;
 use std::collections::{HashMap, HashSet};
 
 use kioku::model::{Edge, Note};
@@ -19,7 +19,7 @@ pub struct GraphNode {
     pub key: String,
     pub domain: String,
     pub title: String,
-    pub kind: NoteKind,
+    pub kind: String,
     pub status: NoteStatus,
     pub degree: u32,
 }
@@ -108,7 +108,7 @@ pub(crate) fn build_graph(
             key: n.input.key.clone(),
             domain: n.input.domain.clone(),
             title: n.input.title.clone(),
-            kind: notes::kind_of(&n.input.tags),
+            kind: notes::kind_of(&n.input),
             status: notes::status_of(n.status),
             degree: degree.get(&n.id).copied().unwrap_or(0),
         })

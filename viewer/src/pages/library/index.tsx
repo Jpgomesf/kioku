@@ -13,6 +13,8 @@ import {
   type Area,
   type CommandError,
   type Finding,
+  kindCounts,
+  kindLabelPlural,
   listAreas,
   listNotes,
   listReflectRuns,
@@ -44,11 +46,13 @@ import {
   filtersFromParams,
   footText,
   formatDate,
-  KIND_CHIPS,
+  inStatus,
+  kindChips,
   type LibraryFilters,
   MAX_NOTE_LIST,
   MAX_SEARCH,
   matchedByText,
+  matchesFilters,
   moveIndex,
   type OriginFilter,
   paramsFromFilters,
@@ -229,6 +233,35 @@ export function LibraryPage({ params }: LibraryPageProps) {
   }, [findings]);
 
   const allNotes = notes.state === "ready" ? notes.value : null;
+  // Over the notes in the chosen status, not the filtered list: the chips stay put as the other
+  // filters change, and a draft or legacy note doesn't add a count the list then hides.
+  const areaKinds = useMemo(
+    () => (allNotes ? kindCounts(allNotes.filter((n) => inStatus(n, filters.status))) : null),
+    [allNotes, filters.status],
+  );
+  // Tied to the area, so switching areas starts collapsed again.
+  const [expandedFor, setExpandedFor] = useState<string | null>(null);
+  const typesExpanded = expandedFor === domain;
+  const typeChips = kindChips(areaKinds, filters.kinds, typesExpanded);
+  const moreRef = useRef<HTMLButtonElement>(null);
+  const filtersRef = useRef<HTMLFieldSetElement>(null);
+  const refocusChips = useRef(false);
+
+  // A cleared chip that showed only because it was selected unmounts with focus on it; move
+  // focus to a button that stays so the next Tab doesn't restart at the sidebar.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: run once the new kinds render.
+  useEffect(() => {
+    if (!refocusChips.current) return;
+    refocusChips.current = false;
+    (moreRef.current ?? filtersRef.current?.querySelector<HTMLButtonElement>(".k-chip"))?.focus();
+  }, [filters.kinds]);
+
+  const onKindToggle = (kind: string) => {
+    const kinds = toggleKind(filters.kinds, kind);
+    const next = kindChips(areaKinds, kinds, typesExpanded);
+    refocusChips.current = !next.chips.some((c) => c.kind === kind);
+    update({ kinds });
+  };
   const notesByKey = useMemo(() => new Map((allNotes ?? []).map((n) => [n.key, n])), [allNotes]);
   const listed = useMemo(
     () => (allNotes ? filterAndSort(allNotes, filters) : []),
@@ -293,12 +326,13 @@ export function LibraryPage({ params }: LibraryPageProps) {
   const { label, vault } = areaLabel(domain, area);
   const sinceDate = lastVisit ? lastVisit.slice(0, 10) : sevenDaysAgo();
   const counts = countsLine(allNotes, area);
+  // Only when legacy notes are what the other filters would show, so a type whose notes are
+  // all legacy leads to "Show legacy notes" rather than "Clear filters".
   const legacyHidden =
     !draft.trim() &&
     filters.status === "active" &&
-    filters.kinds.length === 0 &&
-    filters.origin === "any" &&
-    filters.since === null;
+    rows.length === 0 &&
+    (allNotes ?? []).some((n) => matchesFilters(n, { ...filters, status: "legacy" }));
 
   return (
     <section className="page-panes library" aria-labelledby="library-title">
@@ -340,7 +374,7 @@ export function LibraryPage({ params }: LibraryPageProps) {
           }
         />
 
-        <fieldset className="k-chips library-filters">
+        <fieldset ref={filtersRef} className="k-chips library-filters">
           <legend className="k-sr">Filters</legend>
           <Chip
             pressed={filters.since !== null}
@@ -366,15 +400,32 @@ export function LibraryPage({ params }: LibraryPageProps) {
               Mark as reviewed
             </button>
           ) : null}
-          {KIND_CHIPS.map((c) => (
+          {typeChips.chips.map((c) => (
             <Chip
               key={c.kind}
               pressed={filters.kinds.includes(c.kind)}
-              onToggle={() => update({ kinds: toggleKind(filters.kinds, c.kind) })}
+              onToggle={() => onKindToggle(c.kind)}
             >
-              {c.label}
+              {kindLabelPlural(c.kind)}
+              {c.count === null ? null : (
+                <>
+                  {" "}
+                  <span className="library-chip-count">{c.count}</span>
+                </>
+              )}
             </Chip>
           ))}
+          {typeChips.overflow > 0 ? (
+            <button
+              ref={moreRef}
+              type="button"
+              className="k-btn k-btn-quiet k-btn-sm"
+              aria-expanded={typesExpanded}
+              onClick={() => setExpandedFor(typesExpanded ? null : domain)}
+            >
+              {typesExpanded ? "Fewer types" : `More types (${typeChips.hidden})`}
+            </button>
+          ) : null}
           {ORIGIN_CHIPS.map((c) => (
             <Chip
               key={c.origin}

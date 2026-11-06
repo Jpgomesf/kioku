@@ -1,29 +1,41 @@
 // The selected note: what it is and every link it has, recorded or suggested by reflect.
 
 import { useMemo } from "react";
-import type { GraphData, GraphNode } from "../../api";
+import { type GraphData, type GraphNode, kindLabel } from "../../api";
 import { noteHref } from "../../app/router";
 import { Button, FindingCallout, IconButton, StatusPill } from "../../components/ui";
-import { KIND_LABEL, type Neighbour, neighboursOf, sentence, typeColour } from "./model";
+import { type ColourSlots, colourFor } from "./colours";
+import { type Neighbour, neighboursOf, sentence } from "./model";
 
 export interface InspectorProps {
   node: GraphNode;
   data: GraphData;
+  slots: ColourSlots;
   onFocus: (key: string) => void;
   onAround: () => void;
   onClose: () => void;
 }
 
-function LinkRow({ n, onFocus }: { n: Neighbour; onFocus: (key: string) => void }) {
+function LinkRow({
+  n,
+  slots,
+  onFocus,
+}: {
+  n: Neighbour;
+  slots: ColourSlots;
+  onFocus: (key: string) => void;
+}) {
   return (
     <li>
       <button type="button" className="graph-link" onClick={() => onFocus(n.node.key)}>
         <span className="graph-link-head">
-          <span className="graph-kind-dot" style={{ background: typeColour(n.node.kind) }} />
+          <span className="graph-kind-dot" style={{ background: colourFor(slots, n.node.kind) }} />
           <span className="graph-link-rel">
             {n.outgoing ? sentence(n.edge.relation) : "Linked from"}
           </span>
-          <span className="k-mono">{n.node.key}</span>
+          <span>
+            <span className="k-mono">{n.node.key}</span> · {kindLabel(n.node.kind)}
+          </span>
         </span>
         <span className="graph-link-title">{n.node.title}</span>
       </button>
@@ -31,8 +43,8 @@ function LinkRow({ n, onFocus }: { n: Neighbour; onFocus: (key: string) => void 
   );
 }
 
-export function Inspector({ node, data, onFocus, onAround, onClose }: InspectorProps) {
-  const links = useMemo(() => neighboursOf(data, node.key), [data, node.key]);
+export function Inspector({ node, data, slots, onFocus, onAround, onClose }: InspectorProps) {
+  const links = useMemo(() => neighboursOf(data, node.key, slots), [data, node.key, slots]);
   const recorded = links.filter((l) => !l.edge.suggested);
   const suggested = links.filter((l) => l.edge.suggested);
   return (
@@ -45,7 +57,7 @@ export function Inspector({ node, data, onFocus, onAround, onClose }: InspectorP
       </div>
       <p className="graph-inspector-meta">
         <span className="k-mono">{node.key}</span>
-        <span>{KIND_LABEL[node.kind]}</span>
+        <span>{kindLabel(node.kind)}</span>
         <StatusPill tone={node.status}>{node.status}</StatusPill>
       </p>
       <p className="graph-inspector-title">{node.title}</p>
@@ -75,7 +87,7 @@ export function Inspector({ node, data, onFocus, onAround, onClose }: InspectorP
       ) : (
         <ul className="graph-links">
           {recorded.map((n) => (
-            <LinkRow key={n.node.key} n={n} onFocus={onFocus} />
+            <LinkRow key={n.node.key} n={n} slots={slots} onFocus={onFocus} />
           ))}
         </ul>
       )}
@@ -84,7 +96,7 @@ export function Inspector({ node, data, onFocus, onAround, onClose }: InspectorP
           <h3 className="k-list-title">Suggested by reflect</h3>
           <ul className="graph-links graph-links-suggested">
             {suggested.map((n) => (
-              <LinkRow key={n.node.key} n={n} onFocus={onFocus} />
+              <LinkRow key={n.node.key} n={n} slots={slots} onFocus={onFocus} />
             ))}
           </ul>
         </>

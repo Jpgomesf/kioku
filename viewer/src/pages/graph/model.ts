@@ -1,102 +1,41 @@
-// What the graph shows: type groups and their toggles, and the cards around a focus note,
-// with busy kinds folded into "N more decisions" groups.
-import type { GraphData, GraphEdge, GraphNode, NoteKind } from "../../api";
+// What the graph shows: the type filters, and the cards around a focus note, with busy
+// types folded into "N more decisions" groups.
+import {
+  type GraphData,
+  type GraphEdge,
+  type GraphNode,
+  kindLabel,
+  type NoteKind,
+  TOPIC_KIND,
+} from "../../api";
+import { type ColourSlots, DEFAULT_SLOTS, slotOf } from "./colours";
 import type { Point } from "./layout";
 
-export type TypeGroup = "decision" | "question" | "ticket" | "pull-request" | "topic" | "other";
-
-export function typeGroup(kind: NoteKind): TypeGroup {
-  switch (kind) {
-    case "decision":
-      return "decision";
-    case "question":
-      return "question";
-    case "item":
-    case "ticket":
-      return "ticket";
-    case "pull-request":
-      return "pull-request";
-    case "topic":
-      return "topic";
-    default:
-      return "other";
-  }
-}
-
-/** CSS colour for a dot or swatch; text never takes these. */
-export function typeColour(kind: NoteKind): string {
-  switch (typeGroup(kind)) {
-    case "decision":
-      return "var(--type-decision)";
-    case "question":
-      return "var(--type-question)";
-    case "ticket":
-    case "pull-request":
-      return "var(--type-item)";
-    case "topic":
-      return "var(--type-topic)";
-    default:
-      return "var(--type-other)";
-  }
-}
-
-export const KIND_LABEL: Record<NoteKind, string> = {
-  decision: "Decision",
-  question: "Question",
-  item: "Item",
-  fix: "Fix",
-  convention: "Convention",
-  preference: "Preference",
-  note: "Note",
-  topic: "Topic",
-  ticket: "Ticket",
-  "pull-request": "Pull request",
-};
-
-const PLURAL: Record<NoteKind, string> = {
-  decision: "decisions",
-  question: "questions",
-  item: "items",
-  fix: "fixes",
-  convention: "conventions",
-  preference: "preferences",
-  note: "notes",
-  topic: "topics",
-  ticket: "tickets",
-  "pull-request": "pull requests",
-};
-
-export function plural(kind: NoteKind, count: number): string {
-  return count === 1 ? KIND_LABEL[kind].toLowerCase() : PLURAL[kind];
-}
-
 export interface Filters {
-  decision: boolean;
-  question: boolean;
-  ticket: boolean;
-  "pull-request": boolean;
-  topic: boolean;
-  other: boolean;
+  /** Types the viewer turned off; empty shows every type. */
+  hidden: ReadonlySet<NoteKind>;
   suggested: boolean;
   topicLabels: boolean;
   legacy: boolean;
 }
 
 export const DEFAULT_FILTERS: Filters = {
-  decision: true,
-  question: true,
-  ticket: true,
-  "pull-request": true,
-  topic: true,
-  other: false,
+  hidden: new Set(),
   suggested: true,
   topicLabels: true,
   legacy: true,
 };
 
 export function isVisible(node: GraphNode, f: Filters): boolean {
-  if (!f[typeGroup(node.kind)]) return false;
+  if (f.hidden.has(node.kind)) return false;
   return f.legacy || node.status !== "legacy";
+}
+
+/** Hides a shown type or shows a hidden one. */
+export function toggleHidden(f: Filters, kind: NoteKind): Filters {
+  const hidden = new Set(f.hidden);
+  if (!hidden.delete(kind)) hidden.add(kind);
+  return { ...f, hidden };
 }
 
 export interface Neighbour {
@@ -106,7 +45,12 @@ export interface Neighbour {
   outgoing: boolean;
 }
 
-export function neighboursOf(data: GraphData, focus: string): Neighbour[] {
+/** Coloured types first in slot order, then the rest by label, then by title. */
+export function neighboursOf(
+  data: GraphData,
+  focus: string,
+  slots: ColourSlots = DEFAULT_SLOTS,
+): Neighbour[] {
   const byKey = new Map(data.nodes.map((n) => [n.key, n]));
   const seen = new Set<string>();
   const out: Neighbour[] = [];
@@ -119,11 +63,17 @@ export function neighboursOf(data: GraphData, focus: string): Neighbour[] {
     seen.add(other);
     out.push({ node, edge, outgoing });
   }
-  const order: TypeGroup[] = ["decision", "question", "ticket", "pull-request", "other", "topic"];
+  const rank = (kind: NoteKind) => {
+    const slot = slotOf(slots, kind);
+    return slot < 0 ? slots.length : slot;
+  };
   return out.sort(
     (a, b) =>
-      order.indexOf(typeGroup(a.node.kind)) - order.indexOf(typeGroup(b.node.kind)) ||
+      rank(a.node.kind) - rank(b.node.kind) ||
+      kindLabel(a.node.kind).localeCompare(kindLabel(b.node.kind)) ||
+      // Recorded links first, so cards never fold them behind suggestions.
       Number(a.edge.suggested) - Number(b.edge.suggested) ||
+      a.node.title.localeCompare(b.node.title) ||
       a.node.key.localeCompare(b.node.key),
   );
 }
@@ -132,13 +82,18 @@ export function neighboursOf(data: GraphData, focus: string): Neighbour[] {
  * The notes within `hops` links of `focus` (1 or 2). A second-hop note carries the edge
  * from the first-hop note that reaches it.
  */
-export function neighboursWithin(data: GraphData, focus: string, hops: 1 | 2): Neighbour[] {
-  const first = neighboursOf(data, focus);
+export function neighboursWithin(
+  data: GraphData,
+  focus: string,
+  hops: 1 | 2,
+  slots: ColourSlots = DEFAULT_SLOTS,
+): Neighbour[] {
+  const first = neighboursOf(data, focus, slots);
   if (hops === 1) return first;
   const seen = new Set([focus, ...first.map((n) => n.node.key)]);
   const second: Neighbour[] = [];
   for (const near of first) {
-    for (const far of neighboursOf(data, near.node.key)) {
+    for (const far of neighboursOf(data, near.node.key, slots)) {
       if (seen.has(far.node.key)) continue;
       seen.add(far.node.key);
       second.push(far);
@@ -220,7 +175,7 @@ export function findNodes(nodes: GraphNode[], query: string, limit = 6): GraphNo
 
 /** Dot radius in world units, growing with the number of links. */
 export function dotRadius(node: GraphNode): number {
-  if (node.kind === "topic") return 9 + Math.min(Math.sqrt(node.degree) * 2, 14);
+  if (node.kind === TOPIC_KIND) return 9 + Math.min(Math.sqrt(node.degree) * 2, 14);
   return 2.2 + Math.min(Math.sqrt(node.degree) * 0.9, 5);
 }
 

@@ -11,21 +11,6 @@ use crate::state::AppState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum NoteKind {
-    Decision,
-    Question,
-    Item,
-    Fix,
-    Convention,
-    Preference,
-    Note,
-    Topic,
-    Ticket,
-    PullRequest,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
 pub enum NoteStatus {
     Active,
     Legacy,
@@ -55,7 +40,8 @@ pub struct NoteSummary {
     pub key: String,
     pub domain: String,
     pub title: String,
-    pub kind: NoteKind,
+    /// A lowercase type id such as `decision`, or `note` when nothing names one.
+    pub kind: String,
     pub status: NoteStatus,
     pub origin: NoteOrigin,
     pub tags: Vec<String>,
@@ -95,7 +81,8 @@ pub struct Note {
     pub domain: String,
     pub title: String,
     pub body: String,
-    pub kind: NoteKind,
+    /// A lowercase type id such as `decision`, or `note` when nothing names one.
+    pub kind: String,
     pub status: NoteStatus,
     pub origin: NoteOrigin,
     pub aliases: Vec<String>,
@@ -115,7 +102,7 @@ pub struct Note {
 pub struct NoteQuery {
     pub domain: String,
     #[serde(default)]
-    pub kinds: Option<Vec<NoteKind>>,
+    pub kinds: Option<Vec<String>>,
     #[serde(default)]
     pub status: Option<StatusFilter>,
     #[serde(default)]
@@ -217,7 +204,7 @@ pub async fn get_note(
         domain: input.domain.clone(),
         title: input.title.clone(),
         body: input.body.clone(),
-        kind: notes::kind_of(&input.tags),
+        kind: notes::kind_of(input),
         status: notes::status_of(note.status),
         origin,
         aliases: input.aliases.clone(),
@@ -240,9 +227,12 @@ mod tests {
     #[test]
     fn query_reads_camel_case_json() -> Result<(), serde_json::Error> {
         let q: NoteQuery = serde_json::from_str(
-            r#"{"domain":"demo","kinds":["decision"],"status":"all","limit":5}"#,
+            r#"{"domain":"demo","kinds":["decision","design-review"],"status":"all","limit":5}"#,
         )?;
-        assert_eq!(q.kinds, Some(vec![NoteKind::Decision]));
+        assert_eq!(
+            q.kinds,
+            Some(vec!["decision".to_owned(), "design-review".to_owned()])
+        );
         assert_eq!(q.status, Some(StatusFilter::All));
         Ok(())
     }
@@ -253,7 +243,7 @@ mod tests {
             key: "k".into(),
             domain: "demo".into(),
             title: "t".into(),
-            kind: NoteKind::Note,
+            kind: "design-review".into(),
             status: NoteStatus::Active,
             origin: NoteOrigin::File,
             tags: vec![],
@@ -266,10 +256,7 @@ mod tests {
         assert_eq!(json["linkCount"], 2);
         assert_eq!(json["updatedAt"], "2026-11-06");
         assert_eq!(json["findingCount"], 0);
-        assert_eq!(
-            serde_json::to_string(&NoteKind::PullRequest)?,
-            r#""pull-request""#
-        );
+        assert_eq!(json["kind"], "design-review");
         Ok(())
     }
 }

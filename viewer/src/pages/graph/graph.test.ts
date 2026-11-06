@@ -215,6 +215,19 @@ describe("neighbourhood cards", () => {
     expect(cardsFor(ns, new Set(["decision"]))).toHaveLength(7);
   });
 
+  it("keeps recorded links on cards ahead of suggested ones", () => {
+    const nodes = [node("f"), node("a"), node("b"), node("c"), node("d"), node("e")];
+    const edges = nodes.slice(1).map((n) => ({
+      source: "f",
+      target: n.key,
+      relation: "related",
+      suggested: n.key < "c",
+    }));
+    const cards = cardsFor(neighboursOf({ nodes, edges }, "f"), new Set());
+    const shown = cards.flatMap((c) => (c.type === "note" ? [c.neighbour.node.key] : []));
+    expect(shown).toEqual(["c", "d", "e"].slice(0, GROUP_AFTER - 1));
+  });
+
   it("gives every card its own slot", () => {
     const slots = cardSlots(12);
     const seen = new Set(slots.map((p) => `${p.x},${p.y}`));
@@ -228,5 +241,25 @@ describe("neighbourhood cards", () => {
       expect(Math.abs(p.y)).toBeLessThanOrEqual(view.height / 2);
     }
     expect(cardSlots(8, { width: 2000, height: 1200 })).toEqual(cardSlots(8));
+  });
+});
+
+describe("neighbour order", () => {
+  it("lists coloured types in slot order, then the rest by label, then by title", () => {
+    const nodes = [
+      node("f"),
+      node("r", "runbook"),
+      node("d2"),
+      node("q", "question"),
+      node("a", "document"),
+      node("d1"),
+    ];
+    const edges = nodes
+      .slice(1)
+      .map((n) => ({ source: "f", target: n.key, relation: "related", suggested: false }));
+    const keys = (slots: Parameters<typeof neighboursOf>[2]) =>
+      neighboursOf({ nodes, edges }, "f", slots).map((n) => n.node.key);
+    expect(keys(["decision", "question", null])).toEqual(["d1", "d2", "q", "a", "r"]);
+    expect(keys(["runbook", null, "decision"])).toEqual(["r", "d1", "d2", "a", "q"]);
   });
 });

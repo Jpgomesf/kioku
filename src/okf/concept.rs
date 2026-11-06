@@ -6,6 +6,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::markdown;
+use crate::model::NoteInput;
 use crate::text::truncate_chars;
 
 /// Frontmatter keys Kioku reads into fields of its own, so the facts line
@@ -50,17 +51,74 @@ pub(super) enum Trust {
     HumanReviewed { by: String, at: Option<String> },
 }
 
+// The words of each trust label. `imported_type` finds a facts line by them,
+// so they live in one place.
+const UNVERIFIED: &str = "unverified";
+const MACHINE_CONFIRMED: &str = "machine-confirmed";
+const HUMAN_REVIEWED_BY: &str = "human-reviewed by ";
+
 impl Trust {
-    fn label(&self) -> String {
+    pub(super) fn label(&self) -> String {
         match self {
-            Trust::Unverified => "unverified".into(),
-            Trust::MachineConfirmed => "machine-confirmed".into(),
+            Trust::Unverified => UNVERIFIED.into(),
+            Trust::MachineConfirmed => MACHINE_CONFIRMED.into(),
             Trust::HumanReviewed { by, at } => match at {
-                Some(at) => format!("human-reviewed by {by} on {}", day(at)),
-                None => format!("human-reviewed by {by}"),
+                Some(at) => format!("{HUMAN_REVIEWED_BY}{by} on {}", day(at)),
+                None => format!("{HUMAN_REVIEWED_BY}{by}"),
             },
         }
     }
+}
+
+/// Whether a facts-line segment is a label [`Trust::label`] writes.
+pub(super) fn is_trust_label(segment: &str) -> bool {
+    segment == UNVERIFIED || segment == MACHINE_CONFIRMED || segment.starts_with(HUMAN_REVIEWED_BY)
+}
+
+/// A type as a tag: lowercase alphanumeric runs joined by single hyphens,
+/// so `Design Review` becomes `design-review`.
+pub fn type_tag(kind: &str) -> String {
+    let mut tag = String::with_capacity(kind.len());
+    for c in kind.chars().flat_map(char::to_lowercase) {
+        if c.is_alphanumeric() {
+            tag.push(c);
+        } else if !tag.is_empty() && !tag.ends_with('-') {
+            tag.push('-');
+        }
+    }
+    if tag.ends_with('-') {
+        tag.pop();
+    }
+    tag
+}
+
+/// The type tag an OKF import gave a note, read back from its facts line
+/// (`<Type>[ <producer id>] · … · <trust> · …`), or `None` for notes the
+/// import did not write. The import writes the producer id as the first
+/// alias, or drops that alias when it equals the key, so the alias or the
+/// key gives the type's exact extent. A type the label limit cut from the
+/// tags is not found.
+pub fn imported_type(input: &NoteInput) -> Option<String> {
+    let line = input.body.lines().next()?;
+    let mut segments = line.split(" · ");
+    let named = segments.next()?;
+    if !segments.any(is_trust_label) {
+        return None;
+    }
+    let tagged = |kind: &str| {
+        let tag = type_tag(kind);
+        (!tag.is_empty() && input.tags.contains(&tag)).then_some(tag)
+    };
+    tagged(named).or_else(|| {
+        let alias = input.aliases.first().map(String::as_str);
+        [alias, Some(input.key.as_str())]
+            .into_iter()
+            .flatten()
+            .find_map(|label| {
+                let id = label.split('#').next()?;
+                tagged(named.strip_suffix(id)?.strip_suffix(' ')?)
+            })
+    })
 }
 
 #[derive(Clone, Debug)]
@@ -111,15 +169,7 @@ impl Concept {
 
     /// The tag naming the concept's type, such as `decision` or `pull-request`.
     pub fn kind_tag(&self) -> String {
-        let mut tag = String::new();
-        for c in self.kind.chars().flat_map(char::to_lowercase) {
-            if c.is_alphanumeric() {
-                tag.push(c);
-            } else if !tag.ends_with('-') {
-                tag.push('-');
-            }
-        }
-        tag.trim_matches('-').to_owned()
+        type_tag(&self.kind)
     }
 
     fn named_kind(&self) -> String {

@@ -1,5 +1,5 @@
 // What the palette lists for a query: notes from search, then commands. Pure, so it is tested.
-import type { MatchedBy, NoteKind, NoteSummary, SearchHit } from "../../api";
+import { kindLabel, type MatchedBy, type NoteSummary, type SearchHit } from "../../api";
 import { hasCommandKey } from "../../app/overlay";
 import { graphHref, libraryHref, noteHref } from "../../app/router";
 import { readLastVisit } from "../../pages/library/useLastVisit";
@@ -32,19 +32,6 @@ interface Command {
   icon: IconName;
   action: PaletteAction;
 }
-
-const KIND_LABEL: Record<NoteKind, string> = {
-  decision: "Decision",
-  question: "Question",
-  item: "Item",
-  fix: "Fix",
-  convention: "Convention",
-  preference: "Preference",
-  note: "Note",
-  topic: "Topic",
-  ticket: "Ticket",
-  "pull-request": "Pull request",
-};
 
 const MATCH_WORD: Record<Exclude<MatchedBy, "linked">, string> = {
   label: "name",
@@ -160,7 +147,7 @@ export function buildOptions({
         section: "Recent",
         code: note.key,
         label: note.title,
-        meta: KIND_LABEL[note.kind],
+        meta: kindLabel(note.kind),
         action: nav(noteHref(note.domain, note.key)),
         graphHref: graphHref(note.domain, note.key),
       }));
@@ -170,7 +157,7 @@ export function buildOptions({
         section: "Notes",
         code: hit.note.key,
         label: hit.note.title,
-        meta: `${KIND_LABEL[hit.note.kind]} · ${matchedByText(hit)}`,
+        meta: `${kindLabel(hit.note.kind)} · ${matchedByText(hit)}`,
         action: nav(noteHref(hit.note.domain, hit.note.key)),
         graphHref: graphHref(hit.note.domain, hit.note.key),
       }))

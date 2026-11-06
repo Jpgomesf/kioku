@@ -1,37 +1,19 @@
 // Pure filter, sort and formatting logic for the Library. No React, so it is easy to test.
 
-import type {
-  Area,
-  MatchedBy,
-  NoteKind,
-  NoteOrigin,
-  NoteStatus,
-  NoteSummary,
-  SearchHit,
+import {
+  type Area,
+  isKindId,
+  type KindCount,
+  kindNoun,
+  type MatchedBy,
+  type NoteKind,
+  type NoteOrigin,
+  type NoteStatus,
+  type NoteSummary,
+  type SearchHit,
 } from "../../api";
 import { formatDay, formatDayTime } from "../../app/dates";
 import type { LibraryParams } from "../../app/router";
-
-export const KIND_CHIPS: readonly { kind: NoteKind; label: string }[] = [
-  { kind: "decision", label: "Decisions" },
-  { kind: "question", label: "Questions" },
-  { kind: "fix", label: "Fixes" },
-  { kind: "convention", label: "Conventions" },
-  { kind: "item", label: "Items" },
-];
-
-const KINDS: readonly NoteKind[] = [
-  "decision",
-  "question",
-  "item",
-  "fix",
-  "convention",
-  "preference",
-  "note",
-  "topic",
-  "ticket",
-  "pull-request",
-];
 
 export type StatusFilter = NoteStatus | "all";
 export type OriginFilter = NoteOrigin | "any";
@@ -58,8 +40,37 @@ export { MAX_NOTE_LIST, MAX_SEARCH };
 const STATUS_ORDER: readonly StatusFilter[] = ["active", "legacy", "draft", "all"];
 const ORIGIN_ORDER: readonly OriginFilter[] = ["any", "file", "agent"];
 
-function isKind(value: string): value is NoteKind {
-  return (KINDS as readonly string[]).includes(value);
+/** Chips shown before "More types": the most common types, plus any selected one. */
+export const KIND_CHIPS_SHOWN = 6;
+
+export interface KindChip {
+  kind: NoteKind;
+  /** Null while the area's notes are not ready, so no count is shown rather than a false 0. */
+  count: number | null;
+}
+
+/** The type chips: every type in the area, most common first, then any selected type the area
+ * lacks (with 0, so it can be cleared). Counted over the notes in the chosen status only, so
+ * chips don't move as the other filters change, and a count is what picking that chip shows. Collapsed, only the first few and the selected ones are kept. `overflow` is
+ * how many the collapsed view hides, whatever `expanded` is, so the toggle shows only when it
+ * does something. Pass `counts` null while loading: only the selected chips show, uncounted. */
+export function kindChips(
+  counts: readonly KindCount[] | null,
+  selected: readonly NoteKind[],
+  expanded: boolean,
+): { chips: KindChip[]; hidden: number; overflow: number } {
+  if (counts === null) {
+    return { chips: selected.map((kind) => ({ kind, count: null })), hidden: 0, overflow: 0 };
+  }
+  const present = new Set(counts.map((c) => c.kind));
+  const all: KindChip[] = [
+    ...counts,
+    ...selected.filter((k) => !present.has(k)).map((kind) => ({ kind, count: 0 })),
+  ];
+  const collapsed = all.filter((c, i) => i < KIND_CHIPS_SHOWN || selected.includes(c.kind));
+  const overflow = all.length - collapsed.length;
+  if (expanded) return { chips: all, hidden: 0, overflow };
+  return { chips: collapsed, hidden: overflow, overflow };
 }
 
 /** Read the route's params. Unknown values fall back to the defaults.
@@ -71,7 +82,7 @@ export function filtersFromParams(
   const kinds = (params.kind ?? "")
     .split(",")
     .map((k) => k.trim())
-    .filter(isKind);
+    .filter(isKindId);
   const status = STATUS_ORDER.find((s) => s === params.status) ?? "active";
   const origin = ORIGIN_ORDER.find((o) => o === params.origin) ?? "any";
   const base = { kinds: [...new Set(kinds)], status, origin, query: params.q ?? "" };
@@ -106,9 +117,14 @@ export function nextOrigin(origin: OriginFilter): OriginFilter {
   return ORIGIN_ORDER[(ORIGIN_ORDER.indexOf(origin) + 1) % ORIGIN_ORDER.length] ?? "any";
 }
 
+/** Whether the status filter shows a note. Type chips count with it too. */
+export function inStatus(note: NoteSummary, status: StatusFilter): boolean {
+  return status === "all" || note.status === status;
+}
+
 export function matchesFilters(note: NoteSummary, filters: LibraryFilters): boolean {
   if (filters.kinds.length > 0 && !filters.kinds.includes(note.kind)) return false;
-  if (filters.status !== "all" && note.status !== filters.status) return false;
+  if (!inStatus(note, filters.status)) return false;
   if (filters.origin !== "any" && note.origin !== filters.origin) return false;
   if (filters.since && Date.parse(note.updatedAt) < Date.parse(filters.since)) return false;
   return true;
@@ -210,9 +226,11 @@ export function areaLabel(
 export function footText(count: number, searching: boolean, filters: LibraryFilters): string {
   if (searching)
     return `${plural(count, "result")}, best first, from the top ${MAX_SEARCH} before filters`;
-  const noun = filters.kinds.length === 1 && filters.kinds[0] === "decision" ? "decision" : "note";
+  const [only] = filters.kinds;
+  const noun =
+    filters.kinds.length === 1 && only ? kindNoun(only, count) : count === 1 ? "note" : "notes";
   const since = filters.since ? ` changed since ${formatDate(filters.since)}` : "";
-  return `${plural(count, noun)}${since}`;
+  return `${count.toLocaleString("en-US")} ${noun}${since}`;
 }
 
 /** Stable React keys for a list that may hold duplicates: repeats get "#2", "#3". */

@@ -30,6 +30,7 @@ export const listReleaseNotes = (): ReleaseNote[] => [
       "Light and dark themes from the design tokens, and reduced motion when the system asks.",
       "Read-only data access: commands that would change a vault return an error.",
       "App info and release notes in the app; update checks stay off until signing keys exist.",
+      "Note types come from each note's source, so a knowledge base's own types show as they are, and the graph colours up to three types you choose per area.",
     ],
   },
 ];

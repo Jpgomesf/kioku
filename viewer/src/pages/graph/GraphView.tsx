@@ -16,7 +16,15 @@ import {
   useRef,
   useState,
 } from "react";
-import type { GraphData, GraphEdge, GraphNode, NoteKind } from "../../api";
+import {
+  type GraphData,
+  type GraphEdge,
+  type GraphNode,
+  kindLabel,
+  kindNoun,
+  type NoteKind,
+  TOPIC_KIND,
+} from "../../api";
 import { hasCommandKey } from "../../app/overlay";
 import { graphHref, noteHref, parseHash } from "../../app/router";
 import { EmptyState, IconButton, SearchField, SegmentedControl, Switch } from "../../components/ui";
@@ -36,6 +44,7 @@ import {
   wheelFactor,
   zoomAt,
 } from "./camera";
+import { type ColourSlots, colourFor, slotOf, useColourSlots } from "./colours";
 import { Inspector } from "./Inspector";
 import { Legend } from "./Legend";
 import { layoutFor, type Point } from "./layout";
@@ -50,11 +59,7 @@ import {
   findNodes,
   formatCount,
   isVisible,
-  KIND_LABEL,
   neighboursWithin,
-  plural,
-  typeColour,
-  typeGroup,
 } from "./model";
 
 export interface GraphViewProps {
@@ -137,6 +142,11 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
   const [animate, setAnimate] = useState(false);
   const [live, setLive] = useState(false);
   const [filters, setFilters] = useState<Filters>(DEFAULT_FILTERS);
+  const [colourSlots, assignSlot] = useColourSlots(domain);
+  const [highlightKind, setHighlightKind] = useState<NoteKind | null>(null);
+  // A hidden type has no notes on screen, so highlighting it would only fade everything.
+  const litKind =
+    highlightKind !== null && !filters.hidden.has(highlightKind) ? highlightKind : null;
   const [expanded, setExpanded] = useState<ReadonlySet<NoteKind>>(new Set());
   const [query, setQuery] = useState("");
 
@@ -184,7 +194,7 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
     let best: GraphNode | null = null;
     let bestD = Number.POSITIVE_INFINITY;
     for (const n of visible) {
-      if (n.kind === "topic") continue;
+      if (n.kind === TOPIC_KIND) continue;
       const p = layout.positions.get(n.key);
       if (!p) continue;
       const d = (p.x - centre.x) ** 2 + (p.y - centre.y) ** 2;
@@ -202,11 +212,11 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
   const neighbours = useMemo(
     () =>
       focusKey
-        ? neighboursWithin(data, focusKey, hops).filter(
+        ? neighboursWithin(data, focusKey, hops, colourSlots).filter(
             (n) => visibleKeys.has(n.node.key) && (filters.suggested || !n.edge.suggested),
           )
         : [],
-    [data, focusKey, visibleKeys, filters.suggested, hops],
+    [data, focusKey, visibleKeys, filters.suggested, hops, colourSlots],
   );
   const cards = useMemo(() => cardsFor(neighbours, expanded), [neighbours, expanded]);
   const detailScale = fit.s * STEPS[3];
@@ -639,6 +649,8 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
                 positions={layout.positions}
                 focusKey={focusKey}
                 highlight={highlight}
+                highlightKind={litKind}
+                slots={colourSlots}
                 opacity={BG_OPACITY[level]}
               />
               {focusPos && (
@@ -654,10 +666,11 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
                           : card.neighbour.node.status === "legacy"
                             ? " graph-edge-legacy"
                             : "";
+                    const fade = litKind !== null && cardKind(card) !== litKind ? " graph-dim" : "";
                     return (
                       <line
                         key={cardKey(card)}
-                        className={`graph-edge-strong${edgeClass}`}
+                        className={`graph-edge-strong${edgeClass}${fade}`}
                         x1={focusPos.x}
                         y1={focusPos.y}
                         x2={p.x}
@@ -676,10 +689,9 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
             className="graph-html graph-world"
             style={{ transform: cameraTransform(camera) }}
           >
-            {filters.topic &&
-              filters.topicLabels &&
+            {filters.topicLabels &&
               visible
-                .filter((n) => n.kind === "topic")
+                .filter((n) => n.kind === TOPIC_KIND)
                 .map((n) => {
                   const p = layout.positions.get(n.key);
                   if (!p) return null;
@@ -748,7 +760,7 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
                     <span className="k-node-kind">
                       <span>
                         <span className="k-mono">{focusNode.key}</span> ·{" "}
-                        {KIND_LABEL[focusNode.kind]}
+                        {kindLabel(focusNode.kind)}
                       </span>
                     </span>
                     <span className="k-node-title">{focusNode.title}</span>
@@ -764,15 +776,18 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
                     ? posOf(card.neighbour.node.key)
                     : posOf(card.members[0]?.node.key ?? "");
                 const on = isShown(cardKey(card));
+                const dim = litKind !== null && cardKind(card) !== litKind;
                 const style: CSSProperties = {
                   ...at(on ? slot : (from ?? focusPos), on ? cardK : cardK * 0.05),
-                  opacity: on ? 1 : 0,
+                  opacity: on ? (dim ? CARD_DIM : 1) : 0,
                   pointerEvents: on ? "auto" : "none",
                 };
                 return (
                   <CardButton
                     key={cardKey(card)}
                     card={card}
+                    slots={colourSlots}
+                    dim={dim}
                     style={style}
                     shown={on}
                     onOpen={(key) => focusNote(key, true)}
@@ -808,10 +823,16 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
                     }}
                   >
                     <svg className="k-swatch" viewBox="0 0 12 12" aria-hidden="true">
-                      <circle cx="6" cy="6" r="5" style={{ fill: typeColour(n.kind) }} />
+                      <circle
+                        cx="6"
+                        cy="6"
+                        r="5"
+                        style={{ fill: colourFor(colourSlots, n.kind) }}
+                      />
                     </svg>
                     <span className="k-mono">{n.key}</span>
                     <span className="graph-match-title">{n.title}</span>
+                    <span className="k-meta">{kindLabel(n.kind)}</span>
                   </button>
                 </li>
               ))}
@@ -822,6 +843,7 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
           <Inspector
             node={inspected}
             data={data}
+            slots={colourSlots}
             onFocus={(key) => focusNote(key, true)}
             onAround={() => goTo(3, inspected.key)}
             onClose={() => {
@@ -830,7 +852,14 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
             }}
           />
         ) : null}
-        <Legend data={data} filters={filters} onChange={setFilters} />
+        <Legend
+          data={data}
+          filters={filters}
+          onChange={setFilters}
+          slots={colourSlots}
+          onAssign={assignSlot}
+          onHighlight={setHighlightKind}
+        />
         {neighbours.length === 0 && level >= 2 && focusNode && (
           <p className="k-legend-note">{focusLabel} has no links shown with these types.</p>
         )}
@@ -846,6 +875,9 @@ interface BackgroundProps {
   focusKey: string | null;
   /** The selected note whose links stand out at the far steps. */
   highlight: string | null;
+  /** The type hovered or focused in the legend: its notes stay bright, the rest dim. */
+  highlightKind: NoteKind | null;
+  slots: ColourSlots;
   opacity: number;
 }
 
@@ -856,8 +888,12 @@ const Background = memo(function Background({
   positions,
   focusKey,
   highlight,
+  highlightKind,
+  slots,
   opacity,
 }: BackgroundProps) {
+  const kindOf = useMemo(() => new Map(nodes.map((n) => [n.key, n.kind])), [nodes]);
+  const dimmed = (key: string) => highlightKind !== null && kindOf.get(key) !== highlightKind;
   const focusAt = focusKey ? positions.get(focusKey) : undefined;
   const focusNode = focusKey ? nodes.find((n) => n.key === focusKey) : undefined;
   return (
@@ -867,11 +903,12 @@ const Background = memo(function Background({
         const b = positions.get(e.target);
         if (!a || !b) return null;
         const touches = highlight !== null && (e.source === highlight || e.target === highlight);
-        const cls = e.suggested
+        const base = e.suggested
           ? "graph-edge graph-edge-suggested"
           : touches
             ? "graph-edge graph-edge-selected"
             : "graph-edge";
+        const cls = dimmed(e.source) && dimmed(e.target) ? `${base} graph-dim` : base;
         return (
           <line
             key={`${e.source}>${e.target}>${e.relation}`}
@@ -885,7 +922,14 @@ const Background = memo(function Background({
         );
       })}
       {nodes.map((n) => (
-        <Dot key={n.key} node={n} at={positions.get(n.key)} />
+        <Dot
+          key={n.key}
+          node={n}
+          at={positions.get(n.key)}
+          colour={colourFor(slots, n.kind)}
+          slot={slotOf(slots, n.kind)}
+          dim={dimmed(n.key)}
+        />
       ))}
       {focusAt && focusNode && (
         <circle
@@ -900,38 +944,43 @@ const Background = memo(function Background({
   );
 });
 
-function Dot({ node, at }: { node: GraphNode; at: Point | undefined }) {
+function Dot({
+  node,
+  at,
+  colour,
+  slot,
+  dim,
+}: {
+  node: GraphNode;
+  at: Point | undefined;
+  colour: string;
+  /** The colour slot index, or -1 for grey. */
+  slot: number;
+  dim: boolean;
+}) {
   if (!at) return null;
   const r = dotRadius(node);
-  const group = typeGroup(node.kind);
-  const cls = `graph-dot${node.status === "legacy" ? " graph-dot-legacy" : ""}${
-    group === "ticket" || group === "pull-request" ? " graph-dot-work" : ""
-  }`;
-  if (node.kind === "topic") {
+  const fade = dim ? " graph-dim" : "";
+  if (node.kind === TOPIC_KIND) {
     return (
-      <circle className="graph-ring" cx={at.x} cy={at.y} r={r} vectorEffect="non-scaling-stroke" />
-    );
-  }
-  if (node.kind === "pull-request") {
-    return (
-      <rect
-        className={cls}
-        x={at.x - r}
-        y={at.y - r}
-        width={r * 2}
-        height={r * 2}
-        style={{ fill: typeColour(node.kind) }}
+      <circle
+        className={`graph-ring${fade}`}
+        cx={at.x}
+        cy={at.y}
+        r={r}
         vectorEffect="non-scaling-stroke"
       />
     );
   }
   return (
     <circle
-      className={cls}
+      className={`graph-dot${node.status === "legacy" ? " graph-dot-legacy" : ""}${
+        slot === 1 ? " graph-dot-2" : slot === 2 ? " graph-dot-3" : ""
+      }${fade}`}
       cx={at.x}
       cy={at.y}
       r={r}
-      style={{ fill: typeColour(node.kind) }}
+      style={{ fill: colour }}
       vectorEffect="non-scaling-stroke"
     />
   );
@@ -939,28 +988,40 @@ function Dot({ node, at }: { node: GraphNode; at: Point | undefined }) {
 
 interface CardButtonProps {
   card: Card;
+  slots: ColourSlots;
   style: CSSProperties;
   shown: boolean;
+  /** Another type is highlighted in the legend. */
+  dim: boolean;
   onOpen: (key: string) => void;
   onExpand: (kind: NoteKind) => void;
 }
 
-function CardButton({ card, style, shown, onOpen, onExpand }: CardButtonProps) {
+/** A card of another type than the one highlighted in the legend. */
+const CARD_DIM = 0.35;
+
+/** The type a card stands for: its note's, or its group's. */
+function cardKind(card: Card): NoteKind {
+  return card.type === "group" ? card.kind : card.neighbour.node.kind;
+}
+
+function CardButton({ card, slots, style, shown, dim, onOpen, onExpand }: CardButtonProps) {
   const hidden = { tabIndex: shown ? 0 : -1, "aria-hidden": !shown, inert: !shown };
+  const fade = dim ? " graph-dim" : "";
   if (card.type === "group") {
     const n = card.members.length;
     return (
       <button
         type="button"
-        className="k-node graph-card graph-card-group"
+        className={`k-node graph-card graph-card-group${fade}`}
         style={style}
         {...hidden}
         onClick={() => onExpand(card.kind)}
       >
         <span className="k-node-kind">
           <span>
-            <span className="graph-kind-dot" style={{ background: typeColour(card.kind) }} />
-            {formatCount(n)} more {plural(card.kind, n)}
+            <span className="graph-kind-dot" style={{ background: colourFor(slots, card.kind) }} />
+            {formatCount(n)} more {kindNoun(card.kind, n)}
           </span>
         </span>
         <span className="k-node-title">Open the group</span>
@@ -974,6 +1035,7 @@ function CardButton({ card, style, shown, onOpen, onExpand }: CardButtonProps) {
     "graph-card",
     edge.suggested ? "k-node-flagged" : "",
     legacy ? "graph-card-legacy" : "",
+    dim ? "graph-dim" : "",
   ]
     .filter(Boolean)
     .join(" ");
@@ -987,8 +1049,8 @@ function CardButton({ card, style, shown, onOpen, onExpand }: CardButtonProps) {
     >
       <span className="k-node-kind">
         <span>
-          <span className="graph-kind-dot" style={{ background: typeColour(node.kind) }} />
-          <span className="k-mono">{node.key}</span> · {KIND_LABEL[node.kind]}
+          <span className="graph-kind-dot" style={{ background: colourFor(slots, node.kind) }} />
+          <span className="k-mono">{node.key}</span> · {kindLabel(node.kind)}
         </span>
         {legacy && <span>superseded</span>}
         {edge.suggested && <span className="k-node-flag">suggested</span>}

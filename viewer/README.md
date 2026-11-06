@@ -25,7 +25,7 @@ to the checkout's `.env`.
 
 | Route | Page |
 | --- | --- |
-| `#/library` | Notes of the current area, with kind, status, origin and "since" filters in the URL (`kind=decision,fix`, `since=YYYY-MM-DD` or `since=last-visit`) |
+| `#/library` | Notes of the current area, with type, status, origin and "since" filters in the URL (`kind=decision,design-review`, any type id, `since=YYYY-MM-DD` or `since=last-visit`) |
 | `#/note/<domain>/<key>` | One note: body as plain text, links, history, source and findings |
 | `#/graph?domain=&focus=` | One semantic zoom from the whole area to a note's neighbourhood |
 | `#/health` | Services, counts, drafts and the latest Reflect run |

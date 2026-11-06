@@ -1160,6 +1160,28 @@ fieldset:disabled .k-check,
   text-align: left;
   cursor: pointer;
 }
+.k-legend-colour {
+  display: flex;
+  align-items: center;
+  gap: var(--space-10);
+}
+.k-legend-colour-name {
+  display: flex;
+  flex: 0 0 72px;
+  align-items: center;
+  gap: var(--space-8);
+  font-size: 13px;
+  line-height: 18px;
+  color: var(--fg-2);
+}
+.k-legend-select {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: var(--size-button-md);
+}
+.k-legend-more {
+  align-self: flex-start;
+}
 .k-type-row[aria-pressed="false"] {
   min-height: var(--size-row);
   border-style: dashed;
@@ -1171,14 +1193,14 @@ fieldset:disabled .k-check,
   height: 12px;
   flex: none;
 }
-.k-swatch-decision {
-  fill: var(--type-decision);
+.k-swatch-1 {
+  fill: var(--type-1);
 }
-.k-swatch-question {
-  fill: var(--type-question);
+.k-swatch-2 {
+  fill: var(--type-2);
 }
-.k-swatch-item {
-  fill: var(--type-item);
+.k-swatch-3 {
+  fill: var(--type-3);
 }
 .k-swatch-topic {
   fill: none;
@@ -1837,4 +1859,11 @@ fieldset:disabled .k-check,
     transition: none !important;
     animation: none !important;
   }
+}
+
+/* Library type chips */
+.library-chip-count {
+  /* Dimmed by opacity so it reads on both pressed and plain chips. */
+  opacity: 0.7;
+  font-variant-numeric: tabular-nums;
 }

@@ -212,7 +212,27 @@ function rng(seed: number): () => number {
   };
 }
 
-const KINDS: NoteKind[] = ["decision", "question", "item", "note", "fix", "convention"];
+// Types are open text. Weighted so the demo has a few common types and a long tail, the way an
+// imported knowledge base does; RARE places a few one-off types at fixed positions.
+const KINDS: NoteKind[] = [
+  ...Array<NoteKind>(6).fill("decision"),
+  ...Array<NoteKind>(4).fill("document"),
+  ...Array<NoteKind>(3).fill("question"),
+  ...Array<NoteKind>(3).fill("issue"),
+  ...Array<NoteKind>(2).fill("fix"),
+  ...Array<NoteKind>(2).fill("note"),
+  "convention",
+  "meeting",
+  "design-review",
+  "runbook",
+  "glossary",
+  "release-notes",
+];
+const RARE: Readonly<Record<number, NoteKind>> = {
+  7: "architecture",
+  133: "person",
+  211: "data-model",
+};
 const TOPICS = [
   "search",
   "indexing",
@@ -232,7 +252,8 @@ function buildDemoGraph(): GraphData {
   const edges: GraphEdge[] = [];
   for (let i = 0; i < 300; i += 1) {
     const topic = TOPICS[i % TOPICS.length] ?? "misc";
-    const kind = KINDS[Math.floor(rand() * KINDS.length)] ?? "note";
+    const picked = KINDS[Math.floor(rand() * KINDS.length)] ?? "note";
+    const kind = RARE[i] ?? picked;
     nodes.push({
       key: `demo-${topic}-${String(i).padStart(3, "0")}`,
       domain: "demo",

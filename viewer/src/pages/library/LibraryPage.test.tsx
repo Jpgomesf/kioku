@@ -206,4 +206,98 @@ describe("LibraryPage", () => {
     await settle();
     expect(host.textContent).not.toContain("demo in demo");
   });
+
+  it("builds type chips from the area's notes, most common first", async () => {
+    api.listNotes.mockResolvedValue([
+      summary("a", { kind: "runbook" }),
+      summary("b", { kind: "runbook" }),
+      summary("c", { kind: "design-review" }),
+    ]);
+    act(() => root.render(<LibraryPage params={{}} />));
+    await settle();
+    const labels = [...host.querySelectorAll(".k-chip")].map((c) => c.textContent);
+    expect(labels).toContain("Runbooks 2");
+    expect(labels.indexOf("Runbooks 2")).toBeLessThan(labels.indexOf("Design reviews 1"));
+    expect(button(host, "More types")).toBeUndefined();
+  });
+
+  it("counts only notes in the chosen status, so a draft adds no chip", async () => {
+    api.listNotes.mockResolvedValue([
+      summary("a", { kind: "decision" }),
+      summary("b", { kind: "question", status: "draft" }),
+    ]);
+    act(() => root.render(<LibraryPage params={{}} />));
+    await settle();
+    const labels = [...host.querySelectorAll(".k-chip")].map((c) => c.textContent);
+    expect(labels).toContain("Decisions 1");
+    expect(labels.some((l) => l?.startsWith("Questions"))).toBe(false);
+  });
+
+  it("shows more and fewer types, keeping a selected type visible", async () => {
+    const kinds = ["a1", "b2", "c3", "d4", "e5", "f6", "g7", "h8"];
+    api.listNotes.mockResolvedValue(
+      kinds.flatMap((k, i) =>
+        Array.from({ length: 10 - i }, (_, j) => summary(`${k}-${j}`, { kind: k })),
+      ),
+    );
+    act(() => root.render(<LibraryPage params={{ kind: "h8" }} />));
+    await settle();
+    const chipText = () => [...host.querySelectorAll(".k-chip")].map((c) => c.textContent ?? "");
+    expect(chipText().some((t) => t.startsWith("H8s"))).toBe(true);
+    expect(chipText().some((t) => t.startsWith("G7s"))).toBe(false);
+    act(() => button(host, "More types (1)")?.click());
+    expect(chipText().some((t) => t.startsWith("G7s"))).toBe(true);
+    act(() => button(host, "Fewer types")?.click());
+    expect(chipText().some((t) => t.startsWith("G7s"))).toBe(false);
+  });
+
+  it("shows a selected type the area lacks with 0, so it can be cleared", async () => {
+    act(() => root.render(<LibraryPage params={{ kind: "runbook" }} />));
+    await settle();
+    const chip = [...host.querySelectorAll<HTMLButtonElement>(".k-chip")].find(
+      (c) => c.textContent === "Runbooks 0",
+    );
+    expect(chip?.getAttribute("aria-pressed")).toBe("true");
+    act(() => chip?.focus());
+    act(() => chip?.click());
+    expect(window.location.hash).not.toContain("kind=");
+    // The router passes the new params; the cleared chip unmounts, and focus must stay nearby.
+    act(() => root.render(<LibraryPage params={{}} />));
+    expect(host.textContent).not.toContain("Runbooks 0");
+    expect(document.activeElement).not.toBe(document.body);
+    expect(host.contains(document.activeElement)).toBe(true);
+  });
+
+  it("shows no count on a selected type while notes load", async () => {
+    api.listNotes.mockReturnValue(new Promise(() => {}));
+    act(() => root.render(<LibraryPage params={{ kind: "decision" }} />));
+    await settle();
+    const labels = [...host.querySelectorAll(".k-chip")].map((c) => c.textContent);
+    expect(labels).toContain("Decisions");
+    expect(labels).not.toContain("Decisions 0");
+  });
+
+  it("offers legacy notes when a selected type has only legacy notes", async () => {
+    api.listNotes.mockResolvedValue([
+      summary("a", { kind: "decision" }),
+      summary("b", { kind: "runbook", status: "legacy" }),
+    ]);
+    act(() => root.render(<LibraryPage params={{ kind: "runbook" }} />));
+    await settle();
+    expect(button(host, "Show legacy notes")).toBeDefined();
+    expect(button(host, "Clear filters")).toBeUndefined();
+  });
+
+  it("labels the previewed note's type in words", async () => {
+    api.listNotes.mockResolvedValue([summary("demo-a", { kind: "design-review" })]);
+    act(() => root.render(<LibraryPage params={{}} />));
+    await settle();
+    const grid = host.querySelector<HTMLTableElement>('[role="grid"]');
+    act(() => {
+      grid?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    });
+    await settle(130);
+    const facts = [...host.querySelectorAll(".library-note .k-fact")].map((f) => f.textContent);
+    expect(facts).toContain("Design review");
+  });
 });

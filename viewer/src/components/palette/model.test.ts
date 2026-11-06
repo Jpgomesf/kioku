@@ -60,6 +60,15 @@ describe("buildOptions", () => {
     expect(options[1]?.label).toBe("Search all of personal for “retry”");
     expect(options[2]?.id).toBe("library-matches");
   });
+  it("labels any note type in the meta line", () => {
+    const h = hit("a", ["text"]);
+    const options = buildOptions({
+      ...base,
+      query: "retry",
+      hits: [{ ...h, note: { ...h.note, kind: "design-review" } }],
+    });
+    expect(options[0]?.meta).toBe("Design review · matched words");
+  });
   it("filters commands by every word", () => {
     const ids = buildOptions({ ...base, query: "health check", hits: [] }).map((o) => o.id);
     expect(ids).toContain("go-health");

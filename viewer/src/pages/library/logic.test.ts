@@ -7,6 +7,8 @@ import {
   filterAndSort,
   filterHits,
   filtersFromParams,
+  KIND_CHIPS_SHOWN,
+  kindChips,
   matchedByText,
   moveIndex,
   nextOrigin,
@@ -44,11 +46,16 @@ describe("filtersFromParams", () => {
     });
   });
 
-  it("reads a comma list of kinds and drops unknown ones", () => {
-    expect(filtersFromParams({ kind: "decision,nope,fix,decision" }).kinds).toEqual([
-      "decision",
-      "fix",
-    ]);
+  it("reads a comma list of kinds, keeps any valid id and drops invalid ones", () => {
+    expect(
+      filtersFromParams({ kind: "decision,design-review, runbook ,decision,Bad,a--b,-x,,a b" })
+        .kinds,
+    ).toEqual(["decision", "design-review", "runbook"]);
+  });
+
+  it("writes arbitrary kinds back to the URL", () => {
+    const filters = filtersFromParams({ kind: "design-review,release-notes" });
+    expect(paramsFromFilters(filters).kind).toBe("design-review,release-notes");
   });
 
   it("round-trips through paramsFromFilters", () => {
@@ -210,5 +217,51 @@ describe("areaLabel", () => {
 describe("uniqueKeys", () => {
   it("suffixes repeats", () => {
     expect(uniqueKeys(["a", "b", "a"])).toEqual(["a", "b", "a#2"]);
+  });
+});
+
+describe("kindChips", () => {
+  const counts = Array.from({ length: 9 }, (_, i) => ({ kind: `type-${i}`, count: 20 - i }));
+
+  it("shows the first few, plus any selected type, and counts the rest", () => {
+    const { chips, hidden } = kindChips(counts, ["type-8"], false);
+    expect(chips.map((c) => c.kind)).toEqual([
+      ...counts.slice(0, KIND_CHIPS_SHOWN).map((c) => c.kind),
+      "type-8",
+    ]);
+    expect(hidden).toBe(2);
+  });
+
+  it("lists every type when expanded", () => {
+    expect(kindChips(counts, [], true)).toEqual({ chips: counts, hidden: 0, overflow: 3 });
+  });
+
+  it("reports no overflow when the collapsed view would hide nothing", () => {
+    expect(kindChips(counts.slice(0, 8), ["type-6", "type-7"], true).overflow).toBe(0);
+  });
+
+  it("shows only the selected types, uncounted, while notes load", () => {
+    expect(kindChips(null, ["decision"], false)).toEqual({
+      chips: [{ kind: "decision", count: null }],
+      hidden: 0,
+      overflow: 0,
+    });
+  });
+
+  it("keeps a selected type the area lacks, with 0", () => {
+    const { chips } = kindChips(counts.slice(0, 2), ["runbook"], false);
+    expect(chips.at(-1)).toEqual({ kind: "runbook", count: 0 });
+  });
+});
+
+describe("filtering by an open type", () => {
+  it("filters notes and hits by any type id", () => {
+    const notes = [note({ key: "r", kind: "runbook" }), note({ key: "d", kind: "design-review" })];
+    const filters = filtersFromParams({ kind: "design-review" });
+    expect(filterAndSort(notes, filters).map((n) => n.key)).toEqual(["d"]);
+    const hits = notes.map(
+      (n): SearchHit => ({ note: n, score: 1, matchedBy: ["text"], linkedFrom: null, snippet: "" }),
+    );
+    expect(filterHits(hits, filters).map((h) => h.note.key)).toEqual(["d"]);
   });
 });
