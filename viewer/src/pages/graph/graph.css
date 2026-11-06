@@ -1,0 +1,365 @@
+/* Graph page. Colours and motion come from tokens.css and motion.css. */
+.graph-page {
+  min-width: 0;
+}
+.graph-main {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+.graph-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-12) var(--space-16);
+  padding: var(--space-16) var(--space-24);
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--surface);
+}
+.graph-head-text {
+  flex: 1 1 260px;
+  min-width: 0;
+}
+.graph-head h1 {
+  margin: 0;
+  font-size: 18px;
+  line-height: 24px;
+}
+.graph-head .k-count {
+  margin: var(--space-2) 0 0;
+}
+.graph-steps {
+  display: flex;
+  align-items: center;
+  gap: var(--space-6);
+}
+.graph-empty {
+  padding: var(--space-32);
+}
+
+.graph-stage {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 320px;
+  overflow: hidden;
+  background: var(--bg);
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+.graph-stage:focus-visible {
+  outline: var(--focus-width) solid var(--focus);
+  outline-offset: calc(-1 * var(--focus-width));
+}
+.graph-live {
+  cursor: grabbing;
+}
+.graph-svg {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.graph-camera {
+  transform-origin: 0 0;
+}
+.graph-html {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+/* The HTML layer sits in world space under the same camera transform as the SVG. */
+.graph-world {
+  transform-origin: 0 0;
+}
+.graph-stage-empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+}
+.graph-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.graph-html > * {
+  position: absolute;
+  top: 0;
+  left: 0;
+  transform-origin: 50% 50%;
+}
+
+.graph-bg,
+.graph-focus-edges,
+.graph-html > * {
+  transition: opacity var(--duration-view) var(--ease-standard);
+}
+/* Animated moves: the camera and everything placed by it share one duration and easing. */
+.graph-animate .graph-camera,
+.graph-animate .graph-world,
+.graph-animate .graph-html > * {
+  transition:
+    transform var(--duration-zoom) var(--ease-zoom),
+    opacity var(--duration-zoom) var(--ease-zoom);
+}
+.graph-animate .graph-bg,
+.graph-animate .graph-focus-edges {
+  transition: opacity var(--duration-zoom) var(--ease-zoom);
+}
+@media (prefers-reduced-motion: reduce) {
+  .graph-stage *,
+  .graph-animate .graph-camera,
+  .graph-animate .graph-world,
+  .graph-animate .graph-html > * {
+    transition: none;
+  }
+}
+
+.graph-edge {
+  stroke: var(--border-strong);
+  stroke-width: 1;
+}
+.graph-edge-strong {
+  stroke: var(--muted);
+  stroke-width: 1.5;
+}
+.graph-edge-suggested {
+  stroke: var(--warn-strong);
+  stroke-dasharray: 5 4;
+}
+/* Superseded notes: a neutral dash. Amber stays for reflect's findings. */
+.graph-edge-legacy {
+  stroke: var(--muted);
+  stroke-dasharray: 4 4;
+}
+.graph-edge-selected {
+  stroke: var(--accent);
+  stroke-width: 1.4;
+}
+.graph-dot {
+  stroke: var(--bg);
+  stroke-width: 1;
+}
+.graph-dot-legacy {
+  opacity: 0.4;
+}
+.graph-dot-ring {
+  fill: none;
+  stroke: var(--fg);
+  stroke-width: 1.5;
+}
+/* type-item is under 3:1 on light grounds; a darker outline keeps tickets and PRs legible. */
+.graph-dot-work {
+  stroke: color-mix(in srgb, var(--type-item) 55%, var(--fg));
+}
+.graph-ring {
+  fill: none;
+  stroke: var(--type-topic);
+  stroke-width: 2;
+  opacity: 0.7;
+}
+
+.graph-topic-label,
+.graph-dot-label {
+  color: var(--fg-2);
+  font-size: 12px;
+  line-height: 16px;
+  white-space: nowrap;
+}
+.graph-dot-label {
+  color: var(--fg);
+  font-family: var(--font-mono);
+}
+.graph-edge-label {
+  padding: 0 var(--space-6);
+  border-radius: var(--radius-mark);
+  background: var(--bg);
+  color: var(--fg-2);
+  font-size: 12px;
+  line-height: 16px;
+  white-space: nowrap;
+}
+.graph-edge-label-suggested {
+  color: var(--warn-ink-2);
+}
+
+.graph-card {
+  width: 200px;
+  text-decoration: none;
+}
+.graph-card-focus {
+  width: 240px;
+  z-index: 1;
+  padding: 9px 11px;
+  border: 2px solid var(--accent);
+  background: var(--accent-soft);
+}
+.graph-card-focus .k-node-kind {
+  color: var(--accent-ink);
+}
+.graph-card-group {
+  border-style: dashed;
+}
+.graph-card-legacy {
+  border-style: dashed;
+  color: var(--fg-2);
+}
+.graph-card-legacy .k-node-title {
+  color: var(--muted);
+}
+.graph-card:focus-visible {
+  outline: var(--focus-width) solid var(--focus);
+  outline-offset: var(--focus-offset);
+}
+.graph-kind-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: var(--space-6);
+  border-radius: 50%;
+  vertical-align: 0;
+}
+.graph-hint {
+  position: absolute;
+  left: var(--space-16);
+  bottom: var(--space-12);
+  margin: 0;
+  padding: var(--space-4) var(--space-8);
+  border-radius: var(--radius-mark);
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 16px;
+  pointer-events: none;
+}
+
+.graph-side {
+  display: flex;
+  flex: 0 0 300px;
+  flex-direction: column;
+  gap: var(--space-24);
+  padding: var(--space-16);
+  overflow-y: auto;
+  border-left: 1px solid var(--border-subtle);
+  background: var(--surface);
+}
+.graph-legend {
+  width: auto;
+}
+.graph-matches {
+  margin: var(--space-6) 0 0;
+  padding: 0;
+  list-style: none;
+}
+.graph-match,
+.graph-link {
+  display: flex;
+  width: 100%;
+  gap: var(--space-8);
+  align-items: baseline;
+  padding: var(--space-6) var(--space-8);
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+.graph-match:hover,
+.graph-link:hover {
+  background: var(--surface-2);
+}
+.graph-match:focus-visible,
+.graph-link:focus-visible {
+  outline: var(--focus-width) solid var(--focus);
+  outline-offset: calc(-1 * var(--focus-width));
+}
+.graph-match-title {
+  overflow: hidden;
+  color: var(--fg-2);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.graph-inspector {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+}
+.graph-inspector-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.graph-inspector-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-8);
+  margin: 0;
+  color: var(--fg-2);
+  font-size: 12px;
+}
+.graph-inspector-title {
+  margin: 0;
+  font-size: 15px;
+  line-height: 22px;
+}
+.graph-links {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.graph-link {
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.graph-link-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-6);
+  color: var(--fg-2);
+  font-size: 12px;
+}
+.graph-links-suggested .graph-link-rel {
+  color: var(--warn-ink-2);
+}
+.graph-link-title {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+.graph-inspector-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-8);
+  margin-top: var(--space-8);
+}
+
+@media (max-width: 900px) {
+  .graph-page {
+    flex-direction: column;
+  }
+  .graph-side {
+    flex-basis: auto;
+    border-left: 0;
+    border-top: 1px solid var(--border-subtle);
+  }
+}
+
+.graph-hops {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-4);
+  font-size: 12px;
+  color: var(--fg-2);
+}

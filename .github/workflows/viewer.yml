@@ -1,0 +1,209 @@
+# Kioku Viewer: checks on every change to viewer/, and a macOS bundle on viewer-v* tags.
+# Third-party actions are pinned to full commit SHAs (verified 2026-11-06).
+name: Viewer
+
+on:
+  push:
+    branches: [main]
+    tags: ["viewer-v*"]
+    paths: ["viewer/**", "src/**", "migrations/**", "Cargo.toml", "Cargo.lock", "clippy.toml", ".github/workflows/viewer.yml"]
+  pull_request:
+    paths: ["viewer/**", "src/**", "migrations/**", "Cargo.toml", "Cargo.lock", "clippy.toml", ".github/workflows/viewer.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_BUILD_JOBS: 6
+
+defaults:
+  run:
+    shell: bash
+    working-directory: viewer
+
+jobs:
+  check:
+    name: viewer checks
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 26
+          cache: npm
+          cache-dependency-path: viewer/package-lock.json
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-10-16
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: viewer/src-tauri
+      - run: node scripts/version.mjs check
+      - run: node --test scripts/
+      - name: Tag matches the version
+        if: startsWith(github.ref, 'refs/tags/viewer-v')
+        run: node scripts/version.mjs tag "$GITHUB_REF_NAME"
+      - run: npm ci
+      - run: npm run check
+      - run: cargo fmt --check
+        working-directory: viewer/src-tauri
+      - run: cargo clippy --all-targets --locked -- -D warnings
+        working-directory: viewer/src-tauri
+      - run: cargo test --locked
+        working-directory: viewer/src-tauri
+
+  # Supply-chain checks on the viewer's own lockfiles, with the root deny.toml policy
+  # (advisories, bans including openssl-sys, licenses, sources).
+  audit:
+    name: viewer dependency audit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    # A new advisory should not block unrelated PRs; push and tag runs still fail.
+    continue-on-error: ${{ github.event_name == 'pull_request' }}
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Checksum-verified prebuilt binary; this install-action SHA resolves cargo-deny to 0.20.2.
+      - uses: taiki-e/install-action@682ce6c3c696a4cd5168a05f98e51aa02b877941 # v2.89.1
+        with:
+          tool: cargo-deny
+      - name: cargo deny check
+        run: cargo deny --manifest-path viewer/src-tauri/Cargo.toml --locked check --config deny.toml
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 26
+      - name: npm audit
+        run: npm audit --audit-level=high --omit=dev
+        working-directory: viewer
+
+  # Builds with a read-only token and no write access; publishing is its own job below.
+  release:
+    name: macOS bundle
+    needs: [check, audit]
+    if: startsWith(github.ref, 'refs/tags/viewer-v')
+    runs-on: macos-15
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 26
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-10-16
+        with:
+          toolchain: stable
+      # No caches in the release build, so nothing saved by another run goes into a bundle.
+      - run: npm ci
+      # The updater key never reaches this job: build scripts from npm and every crate run
+      # here. The unsigned .app.tar.gz is signed in the `sign` job below.
+      - run: npm run tauri build -- --bundles app,dmg
+      - name: Pack the updater archive
+        working-directory: viewer/src-tauri/target/release/bundle/macos
+        run: |
+          app=$(find . -maxdepth 1 -name '*.app' | head -n 1)
+          test -n "$app"
+          tar -czf "${app#./}.tar.gz" "${app#./}"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: kioku-viewer-macos
+          path: |
+            viewer/src-tauri/target/release/bundle/dmg/*.dmg
+            viewer/src-tauri/target/release/bundle/macos/*.app.tar.gz
+          if-no-files-found: error
+
+  # Signs the updater archive with no checkout: only the pinned Tauri signer runs next to
+  # the key. Off with `publish` until the repo variable VIEWER_PUBLISH is "true".
+  sign:
+    name: Sign the updater archive
+    needs: release
+    if: startsWith(github.ref, 'refs/tags/viewer-v') && vars.VIEWER_PUBLISH == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: kioku-viewer-macos
+          path: bundle
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 26
+      - name: Sign
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          tarball=$(find bundle -name '*.app.tar.gz' | head -n 1)
+          test -n "$tarball"
+          npx --yes @tauri-apps/cli@2.12.4 signer sign "$tarball"
+          test -f "$tarball.sig"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: kioku-viewer-macos-signed
+          path: bundle/
+          if-no-files-found: error
+
+  # Off until the TAURI_SIGNING_* secrets exist and the repo variable VIEWER_PUBLISH is
+  # "true". It runs no npm or cargo code, so the write token never meets build scripts.
+  publish:
+    name: GitHub Release
+    needs: sign
+    if: startsWith(github.ref, 'refs/tags/viewer-v') && vars.VIEWER_PUBLISH == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: kioku-viewer-macos-signed
+          path: bundle
+      - name: Upload the bundle and latest.json
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          version="${TAG#viewer-v}"
+          tarball=$(find bundle -name '*.app.tar.gz' | head -n 1)
+          dmg=$(find bundle -name '*.dmg' | head -n 1)
+          test -n "$tarball" && test -f "$tarball.sig" && test -n "$dmg"
+          sig=$(cat "$tarball.sig")
+          asset=$(basename "$tarball" | tr ' ' '.')
+          jq -n --arg v "$version" --arg sig "$sig" \
+            --arg url "https://github.com/${GH_REPO}/releases/download/${TAG}/${asset}" \
+            --arg date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{version: $v, notes: "See CHANGELOG.md", pub_date: $date,
+              platforms: {"darwin-aarch64": {signature: $sig, url: $url}}}' > latest.json
+          # --latest=false: the repo-wide "latest" release belongs to nobody in particular.
+          gh release create "$TAG" --latest=false --title "Kioku Viewer $version" \
+            --notes "See viewer/CHANGELOG.md" "$dmg" "$tarball" "$tarball.sig" latest.json
+          # The updater reads latest.json from the rolling viewer-latest release.
+          gh release view viewer-latest >/dev/null 2>&1 ||
+            gh release create viewer-latest --prerelease --latest=false \
+              --title "Kioku Viewer (latest)" --notes "Holds latest.json for the updater."
+          gh release upload viewer-latest latest.json --clobber

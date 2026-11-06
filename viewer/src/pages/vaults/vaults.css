@@ -1,0 +1,79 @@
+/* Vaults page pieces that the design system has no class for. */
+.vaults {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-20);
+}
+.vaults-head {
+  max-width: 720px;
+}
+.vaults-head h1 {
+  margin: 0;
+  font-size: 24px;
+  line-height: 32px;
+  font-weight: 600;
+}
+.vaults-head p,
+.vaults-foot {
+  margin: var(--space-4) 0 0;
+  color: var(--fg-2);
+  font-size: 13px;
+  line-height: 18px;
+}
+.vaults-draft {
+  position: sticky;
+  bottom: var(--space-16);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-12);
+  max-width: 640px;
+  box-sizing: border-box;
+  padding: var(--space-12) var(--space-16);
+  border: 1px solid var(--accent-border);
+  border-radius: var(--radius-panel);
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+  animation: vaults-rise var(--duration-overlay) var(--ease-standard);
+}
+.vaults-draft p {
+  flex: 1 1 auto;
+  margin: 0;
+}
+@keyframes vaults-rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .vaults-draft {
+    animation: none;
+  }
+}
+.vaults-notice {
+  margin: 0;
+}
+.vaults-cards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-16);
+  align-items: flex-start;
+}
+.vaults-cards > .k-vault {
+  flex: 1 1 400px;
+  min-width: 0;
+}
+.vaults-banners {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-12);
+  max-width: 720px;
+}
+.vaults-banners:empty {
+  display: none;
+}
+.vaults-check-failed,
+.k-checklist .vaults-check-failed .k-icon {
+  color: var(--danger-ink);
+}
