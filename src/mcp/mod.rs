@@ -54,6 +54,7 @@ const KEY_EXAMPLE: &str = r#"{"key":"webhook-retries","domain":"relay"}"#;
 const FEEDBACK_EXAMPLE: &str = r#"{"key":"webhook-retries","positive":true,"domain":"relay"}"#;
 const IMPORT_EXAMPLE: &str = r#"{"path":"relay","domain":"relay"}"#;
 const MAINTENANCE_EXAMPLE: &str = r#"{"dry_run":true}"#;
+const LIST_EXAMPLE: &str = r#"{"domain":"relay","origin":"agent","limit":50}"#;
 
 #[derive(Clone)]
 pub struct MemoryServer {

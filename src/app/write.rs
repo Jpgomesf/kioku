@@ -1,5 +1,6 @@
 //! Saving notes from tools, and the lifecycle flags tools may change.
 
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -10,7 +11,7 @@ use uuid::Uuid;
 
 use crate::error::{UserError, conflict, invalid};
 use crate::graph::{self, UnresolvedRelation};
-use crate::model::{Note, NoteInput, Status};
+use crate::model::{Edge, Note, NoteInput, Status, VectorHit};
 use crate::secrets;
 use crate::vault::Viewer;
 
@@ -41,6 +42,106 @@ pub struct UpsertOutcome {
     /// the whole domain's; for a viewer with them, only this note's own.
     pub unresolved_relationships: Vec<UnresolvedRelation>,
     pub unresolved_count: usize,
+    /// Active notes this one links to or is linked from, among those the
+    /// caller may see. A note with none is reachable only by search, never
+    /// through the graph.
+    pub links: usize,
+    /// A new note with no links, in a domain that has other notes it could
+    /// link to.
+    pub isolated: bool,
+    /// For a note a tool just created: up to three active notes of its domain,
+    /// not already linked to it, at least `MEMORY_SIMILAR_NOTE_SCORE` similar
+    /// in meaning. One may hold the same fact, or be a note to link.
+    pub similar: Vec<SimilarNote>,
+}
+
+/// A stored note close in meaning to one a tool just created.
+#[derive(Clone, Debug, Serialize)]
+pub struct SimilarNote {
+    pub key: String,
+    pub title: String,
+    /// Cosine similarity to the new note, from 0 to 1.
+    pub score: f64,
+}
+
+/// Notes a new note might repeat: active, visible to `viewer`, not `saved`
+/// itself, and not already linked to it. Keys and titles by id.
+fn similar_candidates(
+    notes: &[Note],
+    saved: Uuid,
+    linked: &HashSet<Uuid>,
+    viewer: Option<&Viewer>,
+) -> HashMap<Uuid, (String, String)> {
+    notes
+        .iter()
+        .filter(|other| {
+            other.id != saved
+                && other.status == Status::Active
+                && !linked.contains(&other.id)
+                && viewer.is_none_or(|viewer| viewer.sees(other))
+        })
+        .map(|other| {
+            (
+                other.id,
+                (other.input.key.clone(), other.input.title.clone()),
+            )
+        })
+        .collect()
+}
+
+/// The hits at least `threshold` similar that are candidates, at most three,
+/// in the order given, with scores rounded to three decimals.
+fn similar_from_hits(
+    hits: Vec<VectorHit>,
+    candidates: &HashMap<Uuid, (String, String)>,
+    threshold: f64,
+) -> Vec<SimilarNote> {
+    hits.into_iter()
+        .filter(|hit| hit.score >= threshold)
+        .filter_map(|hit| {
+            candidates.get(&hit.id).map(|(key, title)| SimilarNote {
+                key: key.clone(),
+                title: title.clone(),
+                score: (hit.score * 1000.0).round() / 1000.0,
+            })
+        })
+        .take(3)
+        .collect()
+}
+
+/// Whether `viewer` may see an active note of the domain other than `saved`.
+fn has_visible_peers(notes: &[Note], saved: Uuid, viewer: Option<&Viewer>) -> bool {
+    notes.iter().any(|other| {
+        other.id != saved
+            && other.status == Status::Active
+            && viewer.is_none_or(|viewer| viewer.sees(other))
+    })
+}
+
+/// Active notes linked to or from `id` in either direction that `viewer` may see.
+fn linked_notes(
+    notes: &[Note],
+    edges: &[Edge],
+    id: Uuid,
+    viewer: Option<&Viewer>,
+) -> HashSet<Uuid> {
+    let neighbors: HashSet<Uuid> = edges
+        .iter()
+        .filter_map(|edge| match (edge.source == id, edge.target == id) {
+            (true, false) => Some(edge.target),
+            (false, true) => Some(edge.source),
+            _ => None,
+        })
+        .collect();
+    notes
+        .iter()
+        .filter(|note| {
+            neighbors.contains(&note.id)
+                && note.status == Status::Active
+                && viewer.is_none_or(|viewer| viewer.sees(note))
+        })
+        .map(|note| note.id)
+        .collect()
 }
 
 /// Unresolved links a save reports, at most `limit`, and how many there are.
@@ -159,8 +260,13 @@ impl App {
         } else {
             Some(self.embed_note(&input).await?)
         };
+        // A new note from a tool: its vector also finds stored notes that may
+        // hold the same fact.
+        let probe = (origin == WriteOrigin::Tool && existing.is_none())
+            .then(|| vector.clone())
+            .flatten();
 
-        let _guard = self.store.mutation_lock().await?;
+        let guard = self.store.mutation_lock().await?;
         // Another writer may have claimed the key while we were embedding.
         let current = self.store.get(input.id()).await?;
         check_ownership(current.as_ref(), &input, origin)?;
@@ -168,6 +274,21 @@ impl App {
         let notes = self.store.notes(Some(&input.domain), true).await?;
         let (edges, domain_report) = graph::resolve_edges_with_report(&notes);
         self.store.replace_edges(&input.domain, &edges).await?;
+        let linked = linked_notes(&notes, &edges, note.id, viewer);
+        let isolated =
+            existing.is_none() && linked.is_empty() && has_visible_peers(&notes, note.id, viewer);
+        let candidates = if probe.is_some() {
+            similar_candidates(&notes, note.id, &linked, viewer)
+        } else {
+            HashMap::new()
+        };
+        // The other active notes stay out of the vector query, so they can't
+        // take the places of candidates.
+        let excluded: Vec<Uuid> = notes
+            .iter()
+            .filter(|other| other.status == Status::Active && !candidates.contains_key(&other.id))
+            .map(|other| other.id)
+            .collect();
         let (unresolved, unresolved_count) = save_report(notes, note.id, domain_report, viewer, 20);
         let mut indexed = true;
         if !note.vector_synced {
@@ -191,6 +312,14 @@ impl App {
                 }
             }
         }
+        drop(guard);
+        let similar = match probe {
+            Some(vector) if !candidates.is_empty() => {
+                self.similar_notes(vector, &input.domain, &excluded, &candidates)
+                    .await
+            }
+            _ => Vec::new(),
+        };
         Ok(UpsertOutcome {
             id: note.id,
             key: input.key,
@@ -202,7 +331,34 @@ impl App {
             indexed,
             unresolved_relationships: unresolved,
             unresolved_count,
+            links: linked.len(),
+            isolated,
+            similar,
         })
+    }
+
+    /// Up to three of `candidates` at least `similar_note_score` similar to
+    /// `vector`, most similar first. Every other active note of the domain is
+    /// `excluded` from the query, so the top hits are candidates. A failed
+    /// lookup only costs the hint.
+    async fn similar_notes(
+        &self,
+        vector: Vec<f32>,
+        domain: &str,
+        excluded: &[Uuid],
+        candidates: &HashMap<Uuid, (String, String)>,
+    ) -> Vec<SimilarNote> {
+        match self
+            .vector
+            .search(vector, Some(&[domain]), false, excluded, 3)
+            .await
+        {
+            Ok(hits) => similar_from_hits(hits, candidates, self.config.similar_note_score),
+            Err(error) => {
+                tracing::debug!(error = format!("{error:#}"), "similar-note lookup failed");
+                Vec::new()
+            }
+        }
     }
 
     pub async fn feedback(
@@ -441,5 +597,137 @@ mod tests {
                 .into_owned(),
         );
         assert!(check_ownership(Some(&present), &relocated, WriteOrigin::Import).is_err());
+    }
+
+    fn edge(source: Uuid, target: Uuid) -> Edge {
+        Edge {
+            source,
+            target,
+            kind: "related".to_owned(),
+            weight: 1.0,
+        }
+    }
+
+    #[test]
+    fn linked_notes_count_both_directions_and_only_active_notes() {
+        let domain_note = crate::testing::note;
+        let saved = domain_note("saved", "relay");
+        let parent = domain_note("parent", "relay");
+        let child = domain_note("child", "relay");
+        let mut retired = domain_note("retired", "relay");
+        retired.status = Status::Legacy;
+        let stranger = domain_note("stranger", "relay");
+        let notes = vec![
+            saved.clone(),
+            parent.clone(),
+            child.clone(),
+            retired.clone(),
+            stranger.clone(),
+        ];
+        let edges = vec![
+            edge(saved.id, parent.id),
+            edge(child.id, saved.id),
+            edge(saved.id, retired.id),
+            edge(parent.id, stranger.id),
+        ];
+        let linked = linked_notes(&notes, &edges, saved.id, None);
+        assert_eq!(linked, HashSet::from([parent.id, child.id]));
+        assert!(linked_notes(&notes, &[], saved.id, None).is_empty());
+    }
+
+    /// A viewer for provider anthropic in a vault over domain "relay", so a
+    /// note locked to local is hidden from it.
+    fn anthropic_viewer() -> Viewer {
+        use crate::vault::{Session, Vaults};
+        let root = std::env::temp_dir().join(format!("kioku-viewer-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let text = format!(
+            r#"
+            [[vault]]
+            name = "work"
+            paths = ["{}"]
+            domains = ["relay"]
+            providers = ["local", "anthropic"]
+            default_domain = "relay"
+            "#,
+            root.display()
+        );
+        let vaults =
+            std::sync::Arc::new(Vaults::parse(&text, Path::new("/cfg/vaults.toml"), None).unwrap());
+        let session = Session::for_folder(Some(&vaults), Some("anthropic"), Some(&root));
+        std::fs::remove_dir_all(&root).ok();
+        assert!(
+            session.placement().is_some(),
+            "the test session must be placed"
+        );
+        let principal = crate::access::Principal::new("local", "read,write,admin", "*").unwrap();
+        Viewer::new(&principal, &session)
+    }
+
+    #[test]
+    fn similar_candidates_leave_out_the_note_its_links_retired_notes_and_hidden_ones() {
+        let domain_note = crate::testing::note;
+        let saved = domain_note("saved", "relay");
+        let linked_one = domain_note("linked", "relay");
+        let open = domain_note("open", "relay");
+        let mut locked = domain_note("locked", "relay");
+        locked.input.lock = vec!["local".to_owned()];
+        let mut retired = domain_note("retired", "relay");
+        retired.status = Status::Legacy;
+        let notes = vec![
+            saved.clone(),
+            linked_one.clone(),
+            open.clone(),
+            locked.clone(),
+            retired.clone(),
+        ];
+        let linked = HashSet::from([linked_one.id]);
+        let keys = |map: HashMap<Uuid, (String, String)>| {
+            let mut keys: Vec<String> = map.into_values().map(|(key, _)| key).collect();
+            keys.sort();
+            keys
+        };
+        assert_eq!(
+            keys(similar_candidates(&notes, saved.id, &linked, None)),
+            ["locked", "open"]
+        );
+        let viewer = anthropic_viewer();
+        assert_eq!(
+            keys(similar_candidates(&notes, saved.id, &linked, Some(&viewer))),
+            ["open"]
+        );
+        assert!(has_visible_peers(&notes, saved.id, Some(&viewer)));
+        assert!(!has_visible_peers(
+            &[saved.clone(), locked, retired],
+            saved.id,
+            Some(&viewer)
+        ));
+    }
+
+    #[test]
+    fn similar_hits_keep_candidates_over_the_threshold_at_most_three() {
+        let ids: Vec<Uuid> = (0..6).map(|_| Uuid::new_v4()).collect();
+        let candidates: HashMap<Uuid, (String, String)> = ids[..5]
+            .iter()
+            .enumerate()
+            .map(|(i, id)| (*id, (format!("key-{i}"), format!("Title {i}"))))
+            .collect();
+        let hit = |id: Uuid, score: f64| VectorHit {
+            id,
+            score,
+            revision: 1,
+        };
+        let hits = vec![
+            hit(ids[5], 0.99), // not a candidate: linked, hidden, or the note itself
+            hit(ids[0], 0.95),
+            hit(ids[1], 0.912_345_6),
+            hit(ids[2], 0.89), // under the threshold
+            hit(ids[3], 0.93),
+            hit(ids[4], 0.92),
+        ];
+        let similar = similar_from_hits(hits, &candidates, 0.9);
+        let found: Vec<(&str, f64)> = similar.iter().map(|s| (s.key.as_str(), s.score)).collect();
+        assert_eq!(found, [("key-0", 0.95), ("key-1", 0.912), ("key-3", 0.93)]);
+        assert!(similar_from_hits(Vec::new(), &candidates, 0.9).is_empty());
     }
 }

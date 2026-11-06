@@ -8,7 +8,7 @@ use crate::vault::Session;
 pub const CORE_TOOLS: [&str; 3] = ["memory_search", "memory_get", "memory_save"];
 
 /// Every tool, in the order the docs present them.
-pub const ALL_TOOLS: [&str; 10] = [
+pub const ALL_TOOLS: [&str; 11] = [
     "memory_search",
     "memory_get",
     "memory_save",
@@ -19,6 +19,7 @@ pub const ALL_TOOLS: [&str; 10] = [
     "memory_import",
     "memory_maintenance",
     "memory_stats",
+    "memory_list",
 ];
 
 /// The memory policy every client receives. `{search}` says which domain to

@@ -167,13 +167,31 @@ The default `core` profile exposes three tools; `MEMORY_TOOLS=all` (or
 |---|---|---|
 | `memory_search` | core | Ranked previews (key, title, snippet, score) for a question |
 | `memory_get` | core | Full text of chosen memories by key, with links, within a byte budget |
-| `memory_save` | core | Create or update one memory by key; refuses credentials and file-backed notes |
+| `memory_save` | core | Create or update one memory by key; refuses credentials and file-backed notes; reports its links and similar notes |
 | `memory_inspect` | all | Provenance, lifecycle, usage, links, and recent history of one memory |
 | `memory_feedback` | all | Record that a memory proved right or wrong |
 | `memory_retire` / `memory_restore` | all | Move a memory to legacy and back; nothing is deleted |
 | `memory_import` | all | Import Markdown notes from `MEMORY_NOTES_ROOT` |
 | `memory_maintenance` | all | Preview or apply monthly aging |
 | `memory_stats` | all | Counts by status and domain, index health |
+| `memory_list` | all | Page through a domain's notes (key, title, status, tags, origin, links to active notes, last update), filtered by status, origin, or tag |
+
+**What a save reports.** Besides the key and revision, `memory_save` returns
+`links`, the number of active notes the saved note links to or is linked
+from. Its `next` field gives advice:
+- **A new note that links to nothing,** in a domain that has other notes, is
+  reachable by search but never through the graph. `next` says to add the
+  notes it builds on, narrows, or replaces to `related`.
+- **A new note close in meaning** to up to three stored notes it doesn't link
+  to gets them listed under `similar`, with their similarity.
+  - If one already holds the fact, update that note instead.
+  - If the new note refines or replaces one, link it.
+  - Similarity is cosine over the stored vectors. The threshold,
+    `MEMORY_SIMILAR_NOTE_SCORE` (default 0.9), suits nomic-embed-text: in a
+    dense single-project knowledge base, pairs at 0.9 or more were mostly
+    restatements, refinements, and replacements, and few were unrelated.
+  - Models whose similarities run lower need a lower value.
+- `hint` still only says that `related` holds references that didn't resolve.
 
 Two prompts, `recall` and `remember`, give users explicit shortcuts in clients
 that support MCP prompts. Tools from earlier versions (`rag_search`,
@@ -447,8 +465,9 @@ lock in frontmatter (`lock: local`, or `lock: [local, anthropic]`);
 `memory_save` keeps a note's lock but can't set one.
 
 - A note a session may not see is missing everywhere: search, `memory_get`,
-  `memory_inspect`, links, `memory_stats`, import reports, the unresolved
-  links a save reports, and the older `rag_*` tools. Hidden notes never shift
+  `memory_inspect`, `memory_list`, links, `memory_stats`, import reports, the
+  unresolved links and similar notes a save reports, and the older `rag_*`
+  tools. Hidden notes never shift
   the ranking of visible ones; the vector index leaves them out of its
   candidates.
 - Domain lists (a vault-wide search's `domains`, the hint when a domain has
@@ -507,7 +526,7 @@ never retires them: only `kioku maintenance` or `memory_maintenance` with
 ```sh
 make check   # fmt, clippy with warnings denied, unit and contract tests
 make test-db # PostgreSQL tests (history, aging, store); MEMORY_TEST_DATABASE_URL must allow CREATE DATABASE
-make smoke   # 153 checks over stdio and 20 over HTTP; SMOKE_ENV must name test storage
+make smoke   # 161 checks over stdio and 20 over HTTP; SMOKE_ENV must name test storage
 make eval    # retrieval quality in isolated storage
 ```
 

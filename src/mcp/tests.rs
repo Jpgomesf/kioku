@@ -4,7 +4,8 @@ use rmcp::model::JsonObject;
 use serde_json::{Value, json};
 
 use super::args::{
-    FeedbackArgs, GetArgs, ImportArgs, KeyArgs, MaintenanceArgs, SaveArgs, SearchArgs, parse,
+    FeedbackArgs, GetArgs, ImportArgs, KeyArgs, ListArgs, ListStatus, MaintenanceArgs, NoteOrigin,
+    SaveArgs, SearchArgs, parse,
 };
 use super::resolve::{levenshtein, suggest};
 use super::*;
@@ -234,6 +235,15 @@ fn documented_examples_parse() {
             .map(drop)
         },
     );
+    check(
+        "memory_list",
+        &schema::input::<ListArgs>(),
+        &[],
+        LIST_EXAMPLE,
+        &|raw| {
+            parse::<ListArgs>("memory_list", raw, &schema::input::<ListArgs>(), &[], "").map(drop)
+        },
+    );
     // The save example in the tool description is the same one.
     let save = profile("core")
         .into_iter()
@@ -447,4 +457,83 @@ fn vault_instructions_say_to_search_without_a_domain() {
                 && head.contains("untrusted")
         );
     }
+}
+
+#[test]
+fn list_arguments_parse_leniently() {
+    let parse_list = |value: Value| {
+        parse::<ListArgs>(
+            "memory_list",
+            obj(value),
+            &schema::input::<ListArgs>(),
+            &[],
+            LIST_EXAMPLE,
+        )
+    };
+    let args = parse_list(json!({"domain": "relay", "status": "all", "origin": "file", "limit": "20", "offset": "40"})).unwrap();
+    assert_eq!(args.status, Some(ListStatus::All));
+    assert_eq!(args.origin, Some(NoteOrigin::File));
+    assert_eq!((args.limit, args.offset), (Some(20), Some(40)));
+    let defaults = parse_list(json!({})).unwrap();
+    assert!(defaults.status.is_none() && defaults.origin.is_none() && defaults.tag.is_none());
+    let unknown = parse_list(json!({"kind": "decision"})).unwrap_err();
+    assert!(
+        unknown.contains("tag"),
+        "the error names the allowed fields: {unknown}"
+    );
+    assert!(parse_list(json!({"status": "deleted"})).is_err());
+}
+
+#[test]
+fn list_filters_by_status_origin_and_tag_and_pages_by_offset() {
+    use super::admin_tools::{listed, page};
+    use crate::model::Status;
+
+    let mut decision = crate::testing::note("decision-note", "relay");
+    decision.input.tags = vec!["Decision".to_owned()];
+    let mut imported = crate::testing::note("imported-note", "relay");
+    imported.input.source = Some("/notes/relay/imported-note.md#a-section".to_owned());
+    let mut retired = crate::testing::note("retired-note", "relay");
+    retired.status = Status::Legacy;
+
+    assert!(listed(&decision, ListStatus::Active, None, None));
+    assert!(listed(
+        &decision,
+        ListStatus::Active,
+        Some(NoteOrigin::Agent),
+        Some("decision")
+    ));
+    assert!(!listed(
+        &decision,
+        ListStatus::Active,
+        Some(NoteOrigin::File),
+        None
+    ));
+    assert!(!listed(&decision, ListStatus::Active, None, Some("gotcha")));
+    assert!(listed(
+        &imported,
+        ListStatus::Active,
+        Some(NoteOrigin::File),
+        None
+    ));
+    assert!(!listed(
+        &imported,
+        ListStatus::Active,
+        Some(NoteOrigin::Agent),
+        None
+    ));
+    assert!(!listed(&retired, ListStatus::Active, None, None));
+    assert!(
+        listed(&retired, ListStatus::Legacy, None, None)
+            && listed(&retired, ListStatus::All, None, None)
+    );
+    assert!(!listed(&decision, ListStatus::Legacy, None, None));
+
+    let rows = || (0..5).collect::<Vec<i32>>();
+    assert_eq!(page(rows(), 0, 2), (vec![0, 1], Some(2)));
+    assert_eq!(page(rows(), 2, 2), (vec![2, 3], Some(4)));
+    assert_eq!(page(rows(), 4, 2), (vec![4], None));
+    assert_eq!(page(rows(), 3, 2), (vec![3, 4], None));
+    assert_eq!(page(rows(), 9, 2), (Vec::new(), None));
+    assert_eq!(page(Vec::<i32>::new(), 0, 50), (Vec::new(), None));
 }

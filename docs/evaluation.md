@@ -9,7 +9,7 @@ and stochastic.
 | Layer | Question | How | When |
 |---|---|---|---|
 | Contract | Is the tool surface every model sees what we intend? | Snapshot of tools, schemas, descriptions, and instructions, plus a schema lint (`cargo test`) | Every commit |
-| Invariants | Does the server keep its promises regardless of model? | Unit tests, PostgreSQL integration tests, and 153 end-to-end checks over stdio (`make smoke`) | Every commit; CI uses a deterministic fake embedder |
+| Invariants | Does the server keep its promises regardless of model? | Unit tests, PostgreSQL integration tests, and 161 end-to-end checks over stdio (`make smoke`) | Every commit; CI uses a deterministic fake embedder |
 | Retrieval | Do the right memories rank first and fit the context budget? | `kioku eval` on graded queries | Weekly in CI with a real model, and before any ranking or model change |
 | Behavior | Do models use the tools well? | Server traces scored by [`evals/behavior`](../evals/behavior) | When changing models, prompts, tool descriptions, or serving stacks |
 

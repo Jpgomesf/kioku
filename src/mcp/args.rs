@@ -128,6 +128,43 @@ pub struct MaintenanceArgs {
     pub dry_run: Option<bool>,
 }
 
+/// Which lifecycle states `memory_list` returns.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ListStatus {
+    #[default]
+    Active,
+    Legacy,
+    All,
+}
+
+/// How a note reached Kioku: saved by an agent, or imported from a file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum NoteOrigin {
+    Agent,
+    File,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ListArgs {
+    /// Domain to list. At a vault's root without one: every domain of the vault. Default: the server's default domain.
+    pub domain: Option<String>,
+    /// "active" (default), "legacy", or "all".
+    pub status: Option<ListStatus>,
+    /// "agent" for notes saved with memory_save, "file" for notes imported from Markdown or a knowledge base. Default: both.
+    pub origin: Option<NoteOrigin>,
+    /// Only notes with this tag, e.g. "decision".
+    pub tag: Option<String>,
+    /// Notes per page, 1-200. Default 50.
+    #[schemars(range(min = 1, max = 200))]
+    pub limit: Option<i64>,
+    /// Notes to skip; pass the previous page's next_offset. Default 0.
+    #[schemars(range(min = 0))]
+    pub offset: Option<i64>,
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct EmptyArgs {}

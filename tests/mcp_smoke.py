@@ -250,11 +250,11 @@ def run(client: StdioClient, checks: Checks, notes_root: Path, hydration_key: st
 
     tools = {tool["name"]: tool for tool in client.request("tools/list", {}).get("tools", [])}
     expected = {"memory_search", "memory_get", "memory_save", "memory_inspect", "memory_feedback",
-                "memory_retire", "memory_restore", "memory_import", "memory_maintenance", "memory_stats"}
+                "memory_retire", "memory_restore", "memory_import", "memory_maintenance", "memory_stats", "memory_list"}
     checks.check("all tools are listed with MEMORY_TOOLS=all", set(tools) == expected)
     checks.check("read tools are annotated read-only", all(
         tools[name].get("annotations", {}).get("readOnlyHint") is True
-        for name in ("memory_search", "memory_get", "memory_inspect", "memory_stats")))
+        for name in ("memory_search", "memory_get", "memory_inspect", "memory_stats", "memory_list")))
     checks.check("input schemas are flat and nullable-free", all(
         "$ref" not in json.dumps(t["inputSchema"]) and '"null"' not in json.dumps(t["inputSchema"])
         for t in tools.values()))
@@ -442,6 +442,50 @@ def run(client: StdioClient, checks: Checks, notes_root: Path, hydration_key: st
     legacy_search = client.call("rag_search", {"query": "checkout-memory-smoke", "domain_filter": domain, "limit": 3})
     checks.check("older tool and argument names still work", checkout["key"] in keys(legacy_search["results"]))
 
+    # Save hints: a note that links nowhere, and one that may repeat another.
+    tag = uuid.uuid4().hex[:8]
+    lone_key, twin_key, linked_key = (f"smoke-{name}-{tag}" for name in ("lone", "twin", "linked"))
+    body = f"The smoke relay {tag} retries webhook deliveries five times with exponential backoff before giving up."
+    note = {"domain": domain, "title": f"Webhook retries {tag}", "tags": ["smoke-test", "convention"]}
+    lone = client.call("memory_save", {**note, "key": lone_key, "body": body})
+    checks.check("a save reports a new note that links to nothing",
+                 lone["links"] == 0 and "links to no other note" in lone.get("next", ""))
+    twin = client.call("memory_save", {**note, "key": twin_key, "body": body.replace("five", "5")})
+    checks.check("a save names a stored note that may hold the same fact",
+                 lone_key in [s["key"] for s in twin.get("similar", [])] and "similar notes exist" in twin.get("next", ""))
+    linked = client.call("memory_save", {**note, "key": linked_key, "body": body.replace("exponential", "doubling"),
+                                         "related": [lone_key]})
+    checks.check("a save counts its links and leaves linked notes out of the similar list",
+                 linked["links"] == 1 and "links to no other note" not in linked.get("next", "")
+                 and lone_key not in [s["key"] for s in linked.get("similar", [])])
+    client.call("memory_retire", {"key": twin_key, "domain": domain})
+
+    def list_all(arguments: dict) -> list[dict]:
+        notes, offset = [], 0
+        while True:
+            page = client.call("memory_list", {**arguments, "limit": 200, "offset": offset})
+            notes += page["notes"]
+            if "next_offset" not in page:
+                return notes
+            offset = page["next_offset"]
+
+    first_page = client.call("memory_list", {"domain": domain, "tag": "smoke-test", "limit": 2})
+    checks.check("memory_list pages through a domain's notes",
+                 first_page["domain"] == domain and first_page["count"] == 2 and first_page["total"] >= 4
+                 and first_page.get("next_offset") == 2
+                 and all({"key", "title", "status", "origin", "links", "updated"} <= set(n) for n in first_page["notes"]))
+    agent_keys = {n["key"] for n in list_all({"domain": domain, "origin": "agent"})}
+    file_keys = {n["key"] for n in list_all({"domain": domain, "origin": "file"})}
+    checks.check("memory_list tells agent notes from imported ones",
+                 lone_key in agent_keys and hydration_key in file_keys and hydration_key not in agent_keys)
+    legacy_keys = {n["key"] for n in list_all({"domain": domain, "status": "legacy"})}
+    active_keys = {n["key"] for n in list_all({"domain": domain})}
+    checks.check("memory_list shows retired notes only when asked",
+                 twin_key in legacy_keys and twin_key not in active_keys and linked_key in active_keys)
+    # Leave no near-duplicates behind for the next run's similar lists.
+    for key in (lone_key, linked_key):
+        client.call("memory_retire", {"key": key, "domain": domain})
+
     preview = client.call("memory_maintenance", {})
     checks.check("maintenance previews by default and never deletes", preview["dry_run"] is True and preview["policy"]["permanent_deletion"] is False)
     stats = client.call("memory_stats")
@@ -463,7 +507,7 @@ def run_restricted(client: StdioClient, checks: Checks, trace_path: Path) -> Non
     client.send({"jsonrpc": "2.0", "method": "notifications/initialized"})
     listed = {tool["name"] for tool in client.request("tools/list", {}).get("tools", [])}
     checks.check("a read-only profile lists only read tools",
-                 listed == {"memory_search", "memory_get", "memory_inspect", "memory_stats"})
+                 listed == {"memory_search", "memory_get", "memory_inspect", "memory_stats", "memory_list"})
     _, text, error = client.call_raw("memory_save", {
         "key": "reader-write", "title": "Write", "body": "A reader must not write.", "domain": "smoke"})
     checks.check("a read-only profile cannot save", error and text.startswith("refused") and "write scope" in text)
@@ -612,6 +656,23 @@ def run_vaults(binary: Path, values: dict[str, str], root: Path, timeout: float,
         checks.check("an area locked to local is visible to provider local", sealed_key in keys(sealed["results"]))
 
         a = session("vault-a", "anthropic", vault_a)
+
+        def list_all(client: StdioClient, arguments: dict) -> list[dict]:
+            notes, offset = [], 0
+            while True:
+                page = client.call("memory_list", {**arguments, "limit": 200, "offset": offset})
+                notes += page["notes"]
+                if "next_offset" not in page:
+                    return notes
+                offset = page["next_offset"]
+
+        vault_listing = list_all(a, {})
+        checks.check("memory_list at a vault's root covers only that vault's visible notes",
+                     vault_listing and all(n["domain"].startswith("smoke-a") for n in vault_listing)
+                     and locked_key not in {n["key"] for n in vault_listing}
+                     and all(n["domain"] != "smoke-a/sealed" for n in vault_listing) and clean({"notes": vault_listing}))
+        checks.check("memory_list shows a note locked to local only to provider local",
+                     locked_key in {n["key"] for n in list_all(local, {"domain": "smoke-a"})})
         wide = a.call("memory_search", {"query": word_b, "limit": 20})
         checks.check("a vault-wide search covers only this vault's visible domains",
                      wide.get("vault") == "smoke-a" and "smoke-a" in wide.get("domains", [])

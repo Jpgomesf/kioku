@@ -93,6 +93,11 @@ pub struct Config {
     pub embedding_reader: Provider,
     pub half_life_days: f64,
     pub legacy_threshold: f64,
+    /// How similar in meaning (cosine, 0 to 1) a stored note must be to one an
+    /// agent just created before the save names it as possibly the same fact
+    /// (`MEMORY_SIMILAR_NOTE_SCORE`). The default suits nomic-embed-text;
+    /// models whose similarities run lower need a lower value.
+    pub similar_note_score: f64,
     pub default_domain: String,
     pub notes_root: Option<PathBuf>,
     /// Repair the index and log aging candidates in the background while
@@ -258,6 +263,9 @@ impl Config {
             legacy_threshold: value("MEMORY_LEGACY_THRESHOLD", "0.2")
                 .parse()
                 .context("MEMORY_LEGACY_THRESHOLD must be a number")?,
+            similar_note_score: value("MEMORY_SIMILAR_NOTE_SCORE", "0.9")
+                .parse()
+                .context("MEMORY_SIMILAR_NOTE_SCORE must be a number")?,
             default_domain: value("MEMORY_DEFAULT_DOMAIN", "local"),
             notes_root: optional("MEMORY_NOTES_ROOT").map(PathBuf::from),
             background_upkeep: value("MEMORY_BACKGROUND_UPKEEP", "true") != "false",
@@ -291,6 +299,12 @@ impl Config {
         ensure!(
             cfg.legacy_threshold.is_finite() && (0.0..1.0).contains(&cfg.legacy_threshold),
             "MEMORY_LEGACY_THRESHOLD must be in [0, 1)"
+        );
+        ensure!(
+            cfg.similar_note_score.is_finite()
+                && cfg.similar_note_score > 0.0
+                && cfg.similar_note_score <= 1.0,
+            "MEMORY_SIMILAR_NOTE_SCORE must be in (0, 1]"
         );
         ensure!(
             !cfg.default_domain.trim().is_empty(),
