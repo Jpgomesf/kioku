@@ -37,7 +37,6 @@ import json
 import os
 import re
 import select
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -50,14 +49,16 @@ PROJECT = Path(__file__).resolve().parent.parent
 BINARY = PROJECT / "bin" / "kioku"
 ENV_FILE = PROJECT / ".env"
 HEADER = re.compile(r"^\s*\[")
+AREA_HEADER = re.compile(r"^\s*\[\[area\]\]\s*(#.*)?$")
 TIMEOUT = 20.0
 
 
 # --- Rendering and editing the TOML text --------------------------------------
 
 def toml_string(text: str) -> str:
-    """A TOML basic string. JSON's escapes are a subset of TOML's."""
-    return json.dumps(text, ensure_ascii=False)
+    """A TOML basic string. JSON's escapes, with every non-ASCII character as
+    \\uXXXX, are a subset of TOML's."""
+    return json.dumps(text, ensure_ascii=True)
 
 
 def toml_list(items: list[str]) -> str:
@@ -100,12 +101,13 @@ def append_blocks(text: str, blocks: list[str]) -> str:
 
 def remove_area(text: str, domain: str) -> str:
     """`text` without the `[[area]]` block of `domain`. Comment lines between
-    that block and the next header are kept: they describe the next block."""
+    that block and the next header are kept, because they describe the next
+    block; so are comments above the header, which may describe a group."""
     lines = text.splitlines(keepends=True)
     out: list[str] = []
     i, removed = 0, 0
     while i < len(lines):
-        if lines[i].strip() != "[[area]]":
+        if not AREA_HEADER.match(lines[i].rstrip("\n")):
             out.append(lines[i])
             i += 1
             continue
@@ -157,9 +159,14 @@ def find_repos(root: Path, depth: int = 3) -> list[Path]:
 
 
 def domain_matches(pattern: str, domain: str) -> bool:
-    """Kioku's domain patterns: a glob with `*` and `?`, or `re:<regex>`."""
+    """Kioku's domain patterns: a glob with `*` and `?`, or `re:<regex>`.
+    Rust regex syntax Python lacks counts as no match; Kioku itself decides."""
+    pattern = pattern.strip()
     if pattern.startswith("re:"):
-        return re.fullmatch(pattern[3:], domain) is not None
+        try:
+            return re.fullmatch(pattern[3:], domain) is not None
+        except re.error:
+            return False
     return re.fullmatch(".*".join(re.escape(part).replace(r"\?", ".") for part in pattern.split("*")), domain) is not None
 
 
@@ -219,26 +226,37 @@ class Placement:
 def place(folder: Path, vaults: Path, provider: str) -> Placement:
     """Where a session started in `folder` lands, asked from a Kioku server."""
     env = binary_env(vaults, MEMORY_PROVIDER=provider, KIOKU_SESSION_DIR=str(folder.expanduser().absolute()))
+    # Unbuffered pipes, so select sees every byte that has arrived.
     proc = subprocess.Popen([str(BINARY), "--env-file", str(ENV_FILE), "serve"], stdin=subprocess.PIPE,
-                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env, text=True)
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env, bufsize=0)
     try:
+        def send(message: dict) -> None:
+            assert proc.stdin
+            proc.stdin.write((json.dumps(message) + "\n").encode())
+
         def rpc(ident: int, method: str, params: dict) -> dict:
-            assert proc.stdin and proc.stdout
-            proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": ident, "method": method, "params": params}) + "\n")
-            proc.stdin.flush()
-            deadline = time.monotonic() + TIMEOUT
+            assert proc.stdout
+            send({"jsonrpc": "2.0", "id": ident, "method": method, "params": params})
+            deadline, pending = time.monotonic() + TIMEOUT, b""
             while time.monotonic() < deadline:
                 ready, _, _ = select.select([proc.stdout], [], [], deadline - time.monotonic())
-                line = proc.stdout.readline() if ready else ""
-                if not line:
+                chunk = os.read(proc.stdout.fileno(), 65536) if ready else b""
+                if not chunk:
                     break
-                message = json.loads(line)
-                if message.get("id") == ident:
+                pending += chunk
+                while b"\n" in pending:
+                    line, pending = pending.split(b"\n", 1)
+                    message = json.loads(line)
+                    if message.get("id") != ident:
+                        continue
+                    if "error" in message:
+                        raise SystemExit(f"Kioku answered {method} for {folder} with an error: {message['error']}")
                     return message.get("result") or {}
-            raise SystemExit(f"Kioku did not answer for {folder}")
+            raise SystemExit(f"Kioku did not answer {method} for {folder}")
 
         init = rpc(1, "initialize", {"protocolVersion": "2025-11-25", "capabilities": {},
                                      "clientInfo": {"name": "vaults.py", "version": "1"}})
+        send({"jsonrpc": "2.0", "method": "notifications/initialized"})
         instructions = init.get("instructions", "")
         if m := re.search(r'this session is in area "([^"]+)" of vault "([^"]+)"', instructions):
             return Placement(vault=m.group(2), area=m.group(1))
@@ -255,6 +273,7 @@ def place(folder: Path, vaults: Path, provider: str) -> Placement:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             proc.kill()
+            proc.wait()
 
 
 # --- Commands ------------------------------------------------------------------
@@ -265,7 +284,7 @@ def checked_paths(paths: list[Path], allow_missing: bool) -> list[Path]:
     shows up."""
     for path in paths:
         text = str(path)
-        if text.startswith("-") or re.search(r"\s-", text):
+        if text.startswith("-") or re.search(r"\s--", text):
             raise SystemExit(f"{text!r} looks like an option, not a folder; nothing was written")
         if not allow_missing and not path.expanduser().is_dir():
             raise SystemExit(f"{home_relative(path)} is not an existing folder; create it first or pass --allow-missing")
@@ -283,13 +302,14 @@ class Expect:
 def propose(args: argparse.Namespace, new_text: str, expectations: list[Expect], notes: list[str]) -> int:
     """Validate `new_text` as the vaults file, check `expectations`, show the
     diff, and with --apply replace the file."""
-    live: Path = args.file
+    live: Path = args.file.expanduser().resolve()  # a symlinked file is edited at its target
+    live.parent.mkdir(parents=True, exist_ok=True)
     old_text = live.read_text(encoding="utf-8") if live.exists() else ""
     if new_text == old_text:
         print("Nothing to change.")
         return 0
     with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False, encoding="utf-8",
-                                     dir=live.parent if live.parent.exists() else None) as handle:
+                                     dir=live.parent) as handle:
         handle.write(new_text)
         candidate = Path(handle.name)
     try:
@@ -314,18 +334,36 @@ def propose(args: argparse.Namespace, new_text: str, expectations: list[Expect],
         if not args.apply:
             print("Dry run: nothing was written. Run again with --apply to make this change.")
             return 0
-        backups = live.parent / "backups"
-        backups.mkdir(parents=True, exist_ok=True)
+        current = live.read_text(encoding="utf-8") if live.exists() else ""
+        if current != old_text:
+            print(f"{live} changed while this ran, so nothing was written; run the command again.")
+            return 1
         if live.exists():
-            backup = backups / f"{live.stem}-{time.strftime('%Y%m%d-%H%M%S')}.toml"
-            shutil.copy2(live, backup)
-            backup.chmod(0o600)
+            backup = write_backup(live, current)
             print(f"Backed up the old file to {backup}.")
         os.replace(candidate, live)
         print(f"Wrote {live}. New sessions see the change; reconnect Kioku in running ones (/mcp in Claude Code).")
         return 0
     finally:
         candidate.unlink(missing_ok=True)
+
+
+def write_backup(live: Path, text: str) -> Path:
+    """Save `text` under `backups/` beside `live`, in a file no other backup
+    can take: microsecond names, created exclusively."""
+    backups = live.parent / "backups"
+    backups.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S") + f"-{time.time_ns() % 1_000_000_000 // 1000:06d}"
+    for attempt in range(100):
+        backup = backups / f"{live.stem}-{stamp}{f'-{attempt}' if attempt else ''}.toml"
+        try:
+            descriptor = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            continue
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        return backup
+    raise SystemExit(f"could not create a backup in {backups}; nothing was written")
 
 
 def cmd_check(args: argparse.Namespace) -> int:
@@ -378,7 +416,10 @@ def cmd_sync_areas(args: argparse.Namespace) -> int:
     blocks, expectations = [], []
     for repo in find_repos(args.root.expanduser()):
         repo = repo.absolute()
-        if any(repo == path or repo.is_relative_to(path) for path in covered):
+        if any(repo == path or repo.is_relative_to(path) or path.is_relative_to(repo) for path in covered):
+            continue
+        if not slug(repo.name):
+            print(f"skip {home_relative(repo)}: its name gives no usable domain; use add-area")
             continue
         domain = f"{args.prefix}/{slug(repo.name)}"
         if domain in taken:

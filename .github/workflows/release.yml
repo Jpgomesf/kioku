@@ -21,8 +21,9 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  # A newer push to main supersedes an older one: only the latest build is published.
-  cancel-in-progress: true
+  # Runs on main queue instead of cancelling each other, so a publish is never cut
+  # off halfway; pull-request builds just give way to newer pushes.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   macos-arm64:
@@ -54,8 +55,16 @@ jobs:
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
+        # The release is updated in place, so it never disappears between a delete and a
+        # create. While assets are replaced one by one, SHA256SUMS lets the installer
+        # reject a mixed set.
         run: |
-          gh release delete main-build --cleanup-tag --yes --repo "$GITHUB_REPOSITORY" || true
-          gh release create main-build dist/* --repo "$GITHUB_REPOSITORY" --prerelease \
-            --target "$GITHUB_SHA" --title "Latest main build" \
-            --notes "macOS (Apple Silicon) binary built from ${GITHUB_SHA}. Install it with make install-prebuilt."
+          notes="macOS (Apple Silicon) binary built from ${GITHUB_SHA}. Install it with make install-prebuilt."
+          if gh release view main-build --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/main-build" -f sha="$GITHUB_SHA" -F force=true >/dev/null
+            gh release upload main-build dist/* --repo "$GITHUB_REPOSITORY" --clobber
+            gh release edit main-build --repo "$GITHUB_REPOSITORY" --notes "$notes"
+          else
+            gh release create main-build dist/* --repo "$GITHUB_REPOSITORY" --prerelease \
+              --target "$GITHUB_SHA" --title "Latest main build" --notes "$notes"
+          fi
