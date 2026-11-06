@@ -113,7 +113,7 @@ fn percent_decoded(text: &str) -> String {
 /// What a link to a concept shows and reaches.
 #[derive(Clone, Debug)]
 pub(super) struct Target {
-    /// The producer's id (`DEC-350`), the shortest name a reader can look up.
+    /// The producer's id (`ADR-350`), the shortest name a reader can look up.
     pub short: Option<String>,
     pub title: String,
     /// Heading anchors to the note holding that heading, for split concepts.

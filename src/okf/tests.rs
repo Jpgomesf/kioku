@@ -39,15 +39,15 @@ fn bundle() -> Tree {
         .write("kb/index.md", "# KB\n\n* [Overview](/kb/overview.md) - start here\n")
         .write(
             "kb/overview.md",
-            "---\ntype: Overview\ntitle: People enrichment overview\ndescription: Where the project stands.\nstatus: stable\nowner: João\ntags: [people-data]\nstale_after: 2026-11-10T19:55:00-03:00\ngenerated: { by: \"human:joao\", at: 2026-11-03T21:30:00-03:00 }\n---\n# State\n\nThe router is decided in [DEC-350](/kb/decisions/DEC-350-links.md); see also [the old rule](decisions/DEC-276-old.md#why) and [a missing note](/kb/decisions/DEC-999.md).\n\nIndex: [all decisions](/kb/decisions/) and [the log](/kb/log.md). Docs: [OKF](https://example.com/okf).\n\n```md\n[not a link](/kb/decisions/DEC-350-links.md)\n```\n",
+            "---\ntype: Overview\ntitle: Search and ranking summary\ndescription: Where the project stands.\nstatus: stable\nowner: João\ntags: [search-data]\nstale_after: 2026-11-10T19:55:00-03:00\ngenerated: { by: \"human:joao\", at: 2026-11-03T21:30:00-03:00 }\n---\n# State\n\nThe router is decided in [ADR-350](/kb/decisions/ADR-350-cites.md); see also [the old rule](decisions/ADR-276-old.md#why) and [a missing note](/kb/decisions/ADR-999.md).\n\nIndex: [all decisions](/kb/decisions/) and [the log](/kb/log.md). Docs: [OKF](https://example.com/okf).\n\n```md\n[not a link](/kb/decisions/ADR-350-cites.md)\n```\n",
         )
         .write(
-            "kb/decisions/DEC-350-links.md",
-            "---\ntype: Decision\nid: DEC-350\ntitle: Fundable links come from sources\nstatus: stable\ndecision_status: active\ndecided_by: TJ\nlinear: 'FUN-628 (15:49 contract)'\nprojects:\n- People Data\nsupersedes:\n- DEC-276\nverified: { by: \"human:joao\", at: 2026-11-04T10:00:00-03:00 }\nsources:\n- id: src\n  resource: https://slack.example/p1\n  title: TJ, #devs\n---\n# Decision\nFacts carry the rows that asked for the fetch.[^src]\n\n# Related\n* Supersedes: [DEC-276: Each batch links unlinked rows](/kb/decisions/DEC-276-old.md)\n* Items: [Overview](/kb/overview.md), [DEC-276: old](/kb/decisions/DEC-276-old.md), [Q-1: a question](/kb/questions/Q-001.md)\n\n[^src]: TJ, #devs, 27 Oct 13:52\n",
+            "kb/decisions/ADR-350-cites.md",
+            "---\ntype: Decision\nid: ADR-350\ntitle: Results always cite their source\nstatus: stable\ndecision_status: active\ndecided_by: Bo\nlinear: 'ENG-628 (15:49 contract)'\nprojects:\n- Search Team\nsupersedes:\n- ADR-276\nverified: { by: \"human:joao\", at: 2026-11-04T10:00:00-03:00 }\nsources:\n- id: src\n  resource: https://slack.example/p1\n  title: Bo, #devs\n---\n# Decision\nResults carry the notes that answered a query.[^src]\n\n# Related\n* Supersedes: [ADR-276: Each result shows a bare title](/kb/decisions/ADR-276-old.md)\n* Items: [Overview](/kb/overview.md), [ADR-276: old](/kb/decisions/ADR-276-old.md), [Q-1: a question](/kb/questions/Q-001.md)\n\n[^src]: Bo, #devs, 27 Oct 13:52\n",
         )
         .write(
-            "kb/decisions/DEC-276-old.md",
-            "---\ntype: Decision\nid: DEC-276\ntitle: Each batch links unlinked rows\nstatus: deprecated\nsuperseded_by: [DEC-350]\nverified:\n  - { by: \"process:nightly\", at: 2026-11-01T00:00:00Z }\n---\n# Why\nIt was simpler.\n",
+            "kb/decisions/ADR-276-old.md",
+            "---\ntype: Decision\nid: ADR-276\ntitle: Each result shows a bare title\nstatus: deprecated\nsuperseded_by: [ADR-350]\nverified:\n  - { by: \"process:nightly\", at: 2026-11-01T00:00:00Z }\n---\n# Why\nIt was simpler.\n",
         )
         .write(
             "kb/questions/Q-001.md",
@@ -97,30 +97,30 @@ fn concepts_are_keyed_by_concept_id_and_reserved_and_hidden_files_are_skipped() 
     assert_eq!(
         paths,
         [
-            "kb/decisions/DEC-276-old.md",
-            "kb/decisions/DEC-350-links.md",
+            "kb/decisions/ADR-276-old.md",
+            "kb/decisions/ADR-350-cites.md",
             "kb/overview.md",
             "kb/questions/Q-001.md"
         ]
     );
-    let conversion = convert(&bundle, "fundable");
+    let conversion = convert(&bundle, "work");
     assert!(conversion.failed.is_empty(), "{:?}", conversion.failed);
-    let decision = note(&conversion, "kb/decisions/DEC-350-links");
-    assert_eq!(decision.input.domain, "fundable");
-    assert_eq!(decision.input.title, "Fundable links come from sources");
-    assert_eq!(decision.input.aliases, ["DEC-350"]);
+    let decision = note(&conversion, "kb/decisions/ADR-350-cites");
+    assert_eq!(decision.input.domain, "work");
+    assert_eq!(decision.input.title, "Results always cite their source");
+    assert_eq!(decision.input.aliases, ["ADR-350"]);
     assert_eq!(decision.input.tags, ["decision"]);
     assert_eq!(
         decision.input.source.as_deref(),
         Some(
             tree.path()
-                .join("kb/decisions/DEC-350-links.md")
+                .join("kb/decisions/ADR-350-cites.md")
                 .to_str()
                 .unwrap()
         )
     );
     assert!(!decision.deprecated);
-    assert!(note(&conversion, "kb/decisions/DEC-276-old").deprecated);
+    assert!(note(&conversion, "kb/decisions/ADR-276-old").deprecated);
     assert_eq!(conversion.summary.concepts, 4);
     assert_eq!(conversion.summary.deprecated, 1);
     assert_eq!(conversion.summary.okf_version.as_deref(), Some("0.2"));
@@ -133,20 +133,20 @@ fn links_become_related_keys_and_keep_their_words() {
     let overview = note(&conversion, "kb/overview");
     assert_eq!(
         overview.input.related,
-        ["kb/decisions/DEC-350-links", "kb/decisions/DEC-276-old"]
+        ["kb/decisions/ADR-350-cites", "kb/decisions/ADR-276-old"]
     );
     let body = &overview.input.body;
     // The label already names the id; a label that doesn't gets it added.
-    assert!(body.contains("decided in DEC-350;"), "{body}");
+    assert!(body.contains("decided in ADR-350;"), "{body}");
     assert!(
-        body.contains("see also the old rule (DEC-276) and a missing note."),
+        body.contains("see also the old rule (ADR-276) and a missing note."),
         "{body}"
     );
     // Navigation links keep only their words; external links and code stay as written.
     assert!(body.contains("Index: all decisions and the log."), "{body}");
     assert!(body.contains("[OKF](https://example.com/okf)"), "{body}");
     assert!(
-        body.contains("[not a link](/kb/decisions/DEC-350-links.md)"),
+        body.contains("[not a link](/kb/decisions/ADR-350-cites.md)"),
         "{body}"
     );
     assert_eq!(conversion.summary.broken_links, 1);
@@ -156,14 +156,14 @@ fn links_become_related_keys_and_keep_their_words() {
 fn a_list_of_links_becomes_a_list_of_ids() {
     let tree = bundle();
     let conversion = convert(&Bundle::read(tree.path()).unwrap(), "d");
-    let body = &note(&conversion, "kb/decisions/DEC-350-links").input.body;
+    let body = &note(&conversion, "kb/decisions/ADR-350-cites").input.body;
     assert!(
-        body.contains("* Items: People enrichment overview, DEC-276, Q-001"),
+        body.contains("* Items: Search and ranking summary, ADR-276, Q-001"),
         "{body}"
     );
     // One link is not a list: it keeps its words.
     assert!(
-        body.contains("* Supersedes: DEC-276: Each batch links unlinked rows"),
+        body.contains("* Supersedes: ADR-276: Each result shows a bare title"),
         "{body}"
     );
 }
@@ -172,18 +172,18 @@ fn a_list_of_links_becomes_a_list_of_ids() {
 fn the_facts_line_carries_type_lifecycle_trust_and_producer_fields() {
     let tree = bundle();
     let conversion = convert(&Bundle::read(tree.path()).unwrap(), "d");
-    let decision = note(&conversion, "kb/decisions/DEC-350-links");
+    let decision = note(&conversion, "kb/decisions/ADR-350-cites");
     let facts = decision.input.body.lines().next().unwrap();
     assert_eq!(
         facts,
-        "Decision DEC-350 · human-reviewed by human:joao on 2026-11-04 · supersedes: DEC-276 (Each batch links unlinked rows) · decision status: active · decided by: TJ · linear: FUN-628 (15:49 contract) · projects: People Data"
+        "Decision ADR-350 · human-reviewed by human:joao on 2026-11-04 · supersedes: ADR-276 (Each result shows a bare title) · decision status: active · decided by: Bo · linear: ENG-628 (15:49 contract) · projects: Search Team"
     );
     assert!((decision.input.confidence - 0.95).abs() < 1e-9);
 
-    let old = note(&conversion, "kb/decisions/DEC-276-old");
+    let old = note(&conversion, "kb/decisions/ADR-276-old");
     assert!(
         old.input.body.starts_with(
-            "Decision DEC-276 · deprecated · machine-confirmed · superseded by: DEC-350 (Fundable links come from sources)"
+            "Decision ADR-276 · deprecated · machine-confirmed · superseded by: ADR-350 (Results always cite their source)"
         ),
         "{}",
         old.input.body
@@ -207,7 +207,7 @@ fn the_facts_line_carries_type_lifecycle_trust_and_producer_fields() {
         "Overview · unverified · re-read after 2026-11-10 · owner: João · written by human:joao on 2026-11-03"
     );
     assert_eq!(lines.next().unwrap(), "Where the project stands.");
-    assert_eq!(overview.input.tags, ["people-data", "overview"]);
+    assert_eq!(overview.input.tags, ["search-data", "overview"]);
 }
 
 #[test]
@@ -255,7 +255,7 @@ fn long_topic() -> String {
             text.push_str(&format!(
                 "The {part} paragraph {n} explains one rule of the pipeline in enough words to take some room in the note. "
             ));
-            text.push_str("It links [the decision](/kb/decisions/DEC-350-links.md).\n\n");
+            text.push_str("It links [the decision](/kb/decisions/ADR-350-cites.md).\n\n");
         }
     }
     text.push_str("# Data\n\n| Column | Meaning |\n|---|---|\n");
@@ -329,7 +329,7 @@ fn a_long_concept_becomes_a_hub_and_sections_keyed_by_anchor() {
         router
             .input
             .related
-            .contains(&"kb/decisions/DEC-350-links".to_owned())
+            .contains(&"kb/decisions/ADR-350-cites".to_owned())
     );
     assert!(
         router

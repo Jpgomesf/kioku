@@ -89,7 +89,7 @@ class Patterns(unittest.TestCase):
         self.assertTrue(vaults.domain_matches("personal/*", "personal/kioku"))
         self.assertTrue(vaults.domain_matches("local", "local"))
         self.assertFalse(vaults.domain_matches("personal/*", "personalx"))
-        self.assertTrue(vaults.domain_matches("re:fundable(/.*)?", "fundable/people-data"))
+        self.assertTrue(vaults.domain_matches("re:acme(/.*)?", "acme/api"))
         self.assertTrue(vaults.domain_matches("a?c", "abc"))
         self.assertFalse(vaults.domain_matches("a.c", "abc"))
 
