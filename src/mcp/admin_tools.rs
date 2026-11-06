@@ -1,6 +1,6 @@
 //! Tools for curating memory, enabled by the `all` profile or by name.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use chrono::Utc;
 use rmcp::model::{CallToolResult, JsonObject};
@@ -8,14 +8,75 @@ use rmcp::{tool, tool_router};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use super::args::{EmptyArgs, FeedbackArgs, ImportArgs, KeyArgs, MaintenanceArgs, parse};
+use super::args::{
+    EmptyArgs, FeedbackArgs, ImportArgs, KeyArgs, ListArgs, ListStatus, MaintenanceArgs,
+    NoteOrigin, parse,
+};
 use crate::error::UserError;
 use crate::lifecycle;
 
-use super::output::{error_text, ok, render_error, round};
+use super::output::{clamp, error_text, ok, render_error, round};
 use super::{
-    FEEDBACK_EXAMPLE, IMPORT_EXAMPLE, KEY_EXAMPLE, MAINTENANCE_EXAMPLE, MemoryServer, schema,
+    FEEDBACK_EXAMPLE, IMPORT_EXAMPLE, KEY_EXAMPLE, LIST_EXAMPLE, MAINTENANCE_EXAMPLE, MemoryServer,
+    schema,
 };
+use crate::model::{Note, Status};
+
+/// How a note reached Kioku: imported from a file (its source is an absolute
+/// path, possibly with a `#section`), or saved by an agent.
+pub(super) fn note_origin(note: &Note) -> NoteOrigin {
+    if note
+        .input
+        .source
+        .as_deref()
+        .is_some_and(|s| std::path::Path::new(s).is_absolute())
+    {
+        NoteOrigin::File
+    } else {
+        NoteOrigin::Agent
+    }
+}
+
+impl NoteOrigin {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Agent => "agent",
+            Self::File => "file",
+        }
+    }
+}
+
+impl ListStatus {
+    fn admits(self, status: Status) -> bool {
+        match self {
+            Self::Active => status == Status::Active,
+            Self::Legacy => status == Status::Legacy,
+            Self::All => true,
+        }
+    }
+}
+
+/// Whether `memory_list` shows `note` for these filters. Tags match without
+/// regard to case.
+pub(super) fn listed(
+    note: &Note,
+    status: ListStatus,
+    origin: Option<NoteOrigin>,
+    tag: Option<&str>,
+) -> bool {
+    status.admits(note.status)
+        && origin.is_none_or(|origin| note_origin(note) == origin)
+        && tag.is_none_or(|tag| note.input.tags.iter().any(|t| t.eq_ignore_ascii_case(tag)))
+}
+
+/// The rows from `offset`, at most `limit` of them, and the offset of the
+/// next page while rows remain.
+pub(super) fn page<T>(rows: Vec<T>, offset: usize, limit: usize) -> (Vec<T>, Option<usize>) {
+    let total = rows.len();
+    let shown: Vec<T> = rows.into_iter().skip(offset).take(limit).collect();
+    let end = offset.saturating_add(shown.len());
+    (shown, (end < total).then_some(end))
+}
 
 /// History entries memory_inspect shows, newest first.
 const INSPECT_HISTORY: i64 = 10;
@@ -241,9 +302,124 @@ impl MemoryServer {
             Err(error) => error_text(render_error("memory_stats", &error)),
         }
     }
+
+    #[tool(
+        name = "memory_list",
+        title = "List memories",
+        description = "List the memories of a domain, page by page: key, title, status, tags, origin (agent or file), link count, and last update. Use for audits and cleanup, such as finding the notes agents saved or notes that link to nothing; to find notes by topic, use memory_search. At a vault's root without a domain, it lists every domain of the vault. Reads no memory text. Example: {\"domain\":\"relay\",\"origin\":\"agent\",\"limit\":50}",
+        input_schema = schema::input::<ListArgs>(),
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    async fn memory_list(&self, raw: JsonObject) -> CallToolResult {
+        let args: ListArgs = match parse(
+            "memory_list",
+            raw,
+            &schema::input::<ListArgs>(),
+            &[],
+            LIST_EXAMPLE,
+        ) {
+            Ok(args) => args,
+            Err(text) => return error_text(text),
+        };
+        match self.list(args).await {
+            Ok(value) => ok(value),
+            Err(error) => error_text(render_error("memory_list", &error)),
+        }
+    }
 }
 
 impl MemoryServer {
+    /// One page of a domain's notes, or at a vault's root without a domain,
+    /// of every domain of the vault, sorted by domain and key. Notes the
+    /// session may not see are left out, and so are their links.
+    async fn list(&self, args: ListArgs) -> anyhow::Result<Value> {
+        let caller = self.caller();
+        let mut notes = Vec::new();
+        let status = args.status.unwrap_or_default();
+        let include_legacy = status != ListStatus::Active;
+        let named = args
+            .domain
+            .as_deref()
+            .map(str::trim)
+            .filter(|d| !d.is_empty());
+        let vault = caller
+            .session
+            .placement()
+            .filter(|placement| placement.at_root() && named.is_none());
+        let domains = match vault {
+            Some(_) => self.visible_domains(include_legacy).await?,
+            None => vec![self.domain(named)?],
+        };
+        let limit = clamp(args.limit.unwrap_or(50), 1, 200, "limit", &mut notes);
+        let offset = clamp(args.offset.unwrap_or(0), 0, i64::MAX, "offset", &mut notes);
+        let tag = args.tag.as_deref().map(str::trim).filter(|t| !t.is_empty());
+        let mut rows: Vec<(String, Note, usize)> = Vec::new();
+        for domain in &domains {
+            let mut stored = self.app.store.notes(Some(domain), include_legacy).await?;
+            stored.retain(|note| caller.viewer.sees(note));
+            let active: HashSet<Uuid> = stored
+                .iter()
+                .filter(|note| note.status == Status::Active)
+                .map(|note| note.id)
+                .collect();
+            let mut neighbors: HashMap<Uuid, HashSet<Uuid>> = HashMap::new();
+            for edge in self.app.store.edges(Some(domain)).await? {
+                if active.contains(&edge.source) && active.contains(&edge.target) {
+                    neighbors
+                        .entry(edge.source)
+                        .or_default()
+                        .insert(edge.target);
+                    neighbors
+                        .entry(edge.target)
+                        .or_default()
+                        .insert(edge.source);
+                }
+            }
+            for note in stored {
+                if listed(&note, status, args.origin, tag) {
+                    let links = neighbors.get(&note.id).map_or(0, HashSet::len);
+                    rows.push((domain.clone(), note, links));
+                }
+            }
+        }
+        rows.sort_by(|a, b| (&a.0, &a.1.input.key).cmp(&(&b.0, &b.1.input.key)));
+        let total = rows.len();
+        let (rows, next_offset) = page(rows, offset, limit);
+        let notes_out: Vec<Value> = rows
+            .into_iter()
+            .map(|(domain, note, links)| {
+                let mut item = json!({
+                    "key": note.input.key,
+                    "domain": domain,
+                    "title": note.input.title,
+                    "status": note.status,
+                    "origin": note_origin(&note).as_str(),
+                    "links": links,
+                    "updated": note.updated_at.format("%Y-%m-%d").to_string(),
+                });
+                if !note.input.tags.is_empty() {
+                    item["tags"] = json!(note.input.tags);
+                }
+                item
+            })
+            .collect();
+        let mut out = json!({"total": total, "count": notes_out.len(), "notes": notes_out});
+        match vault {
+            Some(placement) => {
+                out["vault"] = json!(placement.vault());
+                out["domains"] = json!(domains);
+            }
+            None => out["domain"] = json!(domains[0]),
+        }
+        if let Some(next) = next_offset {
+            out["next_offset"] = json!(next);
+        }
+        if !notes.is_empty() {
+            out["note"] = json!(notes.join("; "));
+        }
+        Ok(out)
+    }
+
     async fn inspect(&self, args: KeyArgs) -> anyhow::Result<Value> {
         let domain = self.domain(args.domain.as_deref())?;
         let id = self
@@ -258,16 +434,7 @@ impl MemoryServer {
         let history = self.app.store.revisions(id, INSPECT_HISTORY).await?;
         let retention = lifecycle::retention(&note, Utc::now(), self.app.config.half_life_days);
         let source = self.display_source(note.input.source.as_deref());
-        let origin = if note
-            .input
-            .source
-            .as_deref()
-            .is_some_and(|s| std::path::Path::new(s).is_absolute())
-        {
-            "file"
-        } else {
-            "agent"
-        };
+        let origin = note_origin(&note).as_str();
         let mut out = json!({
             "key": note.input.key,
             "id": note.id,

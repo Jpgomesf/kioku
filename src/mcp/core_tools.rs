@@ -73,7 +73,7 @@ impl MemoryServer {
     #[tool(
         name = "memory_save",
         title = "Save a memory",
-        description = "Save one durable fact for future sessions: a confirmed decision, tested fix, verified architecture fact, or lasting user preference. Search first and reuse an existing key to update it instead of duplicating. Body: 1-3 sentences with reason and scope; no secrets, guesses, or transcripts. Don't save facts you only retrieved. Returns key, revision, and whether anything changed. Example: {\"key\":\"webhook-dedup-retention\",\"title\":\"Webhook dedup token retention\",\"body\":\"Relay keeps webhook dedup tokens for 72 hours because partners replay deliveries for up to 3 days.\",\"domain\":\"relay\",\"related\":[\"webhook-retries\"]}",
+        description = "Save one durable fact for future sessions: a confirmed decision, tested fix, verified architecture fact, or lasting user preference. Search first and reuse an existing key to update it instead of duplicating. Body: 1-3 sentences with reason and scope; no secrets, guesses, or transcripts. Don't save facts you only retrieved. Returns key, revision, whether anything changed, its link count, and similar notes that may hold the same fact. Example: {\"key\":\"webhook-dedup-retention\",\"title\":\"Webhook dedup token retention\",\"body\":\"Relay keeps webhook dedup tokens for 72 hours because partners replay deliveries for up to 3 days.\",\"domain\":\"relay\",\"related\":[\"webhook-retries\"]}",
         input_schema = schema::input::<SaveArgs>(),
         annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
@@ -423,6 +423,7 @@ impl MemoryServer {
             "changed": outcome.changed,
             "revision": outcome.revision,
             "indexed": outcome.indexed,
+            "links": outcome.links,
         });
         if !unresolved.is_empty() {
             out["unresolved_related"] = json!(
@@ -432,6 +433,23 @@ impl MemoryServer {
                     .collect::<Vec<_>>()
             );
             out["hint"] = json!("use exact keys from memory_search results in related");
+        }
+        let mut next = Vec::new();
+        if outcome.isolated {
+            next.push("this new note links to no other note: add to related the keys of 1-3 notes it builds on, narrows or replaces, so search can reach it through the graph");
+        }
+        if !outcome.similar.is_empty() {
+            out["similar"] = json!(
+                outcome
+                    .similar
+                    .iter()
+                    .map(|s| json!({"key": s.key, "title": s.title, "score": s.score}))
+                    .collect::<Vec<_>>()
+            );
+            next.push("similar notes exist: if one already holds this fact, update that key instead and retire this one; if this note refines or replaces one, add it to related");
+        }
+        if !next.is_empty() {
+            out["next"] = json!(next.join("; "));
         }
         if !outcome.indexed {
             out["note"] = json!(

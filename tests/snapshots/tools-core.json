@@ -44,7 +44,7 @@
     {
       "name": "memory_save",
       "title": "Save a memory",
-      "description": "Save one durable fact for future sessions: a confirmed decision, tested fix, verified architecture fact, or lasting user preference. Search first and reuse an existing key to update it instead of duplicating. Body: 1-3 sentences with reason and scope; no secrets, guesses, or transcripts. Don't save facts you only retrieved. Returns key, revision, and whether anything changed. Example: {\"key\":\"webhook-dedup-retention\",\"title\":\"Webhook dedup token retention\",\"body\":\"Relay keeps webhook dedup tokens for 72 hours because partners replay deliveries for up to 3 days.\",\"domain\":\"relay\",\"related\":[\"webhook-retries\"]}",
+      "description": "Save one durable fact for future sessions: a confirmed decision, tested fix, verified architecture fact, or lasting user preference. Search first and reuse an existing key to update it instead of duplicating. Body: 1-3 sentences with reason and scope; no secrets, guesses, or transcripts. Don't save facts you only retrieved. Returns key, revision, whether anything changed, its link count, and similar notes that may hold the same fact. Example: {\"key\":\"webhook-dedup-retention\",\"title\":\"Webhook dedup token retention\",\"body\":\"Relay keeps webhook dedup tokens for 72 hours because partners replay deliveries for up to 3 days.\",\"domain\":\"relay\",\"related\":[\"webhook-retries\"]}",
       "inputSchema": {
         "required": [
           "key",

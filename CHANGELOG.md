@@ -22,6 +22,19 @@ All notable changes to this project are documented here. The format follows
   lists a bundle it meets under `failed` instead of reading it.
 - An imported note whose source is a section (`file.md#anchor`) belongs to its
   file while the file exists, as other file-backed notes do.
+- `memory_list` (in the `all` profile, read scope) pages through a domain's
+  notes, or at a vault's root every domain of the vault. Each note shows key,
+  title, status, tags, origin (agent or file), link count, and last update.
+  It filters by status, origin, and tag, and applies vault and lock rules.
+- `memory_save` reports `links`, the active notes the saved note links to or
+  is linked from, and a new `next` field with advice. It says when a new note
+  links to nothing while its domain has other notes. For a new note it also
+  lists up to three unlinked stored notes at least
+  `MEMORY_SIMILAR_NOTE_SCORE` similar (default 0.9) under `similar`, which may
+  hold the same fact or be notes to link. The lookup reuses the note's vector,
+  leaves every other active note out of the vector query so they can't
+  crowd out candidates, and runs after the write lock is released. `hint` is
+  unchanged: it still only reports unresolved `related` entries.
 - Hosted embeddings. The OpenAI-compatible provider works with OpenRouter,
   OpenAI, and similar services (README, "Hosted embeddings"). The service
   reads what it embeds, so `EMBEDDING_READER` names its provider (`local` by
