@@ -92,6 +92,13 @@ function useViewport(ref: React.RefObject<HTMLDivElement | null>): Viewport {
   return view;
 }
 
+/** A note's key short enough for the zoom control: its last path segment. graph.css cuts it
+ * off with an ellipsis if it is still too long; the caption above shows the whole key. */
+function shortKey(key: string | undefined): string {
+  if (!key) return "Note";
+  return key.slice(key.lastIndexOf("/") + 1) || key;
+}
+
 /** The canvas dot grid's size and offset, as custom properties graph.css reads. */
 function dotStyle(camera: Camera): CSSProperties {
   const { gap, x, y } = dotGrid(camera);
@@ -561,7 +568,7 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
 
   const stepOptions = [
     ...LEVEL_NAMES.map((label, i) => ({ value: String(i), label })),
-    { value: "3", label: focusNode?.key ?? nearest?.key ?? "Note" },
+    { value: "3", label: shortKey(focusNode?.key ?? nearest?.key) },
   ];
   const matches = useMemo(() => findNodes(visible, query), [visible, query]);
   const inspected = shownSelected ? (byKey.get(shownSelected) ?? null) : null;

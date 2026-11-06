@@ -262,6 +262,7 @@ export function Sidebar({ route }: SidebarProps) {
               type="button"
               key={domain}
               className="k-area-row"
+              title={domain}
               aria-current={domain === currentDomain ? "true" : undefined}
               onClick={() => pickArea(domain)}
             >

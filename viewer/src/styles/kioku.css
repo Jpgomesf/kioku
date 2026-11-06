@@ -612,6 +612,16 @@ fieldset:disabled .k-check,
   font-size: 13px;
   line-height: 18px;
 }
+.k-area-row > span:first-child,
+.k-area-option > .k-grow {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.k-area-row .k-area-in {
+  flex: none;
+}
 .k-area-row:hover {
   background: var(--sunken);
 }

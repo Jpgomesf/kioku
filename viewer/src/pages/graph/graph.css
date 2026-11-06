@@ -394,10 +394,26 @@
   }
 }
 
+/* The note step can hold a long key: it shrinks with an ellipsis rather than overflow. */
+.graph-steps {
+  min-width: 0;
+}
+.graph-steps .k-seg {
+  min-width: 0;
+  max-width: 100%;
+}
+.graph-steps .k-seg button {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.graph-steps .k-seg button:last-child {
+  max-width: 14rem;
+}
 .graph-hops {
   display: inline-flex;
   align-items: center;
   gap: var(--space-4);
+  white-space: nowrap;
   font-size: 12px;
   color: var(--fg-2);
 }
