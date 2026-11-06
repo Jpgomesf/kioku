@@ -32,6 +32,7 @@ import { usePrefersReducedMotion } from "../../motion";
 import {
   type Camera,
   cameraTransform,
+  dotGrid,
   fitCamera,
   type Level,
   levelFor,
@@ -89,6 +90,12 @@ function useViewport(ref: React.RefObject<HTMLDivElement | null>): Viewport {
     return () => ro.disconnect();
   }, [ref]);
   return view;
+}
+
+/** The canvas dot grid's size and offset, as custom properties graph.css reads. */
+function dotStyle(camera: Camera): CSSProperties {
+  const { gap, x, y } = dotGrid(camera);
+  return { "--dot-gap": `${gap}px`, "--dot-x": `${x}px`, "--dot-y": `${y}px` } as CSSProperties;
 }
 
 /** Runs `fn` after the next frame has been styled, so new elements can transition. */
@@ -631,6 +638,7 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
         <div
           ref={stageRef}
           className={`graph-stage ${transition}${live ? " graph-live" : ""}`}
+          style={dotStyle(camera)}
           role="application"
           aria-label={`Graph of ${areaLabel}. Arrow keys move, plus and minus zoom, Enter opens the note nearest the centre, Escape zooms out.`}
           aria-describedby="graph-stage-hint"

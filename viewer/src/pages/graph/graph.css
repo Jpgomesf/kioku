@@ -44,7 +44,11 @@
   flex: 1 1 auto;
   min-height: 320px;
   overflow: hidden;
-  background: var(--bg);
+  /* The canvas: a quiet dot grid tied to the camera (see dotGrid in camera.ts). */
+  background-color: var(--bg);
+  background-image: radial-gradient(circle, var(--graph-dot) 1px, transparent 1.5px);
+  background-size: var(--dot-gap, 24px) var(--dot-gap, 24px);
+  background-position: var(--dot-x, 0) var(--dot-y, 0);
   cursor: grab;
   touch-action: none;
   user-select: none;
@@ -102,6 +106,11 @@
   transition: opacity var(--duration-view) var(--ease-standard);
 }
 /* Animated moves: the camera and everything placed by it share one duration and easing. */
+.graph-stage.graph-animate {
+  transition:
+    background-size var(--duration-zoom) var(--ease-zoom),
+    background-position var(--duration-zoom) var(--ease-zoom);
+}
 .graph-animate .graph-camera,
 .graph-animate .graph-world,
 .graph-animate .graph-html > * {
@@ -114,6 +123,7 @@
   transition: opacity var(--duration-zoom) var(--ease-zoom);
 }
 @media (prefers-reduced-motion: reduce) {
+  .graph-stage,
   .graph-stage *,
   .graph-animate .graph-camera,
   .graph-animate .graph-world,

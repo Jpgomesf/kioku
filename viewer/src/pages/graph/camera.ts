@@ -94,3 +94,17 @@ export function wheelFactor(deltaY: number, deltaMode = 0): number {
 export function cameraTransform(c: Camera): string {
   return `translate(${c.x}px, ${c.y}px) scale(${c.s})`;
 }
+
+/** World spacing of the canvas dot grid at its coarsest. */
+export const DOT_SPACING = 24;
+
+/** The canvas dot grid for a camera, in screen pixels. The grid is anchored to the world, so
+ * it pans and scales with the view, and its world spacing halves as you zoom in (doubles as
+ * you zoom out) so the dots keep an even density, as in FigJam. */
+export function dotGrid(c: Camera): { gap: number; x: number; y: number } {
+  let gap = DOT_SPACING * c.s;
+  if (!Number.isFinite(gap) || gap <= 0) return { gap: DOT_SPACING, x: 0, y: 0 };
+  while (gap >= 32) gap /= 2;
+  while (gap < 16) gap *= 2;
+  return { gap, x: c.x, y: c.y };
+}

@@ -3,6 +3,8 @@ import type { GraphData, GraphNode } from "../../api";
 import { getGraph } from "../../api/graph/mock";
 import {
   centreOn,
+  DOT_SPACING,
+  dotGrid,
   fitCamera,
   levelFor,
   nextLevel,
@@ -115,6 +117,35 @@ describe("layout", () => {
     const first = layoutFor("demo", g);
     expect(layoutFor("demo", { nodes: [...g.nodes], edges: [...g.edges] })).toBe(first);
     expect(layoutFor("demo", { nodes: g.nodes.slice(1), edges: g.edges })).not.toBe(first);
+  });
+});
+
+describe("canvas dot grid", () => {
+  it("keeps an even density at every zoom", () => {
+    for (const s of [0.05, 0.3, 0.94, 1, 2.2, 3.5, 7, 12.5, 40]) {
+      const { gap } = dotGrid({ x: 0, y: 0, s });
+      expect(gap).toBeGreaterThanOrEqual(16);
+      expect(gap).toBeLessThan(32);
+    }
+  });
+
+  it("stays anchored to the world, so it pans and scales with the view", () => {
+    for (const c of [
+      { x: 30, y: -12, s: 0.94 },
+      { x: -400, y: 220, s: 7 },
+    ]) {
+      const grid = dotGrid(c);
+      expect([grid.x, grid.y]).toEqual([c.x, c.y]);
+      // The world spacing is the base spacing halved or doubled a whole number of times.
+      const k = Math.log2(DOT_SPACING / (grid.gap / c.s));
+      expect(Math.abs(k - Math.round(k))).toBeLessThan(1e-9);
+    }
+  });
+
+  it("falls back to the base spacing for a broken camera", () => {
+    for (const s of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(dotGrid({ x: 5, y: 5, s })).toEqual({ gap: DOT_SPACING, x: 0, y: 0 });
+    }
   });
 });
 
