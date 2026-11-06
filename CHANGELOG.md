@@ -22,6 +22,19 @@ All notable changes to this project are documented here. The format follows
   lists a bundle it meets under `failed` instead of reading it.
 - An imported note whose source is a section (`file.md#anchor`) belongs to its
   file while the file exists, as other file-backed notes do.
+- `scripts/vaults.py` edits the vaults file safely, with no recompile.
+  - Commands: `check`, `where`, `add-area`, `add-vault`, `add-lock`,
+    `remove-area`, and `sync-areas`, which adds an area for every git
+    repository under a folder that has none.
+  - Each change is made on a copy. The installed binary validates it, and the
+    script checks where the affected folders would place a session, then
+    shows the diff.
+  - Only `--apply` writes, after a backup.
+- Prebuilt binaries. Every push to main builds the macOS (Apple Silicon)
+  binary and publishes it as the prerelease `main-build`.
+  - `make install-prebuilt` downloads it, verifies its checksums, checks that
+    it was built from the checked-out commit, and installs it without
+    compiling.
 - `memory_list` (in the `all` profile, read scope) pages through a domain's
   notes, or at a vault's root every domain of the vault. Each note shows key,
   title, status, tags, origin (agent or file), link count, and last update.

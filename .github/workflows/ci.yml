@@ -44,6 +44,8 @@ jobs:
       - run: cargo fmt --all --check
       - name: shellcheck (preinstalled on ubuntu-24.04)
         run: shellcheck -x scripts/*.sh evals/behavior/run_claude.sh
+      - name: Python unit tests (scripts/vaults.py)
+        run: python3 -m unittest discover -s tests -p 'test_*.py'
       - name: compose.yaml is valid
         env:
           POSTGRES_PASSWORD: ci-placeholder
