@@ -738,6 +738,18 @@ fn a_concept_keyed_by_its_own_id_still_has_its_type() {
 }
 
 #[test]
+fn producer_ids_with_a_hash_keep_their_type() {
+    let tree = small_bundle(&[
+        ("kb/issue.md", "---\ntype: Epic\nid: \"#123\"\n---\nWork.\n"),
+        ("kb/rfc.md", "---\ntype: Proposal\nid: RFC#7\n---\nIdea.\n"),
+    ]);
+    let conversion = converted(&tree);
+    let found = |key: &str| imported_type(&note(&conversion, key).input);
+    assert_eq!(found("kb/issue").as_deref(), Some("epic"));
+    assert_eq!(found("kb/rfc").as_deref(), Some("proposal"));
+}
+
+#[test]
 fn a_type_the_label_limit_cut_is_not_found() {
     // 64 own tags, one of them a word of the type: the type tag is cut, and a
     // shorter prefix must not stand in for it.

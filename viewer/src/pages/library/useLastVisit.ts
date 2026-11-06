@@ -3,6 +3,7 @@
 // Opening the Library records nothing, so the date only moves when a person marks the
 // area as reviewed.
 import { useSyncExternalStore } from "react";
+import { parseInstant } from "../../app/dates";
 
 const KEY = "kioku.viewer.library.lastVisit";
 
@@ -17,7 +18,10 @@ function readAll(): Record<string, string> {
     const parsed: unknown = raw ? JSON.parse(raw) : {};
     if (typeof parsed !== "object" || parsed === null) return {};
     return Object.fromEntries(
-      Object.entries(parsed).filter((e): e is [string, string] => typeof e[1] === "string"),
+      // Drop anything that isn't a timestamp, so a corrupted entry reads as no visit.
+      Object.entries(parsed).filter(
+        (e): e is [string, string] => typeof e[1] === "string" && !Number.isNaN(parseInstant(e[1])),
+      ),
     );
   } catch {
     return {};

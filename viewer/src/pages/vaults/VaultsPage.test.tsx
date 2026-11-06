@@ -16,6 +16,9 @@ vi.mock("../../api/vaults/client", async (importOriginal) => {
   };
 });
 
+// The client imports its mock lazily on the first call. Load it now, so the first test
+// doesn't race that import when the whole suite runs at once.
+await import("../../api/vaults/mock");
 const { ReviewPage, VaultsPage } = await import("./index");
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;

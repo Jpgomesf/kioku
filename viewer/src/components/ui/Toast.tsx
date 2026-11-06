@@ -37,7 +37,7 @@ function subscribe(listener: () => void): () => void {
 /**
  * Render once in the shell. Screen readers hear toasts through two live regions that are
  * always in the page, polite for done and info and assertive for errors; only their text
- * changes, since a region inserted with its text already in it is often not announced.
+ * changes (keyed by toast id, so a repeat of the same text is announced again), since a region inserted with its text already in it is often not announced.
  */
 export function ToastHost() {
   const toast = useSyncExternalStore(subscribe, () => current);
@@ -50,10 +50,10 @@ export function ToastHost() {
   return (
     <div className="app-toasts">
       <div className="k-sr" role="status" aria-live="polite" aria-atomic="true">
-        {toast && !isError ? toast.text : null}
+        {toast && !isError ? <span key={toast.id}>{toast.text}</span> : null}
       </div>
       <div className="k-sr" role="alert" aria-live="assertive" aria-atomic="true">
-        {toast && isError ? toast.text : null}
+        {toast && isError ? <span key={toast.id}>{toast.text}</span> : null}
       </div>
       {toast ? (
         <div

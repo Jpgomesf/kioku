@@ -57,4 +57,9 @@ describe("useLastVisit", () => {
     resetLastVisitSession();
     expect(lastVisitFor("demo")).toBe("2026-11-06T12:00:00.000Z");
   });
+
+  it("ignores a stored value that isn't a timestamp", () => {
+    window.localStorage.setItem(KEY, JSON.stringify({ demo: "garbage" }));
+    expect(lastVisitFor("demo")).toBeNull();
+  });
 });

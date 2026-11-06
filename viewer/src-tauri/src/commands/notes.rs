@@ -6,6 +6,7 @@ use kioku::model::NoteInput;
 use tauri::State;
 
 use crate::data::notes::{self, NoteFilter};
+use crate::data::{links, scope};
 use crate::error::{CommandError, CommandResult};
 use crate::state::AppState;
 
@@ -130,6 +131,12 @@ pub async fn list_notes(
         return Ok(Vec::new());
     }
     let services = state.read_only().await?;
+    scope::ensure_fits(
+        &services.pool,
+        std::slice::from_ref(&query.domain),
+        filter.needs_legacy(),
+    )
+    .await?;
     let domain = Some(query.domain.as_str());
     let all = services.store.notes(domain, filter.needs_legacy()).await?;
     let links = notes::link_counts(&services.store.edges(domain).await?);
@@ -160,13 +167,7 @@ pub async fn get_note(
             )));
         }
     };
-    let edges: Vec<_> = services
-        .store
-        .edges(Some(&domain))
-        .await?
-        .into_iter()
-        .filter(|edge| edge.source == id || edge.target == id)
-        .collect();
+    let edges = links::edges_of(&services.pool, id).await?;
     let mut neighbour_ids: Vec<_> = edges
         .iter()
         .flat_map(|edge| [edge.source, edge.target])
@@ -174,25 +175,10 @@ pub async fn get_note(
         .collect();
     neighbour_ids.sort_unstable();
     neighbour_ids.dedup();
-    let mut neighbours = Vec::with_capacity(neighbour_ids.len());
-    for other in neighbour_ids {
-        if let Some(n) = services.store.get(other).await? {
-            neighbours.push(n);
-        }
-    }
+    let neighbours = links::labels(&services.pool, &neighbour_ids).await?;
     let labels = neighbours
         .iter()
-        .map(|n| {
-            let input = &n.input;
-            (
-                n.id,
-                (
-                    input.domain.as_str(),
-                    input.key.as_str(),
-                    input.title.as_str(),
-                ),
-            )
-        })
+        .map(|n| (n.id, (n.domain.as_str(), n.key.as_str(), n.title.as_str())))
         .collect();
     let origin = notes::origin_of(&note.input);
     // One extra entry tells whether the oldest shown line was the first save.

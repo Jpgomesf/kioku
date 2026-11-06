@@ -6,6 +6,9 @@ import {
   formatDay,
   harnessDetail,
   initialSelection,
+  isRunning,
+  isStalled,
+  newestRun,
   nextRunText,
   openFindings,
   parseThreshold,
@@ -197,5 +200,25 @@ describe("reflect settings state", () => {
       run("live", "2026-11-06", [f("z")], false),
     ]);
     expect(open.map((o) => `${o.run.id}/${o.finding.id}`)).toEqual(["mid/x", "old/y"]);
+  });
+
+  it("judges running and stalled by the newest run only", () => {
+    const run = (id: string, startedAt: string, done: boolean) => ({
+      id,
+      domain: "d",
+      startedAt,
+      finishedAt: done ? startedAt : null,
+      harness: "a",
+      findings: [],
+    });
+    const now = Date.parse("2026-11-05T12:00:00Z");
+    const crashed = run("crashed", "2026-10-01T10:00:00Z", false);
+    const newest = newestRun([crashed, run("done", "2026-11-05T10:00:00Z", true)]);
+    expect(newest?.id).toBe("done");
+    expect(newest && isStalled(newest, now)).toBe(false);
+    const abandoned = run("abandoned", "2026-11-05T11:55:00Z", false);
+    const later = newestRun([abandoned, run("done", "2026-11-05T11:58:00Z", true)]);
+    expect(later && isRunning(later, now)).toBe(false);
+    expect(newestRun([])).toBeNull();
   });
 });

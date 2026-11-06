@@ -125,7 +125,26 @@ describe("filterAndSort", () => {
       "old",
     ]);
     expect(filterAndSort(notes, f({ status: "legacy" })).map((n) => n.key)).toEqual(["legacy"]);
-    expect(filterAndSort(notes, f({ status: "all", since: "2026-11-05" })).length).toBe(4);
+    expect(filterAndSort(notes, f({ status: "all", since: "2026-11-04T00:00:00Z" })).length).toBe(
+      4,
+    );
+  });
+
+  it("starts a date-only since at local midnight", () => {
+    const local = (h: number) => new Date(2026, 10, 5, h).toISOString();
+    const day = [
+      note({ key: "late", updatedAt: new Date(2026, 10, 4, 23, 59).toISOString() }),
+      note({ key: "early", updatedAt: local(1) }),
+    ];
+    const f = filtersFromParams({ since: "2026-11-05" });
+    expect(filterAndSort(day, f).map((n) => n.key)).toEqual(["early"]);
+  });
+
+  it("rejects since values Date.parse would accept loosely", () => {
+    for (const since of ["2026-02-30", "1", "12", "Nov 5"]) {
+      expect(filtersFromParams({ since }).since).toBeNull();
+    }
+    expect(filtersFromParams({ since: "2026-02-28" }).since).toBe("2026-02-28");
   });
 
   it("does not mutate its input", () => {

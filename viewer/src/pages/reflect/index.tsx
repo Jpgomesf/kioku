@@ -33,6 +33,7 @@ import {
   initialSelection,
   isRunning,
   isStalled,
+  newestRun,
   nextRunText,
   type OpenFinding,
   openFindings,
@@ -188,9 +189,11 @@ function ReflectBody({ domain, finding: target }: { domain: string; finding?: st
     };
   }, [domain, runsTry]);
 
-  // A run that never finished and started long ago is stalled, not running.
-  const unfinished = runs.some((r) => isRunning(r));
-  const stalled = runs.some((r) => isStalled(r));
+  // A run that never finished and started long ago is stalled, not running. Only the
+  // newest run counts: a later finished run supersedes an older one that crashed.
+  const newest = newestRun(runs);
+  const unfinished = newest !== null && isRunning(newest);
+  const stalled = newest !== null && isStalled(newest);
 
   // Poll while a run is going, including one started before this page opened.
   useEffect(() => {

@@ -16,6 +16,7 @@ import {
   type VisibilityPreview,
 } from "../../api";
 import { READ_ONLY_MESSAGE, toCommandError } from "../../api/core";
+import { formatDayTime } from "../../app/dates";
 import { navigate } from "../../app/router";
 import { Button, ConfirmBlock, EmptyState, Icon, Switch } from "../../components/ui";
 import {
@@ -89,12 +90,6 @@ const loadVaults = async (): Promise<VaultsData> => {
   const config = await getVaultsConfig();
   return { config, ...(await requestsLoad) };
 };
-
-function timeOf(iso: string): string {
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return iso;
-  return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
-}
 
 /** Plain text with folder paths (starting with ~/ or /) set in mono. */
 function withPaths(text: string): ReactNode[] {
@@ -262,7 +257,7 @@ function RequestBanner({
           {name} asked to read {request.vault}
         </h3>
         <p>
-          {withPaths(request.reason)} at {timeOf(request.requestedAt)}. Kioku turned it away,
+          {withPaths(request.reason)} on {formatDayTime(request.requestedAt)}. Kioku turned it away,
           because {request.vault} doesn't let {name} read it.
         </p>
       </div>
@@ -323,7 +318,7 @@ function VaultCard({
                 </span>
                 <span className="k-app-desc" id={descId}>
                   {app.description}
-                  {request ? ` · asked for access at ${timeOf(request.requestedAt)}` : ""}
+                  {request ? ` · asked for access on ${formatDayTime(request.requestedAt)}` : ""}
                 </span>
               </span>
               <Switch
@@ -659,7 +654,7 @@ function ReviewBody({
         <p>
           {request ? (
             <>
-              {requesterName} asked at {timeOf(request.asked.requestedAt)}
+              {requesterName} asked on {formatDayTime(request.asked.requestedAt)}
               {origin ? <>, {withPaths(origin)}</> : null}.{" "}
             </>
           ) : null}

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { formatDay, formatDayTime } from "./dates";
+import { formatDay, formatDayTime, parseInstant } from "./dates";
 
 describe("dates", () => {
   afterEach(() => vi.unstubAllEnvs());
@@ -21,5 +21,17 @@ describe("dates", () => {
   it("returns what doesn't parse", () => {
     expect(formatDay("soon")).toBe("soon");
     expect(formatDay("2026-13-01")).toBe("2026-13-01");
+  });
+
+  it("rejects days a month doesn't have", () => {
+    expect(formatDay("2026-02-30")).toBe("2026-02-30");
+  });
+
+  it("parses date-only strings as local midnight and refuses loose input", () => {
+    expect(parseInstant("2026-11-05")).toBe(new Date(2026, 10, 5).getTime());
+    expect(parseInstant("2026-11-05T10:00:00Z")).toBe(Date.UTC(2026, 10, 5, 10));
+    for (const bad of ["1", "2026-02-30", "soon", "Nov 5 2026"]) {
+      expect(parseInstant(bad)).toBeNaN();
+    }
   });
 });

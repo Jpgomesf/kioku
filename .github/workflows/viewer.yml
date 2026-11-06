@@ -62,8 +62,8 @@ jobs:
       - run: cargo test --locked
         working-directory: viewer/src-tauri
 
-  # Supply-chain checks on the viewer's own lockfiles, with the root deny.toml policy
-  # (advisories, bans including openssl-sys, licenses, sources).
+  # Supply-chain checks on the viewer's own lockfiles, with viewer/deny.toml (the root
+  # policy plus MPL-2.0, macOS targets only): advisories, bans, licenses, sources.
   audit:
     name: viewer dependency audit
     runs-on: ubuntu-24.04
@@ -82,7 +82,7 @@ jobs:
         with:
           tool: cargo-deny
       - name: cargo deny check
-        run: cargo deny --manifest-path viewer/src-tauri/Cargo.toml --locked check --config deny.toml
+        run: cargo deny --manifest-path viewer/src-tauri/Cargo.toml --locked check --config viewer/deny.toml
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 26
@@ -90,10 +90,29 @@ jobs:
         run: npm audit --audit-level=high --omit=dev
         working-directory: viewer
 
+  # Catches tagging the wrong commit by mistake: a tag off main stops here, before a
+  # bundle is built. It is not a security control, since a tagged commit can edit this
+  # file; the `release` environment's tag rule, reviewer and the tag ruleset are.
+  tag-on-main:
+    name: Tag is on main
+    if: startsWith(github.ref, 'refs/tags/viewer-v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Tagged commit is an ancestor of origin/main
+        run: git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+
   # Builds with a read-only token and no write access; publishing is its own job below.
   release:
     name: macOS bundle
-    needs: [check, audit]
+    needs: [check, audit, tag-on-main]
     if: startsWith(github.ref, 'refs/tags/viewer-v')
     runs-on: macos-15
     timeout-minutes: 45
@@ -130,10 +149,12 @@ jobs:
 
   # Signs the updater archive with no checkout: only the pinned Tauri signer runs next to
   # the key. Off with `publish` until the repo variable VIEWER_PUBLISH is "true".
+  # The key is an environment secret of `release`, which only viewer-v* tags may use.
   sign:
     name: Sign the updater archive
     needs: release
     if: startsWith(github.ref, 'refs/tags/viewer-v') && vars.VIEWER_PUBLISH == 'true'
+    environment: release
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -170,6 +191,7 @@ jobs:
     name: GitHub Release
     needs: sign
     if: startsWith(github.ref, 'refs/tags/viewer-v') && vars.VIEWER_PUBLISH == 'true'
+    environment: release
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:

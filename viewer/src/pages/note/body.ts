@@ -1,11 +1,11 @@
 // Splits a note's body into plain-text blocks. Text is never parsed as HTML.
 
-const BREAK_LINE = /^\s*([-*+] |\d+[.)] |#{1,6} |```)/;
+const BREAK_LINE = /^\s*([-*+] |\d+[.)] |#{1,6} |```|\||>)/;
 const FENCE = /^\s*```/;
 
 /**
  * Blocks are separated by blank lines. Inside a block, a line that continues prose
- * joins the previous one; list items, headings and fenced code keep their own line.
+ * joins the previous one; list items, headings, table rows, quotes and fenced code keep their own line.
  */
 export function toParagraphs(body: string): string[][] {
   const blocks: string[][] = [];

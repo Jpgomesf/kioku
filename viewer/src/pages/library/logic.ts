@@ -12,7 +12,7 @@ import {
   type NoteSummary,
   type SearchHit,
 } from "../../api";
-import { formatDay, formatDayTime } from "../../app/dates";
+import { formatDay, formatDayTime, parseInstant } from "../../app/dates";
 import type { LibraryParams } from "../../app/router";
 
 export type StatusFilter = NoteStatus | "all";
@@ -89,7 +89,8 @@ export function filtersFromParams(
   if (params.since === LAST_VISIT) {
     return { ...base, since: lastVisit ?? sevenDaysAgo(), sinceLastVisit: true };
   }
-  const since = params.since && !Number.isNaN(Date.parse(params.since)) ? params.since : null;
+  // Strict: Date.parse accepts "1" (year 2001) and rolls "2026-02-30" over to 2 Mar.
+  const since = params.since && !Number.isNaN(parseInstant(params.since)) ? params.since : null;
   return { ...base, since };
 }
 
@@ -126,7 +127,8 @@ export function matchesFilters(note: NoteSummary, filters: LibraryFilters): bool
   if (filters.kinds.length > 0 && !filters.kinds.includes(note.kind)) return false;
   if (!inStatus(note, filters.status)) return false;
   if (filters.origin !== "any" && note.origin !== filters.origin) return false;
-  if (filters.since && Date.parse(note.updatedAt) < Date.parse(filters.since)) return false;
+  // parseInstant reads a date-only since as local midnight, matching the label.
+  if (filters.since && Date.parse(note.updatedAt) < parseInstant(filters.since)) return false;
   return true;
 }
 

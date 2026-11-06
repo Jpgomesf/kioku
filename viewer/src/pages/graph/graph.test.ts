@@ -14,7 +14,7 @@ import {
   zoomAt,
 } from "./camera";
 import { clearLayoutCache, computeLayout, layoutFor, WORLD } from "./layout";
-import { cardSlots, cardsFor, GROUP_AFTER, neighboursOf } from "./model";
+import { cardSlots, cardsFor, GROUP_AFTER, neighboursOf, neighboursWithin } from "./model";
 
 const node = (key: string, kind: GraphNode["kind"] = "decision"): GraphNode => ({
   key,
@@ -226,6 +226,26 @@ describe("neighbourhood cards", () => {
     const cards = cardsFor(neighboursOf({ nodes, edges }, "f"), new Set());
     const shown = cards.flatMap((c) => (c.type === "note" ? [c.neighbour.node.key] : []));
     expect(shown).toEqual(["c", "d", "e"].slice(0, GROUP_AFTER - 1));
+  });
+
+  it("does not walk two hops through a note or link the filter drops", () => {
+    const nodes = [node("f"), node("d", "topic"), node("s"), node("x"), node("y")];
+    const link = (source: string, target: string, suggested = false) => ({
+      source,
+      target,
+      relation: "related",
+      suggested,
+    });
+    const edges = [link("f", "d"), link("d", "x"), link("f", "s", true), link("s", "y")];
+    const keep = (n: { node: GraphNode; edge: { suggested: boolean } }) =>
+      n.node.key !== "d" && !n.edge.suggested;
+    const keys = neighboursWithin({ nodes, edges }, "f", 2, undefined, keep).map((n) => n.node.key);
+    expect(keys).toEqual([]);
+    expect(
+      neighboursWithin({ nodes, edges }, "f", 2)
+        .map((n) => n.node.key)
+        .sort(),
+    ).toEqual(["d", "s", "x", "y"]);
   });
 
   it("gives every card its own slot", () => {

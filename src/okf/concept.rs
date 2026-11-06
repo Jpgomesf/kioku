@@ -115,8 +115,14 @@ pub fn imported_type(input: &NoteInput) -> Option<String> {
             .into_iter()
             .flatten()
             .find_map(|label| {
-                let id = label.split('#').next()?;
-                tagged(named.strip_suffix(id)?.strip_suffix(' ')?)
+                // An id may itself hold '#' (`#123`, `RFC#7`), so the whole
+                // label is tried before the one without a section anchor.
+                let unanchored = label.rsplit_once('#').map(|(id, _)| id);
+                [Some(label), unanchored]
+                    .into_iter()
+                    .flatten()
+                    .filter(|id| !id.is_empty())
+                    .find_map(|id| tagged(named.strip_suffix(id)?.strip_suffix(' ')?))
             })
     })
 }

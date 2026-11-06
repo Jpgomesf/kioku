@@ -54,4 +54,24 @@ describe("services line refresh", () => {
     act(() => root.unmount());
     vi.useRealTimers();
   });
+
+  it("does not let an older slow answer overwrite a newer one", async () => {
+    vi.useFakeTimers();
+    let failFirst: (e: unknown) => void = () => {};
+    getServiceStatus.mockReset();
+    getServiceStatus.mockImplementationOnce(() => new Promise((_, reject) => (failFirst = reject)));
+    getServiceStatus.mockResolvedValue(running);
+    const host = document.createElement("div");
+    const root = createRoot(host);
+    await act(async () => root.render(<Sidebar route={{ name: "health" }} />));
+    // A focus event while the first request hangs must not start a second request.
+    await act(async () => window.dispatchEvent(new Event("focus")));
+    expect(getServiceStatus).toHaveBeenCalledTimes(1);
+    await act(async () => failFirst("timeout"));
+    await act(async () => window.dispatchEvent(new Event("focus")));
+    const status = () => host.querySelector('[role="status"]')?.textContent;
+    expect(status()).toBe("All services running");
+    act(() => root.unmount());
+    vi.useRealTimers();
+  });
 });

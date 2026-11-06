@@ -80,21 +80,23 @@ export function neighboursOf(
 
 /**
  * The notes within `hops` links of `focus` (1 or 2). A second-hop note carries the edge
- * from the first-hop note that reaches it.
+ * from the first-hop note that reaches it. `keep` filters every hop before the next one
+ * expands, so the walk never passes through a hidden note or a filtered link.
  */
 export function neighboursWithin(
   data: GraphData,
   focus: string,
   hops: 1 | 2,
   slots: ColourSlots = DEFAULT_SLOTS,
+  keep: (n: Neighbour) => boolean = () => true,
 ): Neighbour[] {
-  const first = neighboursOf(data, focus, slots);
+  const first = neighboursOf(data, focus, slots).filter(keep);
   if (hops === 1) return first;
   const seen = new Set([focus, ...first.map((n) => n.node.key)]);
   const second: Neighbour[] = [];
   for (const near of first) {
     for (const far of neighboursOf(data, near.node.key, slots)) {
-      if (seen.has(far.node.key)) continue;
+      if (seen.has(far.node.key) || !keep(far)) continue;
       seen.add(far.node.key);
       second.push(far);
     }

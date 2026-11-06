@@ -37,6 +37,8 @@ export function Dialog({
   }, []);
 
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    // Escape during IME composition cancels the composition, not the dialog.
+    if (event.nativeEvent.isComposing || event.keyCode === 229) return;
     if (event.key === "Escape") {
       event.stopPropagation();
       onClose();
@@ -50,10 +52,14 @@ export function Dialog({
       event.preventDefault();
       return;
     }
-    if (event.shiftKey && document.activeElement === first) {
+    // Focus on the panel itself (or anything outside the list) wraps too, so Tab never
+    // leaves the modal.
+    const active = document.activeElement as HTMLElement | null;
+    const outside = !active || !items.includes(active);
+    if (event.shiftKey && (outside || active === first)) {
       event.preventDefault();
       last.focus();
-    } else if (!event.shiftKey && document.activeElement === last) {
+    } else if (!event.shiftKey && (outside || active === last)) {
       event.preventDefault();
       first.focus();
     }
@@ -76,6 +82,11 @@ export function Dialog({
         tabIndex={-1}
         className={className}
         onKeyDown={onKeyDown}
+        // A click on plain content (a heading, a status line) would move focus to the
+        // panel and away from the input whose key handlers drive the palette.
+        onMouseDown={(event) => {
+          if (!(event.target as Element).closest(FOCUSABLE)) event.preventDefault();
+        }}
       >
         {children}
       </div>

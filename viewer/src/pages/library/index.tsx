@@ -138,32 +138,47 @@ function useAreaData(domain: string, reloadToken: number) {
 }
 
 interface SearchState {
+  /** The area the hits belong to, so another area's hits are never shown as this one's. */
+  domain: string;
   hits: Load<SearchHit[]> | null;
   pending: boolean;
 }
 
-function useSearch(domain: string, query: string, includeLegacy: boolean, attempt: number) {
-  const [result, setResult] = useState<SearchState>({ hits: null, pending: false });
+function useSearch(
+  domain: string,
+  query: string,
+  includeLegacy: boolean,
+  attempt: number,
+): { hits: Load<SearchHit[]> | null; pending: boolean } {
+  const [result, setResult] = useState<SearchState>({ domain, hits: null, pending: false });
   const text = query.trim();
   // biome-ignore lint/correctness/useExhaustiveDependencies: attempt only retries.
   useEffect(() => {
     if (!text) {
-      setResult({ hits: null, pending: false });
+      setResult({ domain, hits: null, pending: false });
       return;
     }
     let live = true;
-    // Keep the last results on screen while the next search runs.
+    // Keep this area's last results on screen while the next search runs.
     setResult((prev) => ({
-      hits: prev.hits?.state === "ready" ? prev.hits : { state: "loading" },
+      domain,
+      hits:
+        prev.domain === domain && prev.hits?.state === "ready" ? prev.hits : { state: "loading" },
       pending: true,
     }));
     const timer = window.setTimeout(() => {
       searchNotes({ scope: { domain }, text, limit: MAX_SEARCH, includeLegacy })
-        .then((value) => live && setResult({ hits: { state: "ready", value }, pending: false }))
+        .then(
+          (value) => live && setResult({ domain, hits: { state: "ready", value }, pending: false }),
+        )
         .catch(
           (e: unknown) =>
             live &&
-            setResult({ hits: { state: "error", error: toCommandError(e) }, pending: false }),
+            setResult({
+              domain,
+              hits: { state: "error", error: toCommandError(e) },
+              pending: false,
+            }),
         );
     }, SEARCH_DELAY_MS);
     return () => {
@@ -171,7 +186,12 @@ function useSearch(domain: string, query: string, includeLegacy: boolean, attemp
       window.clearTimeout(timer);
     };
   }, [domain, text, includeLegacy, attempt]);
-  return result;
+  if (!text) return { hits: null, pending: false };
+  // Until this area's search has started, show it as loading rather than the last area's hits.
+  if (result.domain !== domain || result.hits === null) {
+    return { hits: { state: "loading" }, pending: true };
+  }
+  return { hits: result.hits, pending: result.pending };
 }
 
 const ORIGIN_CHIPS: readonly { origin: OriginFilter; label: string }[] = [
@@ -195,15 +215,26 @@ export function LibraryPage({ params }: LibraryPageProps) {
   const { notes, area, findings, findingsAt } = useAreaData(domain, reload);
   const [draft, setDraft] = useState(filters.query);
   const { hits, pending } = useSearch(domain, draft, filters.status !== "active", searchAttempt);
-  const [selectedKey, setSelectedKey] = useState<string | null>(
-    () => lastSelected.get(domain) ?? null,
+  // Tied to the area: the page stays mounted across an area switch, and each area keeps its
+  // own remembered row.
+  const [selection, setSelection] = useState<{ domain: string; key: string | null }>(() => ({
+    domain,
+    key: lastSelected.get(domain) ?? null,
+  }));
+  const selectedKey =
+    selection.domain === domain ? selection.key : (lastSelected.get(domain) ?? null);
+  const setSelectedKey = useCallback(
+    (key: string | null) => setSelection({ domain, key }),
+    [domain],
   );
   const [shown, setShown] = useState(PAGE);
   const gridRef = useRef<HTMLTableElement>(null);
   const restoring = useRef(selectedKey !== null);
 
   // Keep the field in step with every route change (palette, sidebar, back button, Clear).
-  useEffect(() => setDraft(filters.query), [filters]);
+  // Keyed on the route only: typing replaces the URL without a route change, so a rebuild of
+  // the filters for another reason (Mark as reviewed) must not reset the field.
+  useEffect(() => setDraft(params.q ?? ""), [params]);
 
   useEffect(() => {
     if (selectedKey) lastSelected.set(domain, selectedKey);
@@ -293,14 +324,16 @@ export function LibraryPage({ params }: LibraryPageProps) {
     row?.scrollIntoView?.({ block: "nearest" });
   }, [selectedKey]);
 
-  // Back from a note: once the restored row is on screen, put focus back on the grid.
+  // Back from a note: once the list first shows, put focus back on the restored row's grid.
+  // Only that first time: if the row is filtered out, a later match must not steal focus.
+  const listShown = (hits ?? notes).state === "ready";
   useEffect(() => {
-    if (!restoring.current || selectedIndex < 0) return;
+    if (!restoring.current || !listShown) return;
     restoring.current = false;
-    gridRef.current?.focus();
-  }, [selectedIndex]);
+    if (selectedIndex >= 0) gridRef.current?.focus();
+  }, [listShown, selectedIndex]);
 
-  const onSelect = useCallback((key: string) => setSelectedKey(key), []);
+  const onSelect = useCallback((key: string) => setSelectedKey(key), [setSelectedKey]);
 
   const onTableKey = (event: KeyboardEvent<HTMLTableElement>) => {
     const deltas: Record<string, number> = {
@@ -324,7 +357,8 @@ export function LibraryPage({ params }: LibraryPageProps) {
   };
 
   const { label, vault } = areaLabel(domain, area);
-  const sinceDate = lastVisit ? lastVisit.slice(0, 10) : sevenDaysAgo();
+  // The full timestamp, so the label shows the same local day with the chip off and on.
+  const sinceDate = lastVisit ?? sevenDaysAgo();
   const counts = countsLine(allNotes, area);
   // Only when legacy notes are what the other filters would show, so a type whose notes are
   // all legacy leads to "Show legacy notes" rather than "Clear filters".

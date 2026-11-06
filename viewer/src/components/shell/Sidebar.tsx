@@ -161,12 +161,25 @@ export function Sidebar({ route }: SidebarProps) {
   // stays on screen while a refresh is in flight.
   useEffect(() => {
     let live = true;
+    // Focus, visibilitychange and the interval can overlap: one request at a time, and
+    // only the latest answer is applied.
+    let latest = 0;
+    let inFlight = false;
     const refresh = () => {
-      getServiceStatus().then(
-        (status) => live && setServices({ kind: "ok", status }),
-        (err: unknown) =>
-          live && setServices({ kind: "error", message: toCommandError(err).message }),
-      );
+      if (inFlight) return;
+      inFlight = true;
+      latest += 1;
+      const id = latest;
+      const current = () => live && id === latest;
+      getServiceStatus()
+        .then(
+          (status) => current() && setServices({ kind: "ok", status }),
+          (err: unknown) =>
+            current() && setServices({ kind: "error", message: toCommandError(err).message }),
+        )
+        .finally(() => {
+          if (id === latest) inFlight = false;
+        });
     };
     const onVisible = () => {
       if (document.visibilityState === "visible") refresh();

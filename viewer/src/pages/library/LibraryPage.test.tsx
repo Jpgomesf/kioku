@@ -50,7 +50,8 @@ vi.mock("../../api", async (importOriginal) => ({
   ...api,
 }));
 
-vi.mock("../../app/area", () => ({ useCurrentArea: () => "demo" }));
+const area = vi.hoisted(() => ({ domain: "demo" }));
+vi.mock("../../app/area", () => ({ useCurrentArea: () => area.domain }));
 
 const { LibraryPage } = await import("./index");
 
@@ -101,6 +102,7 @@ beforeEach(() => {
 
 afterEach(() => {
   act(() => root.unmount());
+  area.domain = "demo";
   host.remove();
   vi.clearAllMocks();
 });
@@ -299,5 +301,84 @@ describe("LibraryPage", () => {
     await settle(130);
     const facts = [...host.querySelectorAll(".library-note .k-fact")].map((f) => f.textContent);
     expect(facts).toContain("Design review");
+  });
+
+  it("keeps the typed search when the area is marked as reviewed", async () => {
+    act(() => root.render(<LibraryPage params={{ since: "last-visit" }} />));
+    await settle();
+    const input = host.querySelector<HTMLInputElement>("input");
+    if (!input) throw new Error("no search field");
+    type(input, "foo");
+    act(() => button(host, "Mark as reviewed")?.click());
+    await settle();
+    expect(input.value).toBe("foo");
+  });
+
+  it("keeps each area's selection when the area changes", async () => {
+    api.listNotes.mockImplementation(async ({ domain }: { domain: string }) =>
+      domain === "demo" ? NOTES : [summary("other-a", { domain: "other" })],
+    );
+    const params = {};
+    act(() => root.render(<LibraryPage params={params} />));
+    await settle();
+    const grid = () => host.querySelector<HTMLTableElement>('[role="grid"]');
+    act(() => {
+      grid()?.dispatchEvent(new KeyboardEvent("keydown", { key: "End", bubbles: true }));
+    });
+    expect(grid()?.getAttribute("aria-activedescendant")).toBe("library-row-demo-b");
+    area.domain = "other";
+    act(() => root.render(<LibraryPage params={params} />));
+    await settle();
+    expect(host.querySelectorAll('tbody tr[aria-selected="true"]').length).toBe(0);
+    // Selecting in the second area must not overwrite the first area's row.
+    act(() => {
+      grid()?.dispatchEvent(new KeyboardEvent("keydown", { key: "Home", bubbles: true }));
+    });
+    expect(grid()?.getAttribute("aria-activedescendant")).toBe("library-row-other-a");
+    area.domain = "demo";
+    act(() => root.render(<LibraryPage params={params} />));
+    await settle();
+    expect(grid()?.getAttribute("aria-activedescendant")).toBe("library-row-demo-b");
+    area.domain = "other";
+    act(() => root.render(<LibraryPage params={params} />));
+    await settle();
+    expect(grid()?.getAttribute("aria-activedescendant")).toBe("library-row-other-a");
+  });
+
+  it("never shows the last area's search hits as the next area's", async () => {
+    api.searchNotes.mockImplementation(async ({ scope }: { scope: { domain: string } }) =>
+      scope.domain === "demo" ? NOTES.map(hit) : new Promise(() => {}),
+    );
+    const params = { q: "title" };
+    act(() => root.render(<LibraryPage params={params} />));
+    await settle(210);
+    expect(host.querySelector("#library-row-demo-a")).not.toBeNull();
+    area.domain = "other";
+    act(() => root.render(<LibraryPage params={params} />));
+    await settle(210);
+    expect(host.querySelector("#library-row-demo-a")).toBeNull();
+    expect(host.textContent).toContain("Searching");
+  });
+
+  it("doesn't take focus later when the remembered note was filtered out", async () => {
+    act(() => root.render(<LibraryPage params={{ status: "all" }} />));
+    await settle();
+    const grid = () => host.querySelector<HTMLTableElement>('[role="grid"]');
+    act(() => {
+      grid()?.dispatchEvent(new KeyboardEvent("keydown", { key: "Home", bubbles: true }));
+    });
+    act(() => {
+      grid()?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    });
+    expect(grid()?.getAttribute("aria-activedescendant")).toBe("library-row-demo-c");
+    act(() => root.unmount());
+    root = createRoot(host);
+    act(() => root.render(<LibraryPage params={{}} />));
+    await settle();
+    const input = host.querySelector<HTMLInputElement>("input");
+    input?.focus();
+    act(() => root.render(<LibraryPage params={{ status: "all" }} />));
+    await settle();
+    expect(document.activeElement).toBe(input);
   });
 });

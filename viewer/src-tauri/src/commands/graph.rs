@@ -9,7 +9,7 @@ use kioku::model::{Edge, Note};
 use tauri::State;
 use uuid::Uuid;
 
-use crate::data::notes;
+use crate::data::{notes, scope};
 use crate::error::{CommandError, CommandResult};
 use crate::state::AppState;
 
@@ -81,13 +81,19 @@ pub(crate) fn build_graph(
                 .find(|n| n.input.key == key)
                 .ok_or_else(|| CommandError::not_found(format!("No note {key:?} in this area.")))?
                 .id;
+            // Built once so each hop touches only the frontier's links.
+            let mut adjacent: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
+            for edge in &edges {
+                adjacent.entry(edge.source).or_default().push(edge.target);
+                adjacent.entry(edge.target).or_default().push(edge.source);
+            }
             let mut seen = HashSet::from([start]);
             let mut frontier = vec![start];
             for _ in 0..depth {
                 let mut next = Vec::new();
-                for edge in &edges {
-                    for (from, to) in [(edge.source, edge.target), (edge.target, edge.source)] {
-                        if frontier.contains(&from) && seen.insert(to) {
+                for from in &frontier {
+                    for &to in adjacent.get(from).into_iter().flatten() {
+                        if seen.insert(to) {
                             next.push(to);
                         }
                     }
@@ -137,6 +143,7 @@ pub async fn get_graph(state: State<'_, AppState>, query: GraphQuery) -> Command
         )));
     }
     let services = state.read_only().await?;
+    scope::ensure_fits(&services.pool, std::slice::from_ref(&query.domain), true).await?;
     let domain = Some(query.domain.as_str());
     let all = services.store.notes(domain, true).await?;
     let edges = services.store.edges(domain).await?;

@@ -39,7 +39,7 @@ CI runs `check` on every build and `tag` on release tags. The app reads its vers
 
 ## The macOS bundle
 
-The `viewer` workflow builds on a macOS runner for every tag:
+The `viewer` workflow builds on a macOS runner for every tag whose commit is on `main`:
 
 ```sh
 npm ci
@@ -51,9 +51,9 @@ build job then packs the `.app` into an unsigned `*.app.tar.gz`, the updater arc
 
 The build job has a read-only token, no caches and no secrets: it runs every npm script and
 every crate's `build.rs`, so a compromised dependency must not see the updater key. A
-separate `sign` job checks nothing out; it downloads the archive and runs only the pinned
-signer (`npx --yes @tauri-apps/cli@2.12.4 signer sign`) with the key in that one step. The
-trade-off: the signer is fetched from npm at sign time rather than from the lockfile, so
+separate `sign` job, in the `release` environment, checks nothing out; it downloads the
+archive and runs only the pinned signer (`npx --yes @tauri-apps/cli@2.12.4 signer sign`)
+with the key in that one step. The trade-off: the signer is fetched from npm at sign time rather than from the lockfile, so
 bump its version here and in the workflow together. A separate `publish` job, which runs no
 npm or cargo code, holds the write token: it creates a GitHub Release for the tag with
 `--latest=false` and attaches the `.dmg`, the `.app.tar.gz`, its `.sig` and a `latest.json`.
@@ -88,10 +88,34 @@ build locally and attach the files by hand with `gh release create --latest=fals
 2. In `tauri.conf.json`, put the public key under `plugins.updater.pubkey`, with the endpoint
    `https://github.com/Jpgomesf/kioku/releases/download/viewer-latest/latest.json`. Add the
    updater plugin.
-3. Add the repo secrets `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
-   Only the workflow's `sign` job reads them; never pass them to the build job.
+3. Create the `release` environment (below) and add `TAURI_SIGNING_PRIVATE_KEY` and
+   `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` as its environment secrets, not repo secrets. Only
+   the workflow's `sign` job reads them; never pass them to the build job.
 4. Make `check_for_updates` call the updater instead of returning "not configured", and set
    the repo variable `VIEWER_PUBLISH` to `true`.
+
+## The release environment
+
+`sign` and `publish` run in a GitHub environment named `release`, so the signing key and
+the write step are reachable only from a release tag. Create it once in GitHub settings:
+
+1. Settings, Environments, New environment, name `release`.
+2. Under Deployment branches and tags, pick Selected branches and tags and add the tag
+   rule `viewer-v*`. That rule limits tag names, not commits, so also add a tag ruleset
+   (Settings, Rules) so only maintainers can create `viewer-v*` tags. Both are required.
+3. Add yourself as a required reviewer, so each publish waits for your approval. This is
+   required too: it is where you check that the tag points at the commit you meant.
+4. Add the two `TAURI_SIGNING_*` secrets here, and delete any repo-level copies. Do this
+   before setting `VIEWER_PUBLISH` to `true`: a job in any environment can read
+   repo-level secrets, so leftover copies would let `sign` run outside these rules.
+
+These settings are the real control over what gets signed and published. The workflow
+also has a `tag-on-main` job: a tag whose commit is not on `main` fails there, before the
+build starts. It guards against tagging the wrong commit by mistake, not against a
+writer, because the workflow that runs is the one in the tagged commit, which can drop
+the job. If the environment does not exist yet, GitHub creates an empty one on the first
+run. Once the repo-level copies of the secrets are deleted, that empty environment has
+none, so `sign` fails rather than signing.
 
 ## Later: signing and notarization
 

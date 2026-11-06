@@ -61,7 +61,7 @@ deny: ## Supply-chain checks (needs cargo-deny)
 	cargo deny --locked check
 
 viewer-deny: ## Supply-chain checks on the viewer's lockfiles (needs cargo-deny)
-	cargo deny --manifest-path viewer/src-tauri/Cargo.toml --locked check --config deny.toml
+	cargo deny --manifest-path viewer/src-tauri/Cargo.toml --locked check --config viewer/deny.toml
 	cd viewer && npm audit --audit-level=high --omit=dev
 
 viewer-check: ## Kioku Viewer: frontend typecheck, lint and tests, then Rust fmt, clippy (warnings denied) and tests

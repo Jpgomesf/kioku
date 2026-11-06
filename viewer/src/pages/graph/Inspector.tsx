@@ -10,6 +10,8 @@ import { type Neighbour, neighboursOf, sentence } from "./model";
 export interface InspectorProps {
   node: GraphNode;
   data: GraphData;
+  /** Notes the filters leave on the canvas; links to any other note are left out. */
+  visibleKeys: ReadonlySet<string>;
   slots: ColourSlots;
   onFocus: (key: string) => void;
   onAround: () => void;
@@ -43,8 +45,20 @@ function LinkRow({
   );
 }
 
-export function Inspector({ node, data, slots, onFocus, onAround, onClose }: InspectorProps) {
-  const links = useMemo(() => neighboursOf(data, node.key, slots), [data, node.key, slots]);
+export function Inspector({
+  node,
+  data,
+  visibleKeys,
+  slots,
+  onFocus,
+  onAround,
+  onClose,
+}: InspectorProps) {
+  // A hidden note would close the Inspector when clicked, with nothing on the canvas to show for it.
+  const links = useMemo(
+    () => neighboursOf(data, node.key, slots).filter((l) => visibleKeys.has(l.node.key)),
+    [data, node.key, slots, visibleKeys],
+  );
   const recorded = links.filter((l) => !l.edge.suggested);
   const suggested = links.filter((l) => l.edge.suggested);
   return (

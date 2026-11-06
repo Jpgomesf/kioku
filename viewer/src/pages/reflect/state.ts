@@ -238,6 +238,13 @@ function startedMs(run: ReflectRun): number {
   return Number.isNaN(t) ? Number.NEGATIVE_INFINITY : t;
 }
 
+/** The run that started last, or null; only it says whether a run is going or stalled. */
+export function newestRun(runs: readonly ReflectRun[]): ReflectRun | null {
+  let newest: ReflectRun | null = null;
+  for (const run of runs) if (!newest || startedMs(run) > startedMs(newest)) newest = run;
+  return newest;
+}
+
 /** True when a run never finished and started more than MAX_WAIT_MS ago. */
 export function isStalled(run: ReflectRun, now: number = Date.now()): boolean {
   return run.finishedAt === null && now - startedMs(run) > MAX_WAIT_MS;

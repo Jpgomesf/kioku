@@ -139,3 +139,44 @@ describe("usePresence", () => {
     expect(staggerStyle(50)).toEqual({ animationDelay: "160ms" });
   });
 });
+
+describe("runViewTransition data-transition", () => {
+  it("keeps the attribute while a newer transition runs after an older one ends", async () => {
+    const root = document.createElement("html");
+    const ends: Array<() => void> = [];
+    const doc = {
+      documentElement: root,
+      startViewTransition: (fn: () => void) => {
+        fn();
+        return { finished: new Promise<void>((resolve) => ends.push(resolve)) };
+      },
+    } as unknown as Document;
+    const first = runViewTransition(() => {}, { reduced: false, doc, type: "route" });
+    const second = runViewTransition(() => {}, { reduced: false, doc, type: "route" });
+    ends[0]?.();
+    await first;
+    expect(root.dataset.transition).toBe("route");
+    ends[1]?.();
+    await second;
+    expect(root.dataset.transition).toBeUndefined();
+  });
+
+  it("clears a typed transition's attribute when an untyped one starts meanwhile", async () => {
+    const root = document.createElement("html");
+    const ends: Array<() => void> = [];
+    const doc = {
+      documentElement: root,
+      startViewTransition: (fn: () => void) => {
+        fn();
+        return { finished: new Promise<void>((resolve) => ends.push(resolve)) };
+      },
+    } as unknown as Document;
+    const typed = runViewTransition(() => {}, { reduced: false, doc, type: "route" });
+    const untyped = runViewTransition(() => {}, { reduced: false, doc });
+    ends[0]?.();
+    await typed;
+    expect(root.dataset.transition).toBeUndefined();
+    ends[1]?.();
+    await untyped;
+  });
+});

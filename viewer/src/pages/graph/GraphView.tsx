@@ -205,14 +205,20 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
     }
     return best;
   }, [camera, view, visible, layout]);
-  const focusKey = selected ?? (level >= 2 ? (nearest?.key ?? null) : null);
+  // A selected note that the filters hide is not drawn, so it neither focuses nor inspects.
+  const shownSelected = selected && visibleKeys.has(selected) ? selected : null;
+  const focusKey = shownSelected ?? (level >= 2 ? (nearest?.key ?? null) : null);
   const focusNode = focusKey ? (byKey.get(focusKey) ?? null) : null;
   const focusPos = focusKey ? posOf(focusKey) : null;
 
   const neighbours = useMemo(
     () =>
       focusKey
-        ? neighboursWithin(data, focusKey, hops, colourSlots).filter(
+        ? neighboursWithin(
+            data,
+            focusKey,
+            hops,
+            colourSlots,
             (n) => visibleKeys.has(n.node.key) && (filters.suggested || !n.edge.suggested),
           )
         : [],
@@ -320,7 +326,9 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
   /** Moves to a note. From a control that is about to unmount, focus goes to the stage. */
   const focusNote = useCallback(
     (key: string, fromControl = false) => {
-      pushNext.current = true;
+      // Only a real change runs the URL effect that clears the flag; a stale flag would
+      // turn a later camera-only change into a history entry.
+      if (key !== selectedRef.current) pushNext.current = true;
       setExpanded(new Set());
       setMissing(null);
       goTo(level >= 2 ? 3 : 2, key);
@@ -548,9 +556,9 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
     ...LEVEL_NAMES.map((label, i) => ({ value: String(i), label })),
     { value: "3", label: focusNode?.key ?? nearest?.key ?? "Note" },
   ];
-  const matches = useMemo(() => findNodes(data.nodes, query), [data, query]);
-  const inspected = selected ? (byKey.get(selected) ?? null) : null;
-  const highlight = level < 2 ? selected : null;
+  const matches = useMemo(() => findNodes(visible, query), [visible, query]);
+  const inspected = shownSelected ? (byKey.get(shownSelected) ?? null) : null;
+  const highlight = level < 2 ? shownSelected : null;
 
   // World-space placement for the HTML layer; `k` keeps a constant on-screen size.
   const at = (p: Point, k: number, anchor = "-50%, -50%"): CSSProperties => ({
@@ -843,6 +851,7 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
           <Inspector
             node={inspected}
             data={data}
+            visibleKeys={visibleKeys}
             slots={colourSlots}
             onFocus={(key) => focusNote(key, true)}
             onAround={() => goTo(3, inspected.key)}

@@ -7,6 +7,8 @@ use kioku::vault::Provider;
 use super::areas::read_vaults;
 use crate::data::{env, reflect_cache, vaults_file};
 use crate::error::{CommandError, CommandResult};
+use crate::state::AppState;
+use tauri::State;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -106,11 +108,28 @@ pub struct ReflectSettings {
 }
 
 #[tauri::command]
-pub async fn list_reflect_runs(domain: String) -> CommandResult<Vec<ReflectRun>> {
-    match env::home() {
-        Some(home) => reflect_cache::list(&home, &domain),
-        None => Ok(Vec::new()),
-    }
+pub async fn list_reflect_runs(
+    state: State<'_, AppState>,
+    domain: String,
+) -> CommandResult<Vec<ReflectRun>> {
+    let Some(home) = env::home() else {
+        return Ok(Vec::new());
+    };
+    let Some(cache) = reflect_cache::read(&home, &domain)? else {
+        return Ok(Vec::new());
+    };
+    // The domain list scans the notes table, so fetch it only when topic
+    // marks make it matter. Best effort: without the store, no other domain
+    // is known to share the file.
+    let others = if cache.has_topic_marks() {
+        match state.read_only().await {
+            Ok(services) => services.store.domains().await.unwrap_or_default(),
+            Err(_) => Vec::new(),
+        }
+    } else {
+        Vec::new()
+    };
+    cache.runs(&domain, &others)
 }
 
 /// The default settings, with each harness's readable vaults from the vaults

@@ -171,8 +171,16 @@ async fn embedding_health(state: &AppState, config: &kioku::config::Config) -> S
         ),
         Err(_) => return not_configured(),
     };
-    state.embed_probe.store(health.clone());
+    remember_probe(state, &health);
     health
+}
+
+/// Keeps only a healthy probe, so a service that was down or still loading
+/// shows as up on the next poll once it is, not after [`PROBE_TTL`].
+fn remember_probe(state: &AppState, health: &ServiceHealth) {
+    if health.state == ServiceState::Running {
+        state.embed_probe.store(health.clone());
+    }
 }
 
 #[tauri::command]
@@ -274,6 +282,22 @@ mod tests {
         assert_eq!(serde_json::to_string(&ServiceState::Down)?, r#""down""#);
         assert_eq!(serde_json::to_string(&EmbeddingApi::Openai)?, r#""openai""#);
         Ok(())
+    }
+
+    #[test]
+    fn only_healthy_probes_are_remembered() {
+        let state = AppState::default();
+        remember_probe(&state, &not_configured());
+        assert!(state.embed_probe.fresh(PROBE_TTL).is_none());
+        let ready = ServiceHealth {
+            state: ServiceState::Running,
+            detail: "Ready".to_owned(),
+        };
+        remember_probe(&state, &ready);
+        assert_eq!(
+            state.embed_probe.fresh(PROBE_TTL).map(|h| h.state),
+            Some(ServiceState::Running)
+        );
     }
 
     #[tokio::test]

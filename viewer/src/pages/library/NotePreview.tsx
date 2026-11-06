@@ -45,7 +45,7 @@ export function NotePreview({
 }: NotePreviewProps) {
   const [state, setState] = useState<State>({ state: "loading" });
   const [attempt, setAttempt] = useState(0);
-  const [copied, setCopied] = useState(false);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
   const loadedOnce = useRef(false);
   const { domain, key } = summary;
 
@@ -54,7 +54,7 @@ export function NotePreview({
   // biome-ignore lint/correctness/useExhaustiveDependencies: attempt only retries.
   useEffect(() => {
     let live = true;
-    setCopied(false);
+    setCopiedId(null);
     setState((s) => (s.state === "error" ? { state: "loading" } : s));
     const timer = window.setTimeout(
       () => {
@@ -82,9 +82,9 @@ export function NotePreview({
     const text = `Fix the Kioku note ${key} in ${domain}: ${f.text}`;
     try {
       await navigator.clipboard.writeText(text);
-      setCopied(true);
+      setCopiedId(f.id);
     } catch {
-      setCopied(false);
+      setCopiedId(null);
     }
   };
 
@@ -119,7 +119,7 @@ export function NotePreview({
               </Button>
               {summary.origin === "agent" ? (
                 <Button size="sm" onClick={() => void copyCommand(f)}>
-                  {copied ? "Command copied" : "Copy a fix command"}
+                  {copiedId === f.id ? "Command copied" : "Copy a fix command"}
                 </Button>
               ) : null}
             </>
@@ -151,7 +151,12 @@ export function NotePreview({
       ) : null}
       {state.state === "ready" ? (
         <div className={current ? undefined : "library-stale"}>
-          <NoteDetail note={state.note} notesByKey={notesByKey} />
+          {/* Keyed by note so per-note state such as the expanded history resets. */}
+          <NoteDetail
+            key={`${state.note.domain}/${state.note.key}`}
+            note={state.note}
+            notesByKey={notesByKey}
+          />
         </div>
       ) : null}
 

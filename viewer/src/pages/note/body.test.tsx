@@ -26,6 +26,13 @@ afterEach(() => {
 });
 
 describe("toParagraphs", () => {
+  it("keeps table rows and quote lines on their own lines", () => {
+    expect(toParagraphs("| a | b |\n| --- | --- |\n| 1 | 2 |\n\n> one\n> two")).toEqual([
+      ["| a | b |", "| --- | --- |", "| 1 | 2 |"],
+      ["> one", "> two"],
+    ]);
+  });
+
   it("splits on blank lines and joins wrapped lines", () => {
     expect(toParagraphs("One\nline.\n\n  \nTwo.\r\n\r\nThree.")).toEqual([
       ["One line."],

@@ -216,6 +216,41 @@ describe("GraphView", () => {
     expect(host.querySelector(".graph-focus-edges .graph-edge-suggested")).toBeNull();
   });
 
+  it("drops the focus and inspector when the selected note is filtered out", () => {
+    const nodes = [node("f"), { ...node("old"), status: "legacy" as const }];
+    const edges = [{ source: "f", target: "old", relation: "supersedes", suggested: false }];
+    const host = render("old", { nodes, edges });
+    expect(host.querySelector("#graph-inspector-title")).not.toBeNull();
+    const legacy = Array.from(host.querySelectorAll<HTMLButtonElement>('[role="switch"]')).find(
+      (b) => b.textContent?.includes("Legacy notes"),
+    );
+    act(() => legacy?.click());
+    expect(host.querySelector("#graph-inspector-title")).toBeNull();
+    expect(host.querySelector(".graph-card-focus")?.getAttribute("href") ?? "").not.toContain(
+      "old",
+    );
+  });
+
+  it("does not add a history entry for a later Esc after re-picking the same note", () => {
+    const host = render("jobs-worker");
+    const input = host.querySelector<HTMLInputElement>(".graph-find input");
+    const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+    act(() => {
+      setValue?.call(input, "jobs-worker");
+      input?.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    const match = Array.from(host.querySelectorAll<HTMLButtonElement>(".graph-match")).find((b) =>
+      b.textContent?.includes("jobs-worker"),
+    );
+    expect(match).toBeDefined();
+    act(() => match?.click());
+    const push = vi.spyOn(window.history, "pushState");
+    for (let i = 0; i < 4; i += 1) key(stageOf(host), "Escape");
+    expect(window.location.hash).toBe(graphHref("demo"));
+    expect(push).not.toHaveBeenCalled();
+    push.mockRestore();
+  });
+
   it("says when an area has no notes", () => {
     const host = render(undefined, { nodes: [], edges: [] });
     expect(host.textContent).toContain("No notes in this area yet");

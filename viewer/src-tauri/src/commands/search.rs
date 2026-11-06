@@ -96,6 +96,7 @@ pub async fn search_notes(
     if domains.is_empty() {
         return Ok(Vec::new());
     }
+    crate::data::scope::ensure_fits(&services.pool, &domains, query.include_legacy).await?;
     Ok(search::search(services, text, &domains, limit, query.include_legacy).await?)
 }
 
