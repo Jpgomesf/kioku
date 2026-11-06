@@ -72,7 +72,7 @@ pub(super) struct Concept {
     pub kind: String,
     pub title: String,
     pub description: Option<String>,
-    /// A producer's own identifier (`id` in frontmatter), such as `DEC-350`.
+    /// A producer's own identifier (`id` in frontmatter), such as `ADR-350`.
     pub producer_id: Option<String>,
     pub aliases: Vec<String>,
     pub tags: Vec<String>,

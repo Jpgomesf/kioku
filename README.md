@@ -253,8 +253,8 @@ kioku ingest --path ~/work/company-kb --domain company/kb
 ```
 
 - **Keys.** Each concept becomes a note keyed by its concept ID, the file's
-  path in the bundle without `.md` (`kb/decisions/DEC-350-links`). A
-  producer `id` and `aliases` become aliases, so `memory_get DEC-350` works.
+  path in the bundle without `.md` (`kb/decisions/ADR-350-cites`). A
+  producer `id` and `aliases` become aliases, so `memory_get ADR-350` works.
   The source is the concept's own file, so a re-import after `git pull`
   re-embeds only what changed.
 - **Links.** Bundle-relative (`/kb/x.md`) and relative links become `related`
@@ -394,7 +394,7 @@ changing tools.
 ## Vaults and locks
 
 A vault holds everything about one company or one part of your life, such as
-`personal` and `trifundable`. Its areas are domains. Vaults never see each
+`personal` and `work`. Its areas are domains. Vaults never see each
 other, in either direction. A lock limits which model providers may read an
 area or a note.
 
@@ -412,12 +412,12 @@ providers = ["local", "anthropic"]    # who may read this vault
 default_domain = "personal"
 
 [[vault]]
-name = "trifundable"
-paths = ["~/work/trifundable"]
-git_remotes = ["github.com/fundable-ai/*"]   # a match wins over paths
-domains = ["trifundable", "trifundable/*"]
+name = "work"
+paths = ["~/work"]
+git_remotes = ["github.com/acme-corp/*"]   # a match wins over paths
+domains = ["work", "work/*"]
 providers = ["local", "anthropic", "openai"]
-default_domain = "trifundable"
+default_domain = "work"
 
 [[area]]
 domain = "personal/kioku"
@@ -462,10 +462,10 @@ the client started Kioku in.
   `git_remotes`, that vault wins. Remotes are compared as `host/owner/repo` in
   lowercase, `origin` first. Kioku reads `.git/config` itself; it needs no
   network and no `git`. An SSH remote through a `Host` alias in
-  `~/.ssh/config` (`git@github-work:fundable-ai/api.git`) also matches as its
-  `HostName` (`github.com/fundable-ai/api`). Kioku doesn't follow `Include`
+  `~/.ssh/config` (`git@github-work:acme-corp/api.git`) also matches as its
+  `HostName` (`github.com/acme-corp/api`). Kioku doesn't follow `Include`
   or `Match` there, nor git's `insteadOf` rewrites; for those, a host-agnostic
-  glob such as `*/fundable-ai/*` matches the remote on any host.
+  glob such as `*/acme-corp/*` matches the remote on any host.
 - Otherwise the vault with the longest matching `paths` entry wins.
 - Inside an area's folder, calls without a domain use that area. At the
   vault's root they use `default_domain`, and `memory_search` without a domain

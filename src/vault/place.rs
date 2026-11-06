@@ -397,8 +397,8 @@ mod tests {
                 "github.com/jpgomesf/kioku",
             ),
             (
-                "https://github.com/fundable-ai/api",
-                "github.com/fundable-ai/api",
+                "https://github.com/acme-corp/api",
+                "github.com/acme-corp/api",
             ),
             ("https://user:tok@github.com/o/r.git/", "github.com/o/r"),
             ("ssh://git@github.com:22/o/r.git", "github.com/o/r"),
@@ -426,7 +426,7 @@ mod tests {
     fn ssh_host_aliases_resolve_like_ssh_does() {
         let config = r#"
 # Personal and work identities on one host.
-Host github-work github-fundable
+Host github-work github-acme
     HostName github.com
     IdentityFile ~/.ssh/work
 Host=gh-*
@@ -443,7 +443,7 @@ Host github-work
             Some("github.com")
         );
         assert_eq!(
-            ssh_host_name(config, "GitHub-Fundable").as_deref(),
+            ssh_host_name(config, "GitHub-Acme").as_deref(),
             Some("github.com")
         );
         assert_eq!(
@@ -470,7 +470,7 @@ Host github-work
         std::fs::create_dir_all(dir.join(".git")).unwrap();
         std::fs::write(
             dir.join(".git/config"),
-            "[remote \"origin\"]\n\turl = git@github-work:Fundable-AI/api.git\n[remote \"web\"]\n\turl = https://github-work/o/r\n",
+            "[remote \"origin\"]\n\turl = git@github-work:Acme-Corp/api.git\n[remote \"web\"]\n\turl = https://github-work/o/r\n",
         )
         .unwrap();
         let ssh = "Host github-work\n  HostName github.com\n";
@@ -481,14 +481,14 @@ Host github-work
             found,
             [
                 vec![
-                    "github-work/fundable-ai/api".to_owned(),
-                    "github.com/fundable-ai/api".to_owned()
+                    "github-work/acme-corp/api".to_owned(),
+                    "github.com/acme-corp/api".to_owned()
                 ],
                 vec!["github-work/o/r".to_owned()],
             ],
             "only SSH remotes go through ~/.ssh/config"
         );
-        assert_eq!(plain[0], ["github-work/fundable-ai/api"]);
+        assert_eq!(plain[0], ["github-work/acme-corp/api"]);
     }
 
     #[test]
