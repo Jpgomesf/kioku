@@ -1,0 +1,61 @@
+# Builds the macOS (Apple Silicon) binary on every push to main and publishes it as
+# the rolling prerelease `main-build`, so `make install-prebuilt` installs it without
+# compiling. Pull requests that touch the packaging build it without publishing.
+# Actions are pinned to the same commit SHAs as ci.yml; publishing uses the gh CLI
+# that GitHub preinstalls, so no third-party release action is involved.
+name: Release binary
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - scripts/install-prebuilt.sh
+      - Cargo.toml
+      - Cargo.lock
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # A newer push to main supersedes an older one: only the latest build is published.
+  cancel-in-progress: true
+
+jobs:
+  macos-arm64:
+    name: macOS Apple Silicon binary
+    runs-on: macos-15
+    timeout-minutes: 30
+    permissions:
+      contents: write # replaces the main-build release; only the publish step gets the token
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-10-16
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Build the release binary, as make install does
+        run: cargo build --release --locked
+      - name: The binary starts
+        run: ./target/release/kioku --version
+      - name: Package it with its commit and checksums
+        run: |
+          mkdir dist
+          tar -C target/release -czf dist/kioku-aarch64-apple-darwin.tar.gz kioku
+          printf '%s\n' "$GITHUB_SHA" > dist/COMMIT
+          (cd dist && shasum -a 256 kioku-aarch64-apple-darwin.tar.gz COMMIT > SHA256SUMS)
+          cat dist/SHA256SUMS
+      - name: Publish the rolling prerelease main-build
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete main-build --cleanup-tag --yes --repo "$GITHUB_REPOSITORY" || true
+          gh release create main-build dist/* --repo "$GITHUB_REPOSITORY" --prerelease \
+            --target "$GITHUB_SHA" --title "Latest main build" \
+            --notes "macOS (Apple Silicon) binary built from ${GITHUB_SHA}. Install it with make install-prebuilt."

@@ -39,7 +39,7 @@ Python 3 (used once to generate credentials).
 ```sh
 git clone https://github.com/Jpgomesf/kioku && cd kioku
 make start     # PostgreSQL, Qdrant, Ollama on loopback ports; creates a private .env
-make install   # builds bin/kioku
+make install   # builds bin/kioku; on a Mac with Apple Silicon, make install-prebuilt downloads CI's build of main instead
 ./bin/kioku doctor
 ./bin/kioku ingest --path examples/notes --domain demo
 ./bin/kioku search "Which service replaces the old indexing worker?" --domain demo
@@ -427,6 +427,33 @@ paths = ["~/projects/personal/mcp/kioku"]
 domains = ["personal/citizenship"]    # only local models may read these notes
 providers = ["local"]
 ```
+
+**Editing the file.** A mistake in it stops Kioku for every new session, so
+`scripts/vaults.py` makes each change on a copy.
+- **What it checks.** The installed binary validates the copy, and the script
+  shows where each folder the change affects would place a session. It does
+  that by asking a Kioku server started there.
+- **What it writes.** It prints the diff, and only with `--apply` backs up the
+  old file to `backups/` beside it and replaces it.
+- **New sessions** see the change. Running ones must reconnect Kioku (in
+  Claude Code, `/mcp`).
+
+```sh
+scripts/vaults.py check                                   # is the file valid?
+scripts/vaults.py where ~/projects/personal/notes ~/work  # where would sessions land?
+scripts/vaults.py add-area personal/notes ~/projects/personal/notes --apply
+scripts/vaults.py sync-areas --apply                      # an area for each repo under ~/projects/personal that has none
+scripts/vaults.py add-vault work --path ~/work --domain work --domain 'work/*' --allow local --allow anthropic
+scripts/vaults.py add-lock --domain personal/citizenship --allow local
+scripts/vaults.py remove-area personal/notes --apply
+```
+
+- **Folders must exist** for `add-area` and `add-vault`, unless you pass
+  `--allow-missing`.
+- **Placement is checked as provider `anthropic`,** or as one the vault admits.
+- **Re-embedding:** after changing a vault's providers or a lock, run
+  `kioku repair --all`. That's needed only with a hosted embedding service
+  (`EMBEDDING_READER` other than `local`).
 
 **Placement.** A session's folder is `KIOKU_SESSION_DIR`, or else the folder
 the client started Kioku in.
