@@ -425,12 +425,12 @@ mod tests {
         default_domain = "personal"
 
         [[vault]]
-        name = "trifundable"
-        paths = ["~/work/fundable"]
-        git_remotes = ["github.com/Fundable-AI/*"]
-        domains = ["trifundable", "trifundable/*"]
+        name = "acme"
+        paths = ["~/work/acme"]
+        git_remotes = ["github.com/Acme-Corp/*"]
+        domains = ["acme", "acme/*"]
         providers = ["local", "anthropic", "openai"]
-        default_domain = "trifundable"
+        default_domain = "acme"
 
         [[area]]
         domain = "personal/kioku"
@@ -445,7 +445,7 @@ mod tests {
     fn parses_vaults_areas_and_locks() {
         let vaults = parse(TWO).unwrap();
         assert_eq!(vaults.vaults.len(), 2);
-        assert_eq!(vaults.find("trifundable"), Some(1));
+        assert_eq!(vaults.find("acme"), Some(1));
         assert_eq!(vaults.find("work"), None);
         let personal = vaults.vault(0);
         assert_eq!(personal.paths[0].written, PathBuf::from(HOME));
@@ -454,12 +454,12 @@ mod tests {
             [Provider::Local, Provider::Anthropic].into()
         );
         assert!(
-            vaults.vault(1).git_remotes[0].matches("github.com/fundable-ai/api"),
+            vaults.vault(1).git_remotes[0].matches("github.com/acme-corp/api"),
             "remote globs are lowercased"
         );
         assert_eq!(vaults.areas[0].vault, 0);
         assert_eq!(vaults.owners("personal/kioku"), [0]);
-        assert_eq!(vaults.owners("trifundable/api"), [1]);
+        assert_eq!(vaults.owners("acme/api"), [1]);
         assert!(vaults.owners("elsewhere").is_empty());
         assert!(vaults.locked("personal/citizenship", Provider::Anthropic));
         assert!(!vaults.locked("personal/citizenship", Provider::Local));

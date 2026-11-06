@@ -6,7 +6,7 @@
 //!
 //! - Each concept becomes a note keyed by its concept ID, the file's path in
 //!   the bundle without `.md`. A producer's `id` and `aliases` become
-//!   aliases, so `DEC-350` finds its note. The note's source is the concept's
+//!   aliases, so `ADR-350` finds its note. The note's source is the concept's
 //!   own file, so a re-import after `git pull` updates only what changed.
 //! - Links between concepts become `related` links. In the stored text a link
 //!   keeps its words, plus the target's id when they lack it.
@@ -374,7 +374,7 @@ pub fn convert(bundle: &Bundle, domain: &str) -> Conversion {
 }
 
 /// Name the concepts a lifecycle field (`supersedes`, `superseded_by`) lists
-/// by id: `DEC-276` becomes `DEC-276 (Each batch links unlinked rows)`. A
+/// by id: `ADR-276` becomes `ADR-276 (Each result shows a bare title)`. A
 /// question about an old rule then reaches the note that replaced it, and a
 /// reader of either sees what changed, without opening the other. A locked
 /// concept's title is named only to notes under the same or a stricter lock.
