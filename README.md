@@ -166,7 +166,7 @@ The default `core` profile exposes three tools; `MEMORY_TOOLS=all` (or
 | Tool | Profile | What it does |
 |---|---|---|
 | `memory_search` | core | Ranked previews (key, title, snippet, score) for a question |
-| `memory_get` | core | Full text of chosen memories by key, with links, within a byte budget |
+| `memory_get` | core | Full text of chosen memories by key, with links, within a byte budget; counts as use unless `count_use` is false |
 | `memory_save` | core | Create or update one memory by key; refuses credentials and file-backed notes; reports its links and similar notes |
 | `memory_inspect` | all | Provenance, lifecycle, usage, links, and recent history of one memory |
 | `memory_feedback` | all | Record that a memory proved right or wrong |

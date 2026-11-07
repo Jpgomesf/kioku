@@ -355,6 +355,9 @@ def run(client: StdioClient, checks: Checks, notes_root: Path, hydration_key: st
     used_read = client.call("memory_inspect", {"key": checkout["key"], "domain": domain})["access_count"]
     checks.check("reading counts one use per distinct memory", used_read == used_after + 1 and len(read["memories"]) == 1)
     checks.check("read memories carry their links", ledger["key"] in read["memories"][0].get("links", []))
+    audit = client.call("memory_get", {"keys": [checkout["key"]], "domain": domain, "count_use": False})
+    used_audit = client.call("memory_inspect", {"key": checkout["key"], "domain": domain})["access_count"]
+    checks.check("a read with count_use false is not counted", used_audit == used_read and len(audit["memories"]) == 1)
     budget = 1536
     bounded, raw, error = client.call_raw("memory_get", {"keys": [untrusted["key"]], "domain": domain, "max_bytes": budget})
     checks.check("a bounded read succeeds", not error)
