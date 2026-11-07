@@ -16,6 +16,7 @@ mod config;
 mod place;
 
 pub use config::{Vaults, expand_home};
+pub use place::repository_remote;
 
 use std::fmt;
 use std::path::Path;

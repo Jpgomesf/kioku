@@ -118,7 +118,7 @@ impl Folder {
         Ok(Self { written, canonical })
     }
 
-    fn forms(&self) -> impl Iterator<Item = &Path> {
+    pub(super) fn forms(&self) -> impl Iterator<Item = &Path> {
         std::iter::once(self.written.as_path()).chain(self.canonical.as_deref())
     }
 

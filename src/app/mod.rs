@@ -6,6 +6,7 @@
 //! a slow or failing embedding service never blocks other writers and never
 //! leaves a half-saved note behind.
 
+mod codemap;
 mod context;
 mod excerpt;
 mod import;
@@ -13,6 +14,10 @@ mod search;
 mod upkeep;
 mod write;
 
+pub use codemap::{
+    CodePlace, FileMap, Neighbour, PurposeCounts, Relation, UpdateOptions, UpdateReport,
+    lookup_file, update_repo,
+};
 pub use context::{ContextMemory, ContextPack, ContextRequest, SkippedMemory};
 pub use import::{ImportFailure, ImportFormat, ImportReport, ImportedNote, OkfImport};
 pub use search::{SearchHit, SearchRequest, SearchResults, SearchStats, Signals};

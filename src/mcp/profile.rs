@@ -8,7 +8,7 @@ use crate::vault::Session;
 pub const CORE_TOOLS: [&str; 3] = ["memory_search", "memory_get", "memory_save"];
 
 /// Every tool, in the order the docs present them.
-pub const ALL_TOOLS: [&str; 11] = [
+pub const ALL_TOOLS: [&str; 12] = [
     "memory_search",
     "memory_get",
     "memory_save",
@@ -20,7 +20,11 @@ pub const ALL_TOOLS: [&str; 11] = [
     "memory_maintenance",
     "memory_stats",
     "memory_list",
+    "code_map",
 ];
+
+/// Tools outside the memory itself: the code map, for small local models.
+const CODE_TOOLS: [&str; 1] = ["code_map"];
 
 /// The memory policy every client receives. `{search}` says which domain to
 /// search and `{save}` which one to save to; both depend on the session.
@@ -33,6 +37,8 @@ Skip memory for greetings and self-contained edits. If nothing relevant is store
 }
 
 const ADMIN_INSTRUCTIONS: &str = "Use memory_feedback, memory_retire, memory_restore, memory_import, and memory_maintenance only when the user asks or an outcome was verified.";
+
+const CODE_INSTRUCTIONS: &str = "Before reading a source file you haven't read in this session, call code_map with its path: it says what the file is for, lists its main definitions with line numbers, and names the files it imports or that import it. Its purposes are evidence from doc comments or a model; the file itself is the truth.";
 
 /// Server instructions: the policy every client receives, plus admin guidance
 /// when admin tools are exposed. Without vaults the agent names the domain;
@@ -69,15 +75,20 @@ pub(super) fn instructions_for(selected: &BTreeSet<String>, session: &Session) -
             " Save to the domain of the memory you update.".to_owned(),
         ),
     };
-    let policy = format!(policy!(), search = search, save = save);
+    let mut text = format!(policy!(), search = search, save = save);
+    let admin = selected
+        .iter()
+        .any(|name| !CORE_TOOLS.contains(&name.as_str()) && !CODE_TOOLS.contains(&name.as_str()));
+    if admin {
+        text = format!("{text}\n\n{ADMIN_INSTRUCTIONS}");
+    }
     if selected
         .iter()
-        .any(|name| !CORE_TOOLS.contains(&name.as_str()))
+        .any(|name| CODE_TOOLS.contains(&name.as_str()))
     {
-        format!("{policy}\n\n{ADMIN_INSTRUCTIONS}")
-    } else {
-        policy
+        text = format!("{text}\n\n{CODE_INSTRUCTIONS}");
     }
+    text
 }
 
 pub(super) fn select_tools(spec: &str) -> anyhow::Result<BTreeSet<String>> {

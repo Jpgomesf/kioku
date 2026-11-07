@@ -16,6 +16,11 @@ pub fn find(input: &NoteInput) -> Option<&'static str> {
         .find_map(|text| scan(text))
 }
 
+/// The kind of credential found in `text`, if any.
+pub fn find_in_text(text: &str) -> Option<&'static str> {
+    scan(text)
+}
+
 fn scan(text: &str) -> Option<&'static str> {
     if text.contains("PRIVATE KEY-----") {
         return Some("a private key");

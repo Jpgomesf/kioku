@@ -40,6 +40,35 @@ impl Vaults {
         }))
     }
 
+    /// The configured vault and area folders strictly inside `root`, relative
+    /// to it with `/`: the parts of a repository that their own rules place.
+    pub fn folders_within(&self, root: &Path) -> Vec<String> {
+        let roots = spellings(root);
+        let folders = self
+            .vaults
+            .iter()
+            .flat_map(|vault| &vault.paths)
+            .chain(self.areas.iter().flat_map(|area| &area.paths));
+        let mut out: Vec<String> = Vec::new();
+        for folder in folders {
+            for form in folder.forms() {
+                for base in &roots {
+                    let Ok(inside) = form.strip_prefix(base) else {
+                        continue;
+                    };
+                    let parts: Option<Vec<&str>> =
+                        inside.iter().map(|part| part.to_str()).collect();
+                    if let Some(parts) = parts.filter(|parts| !parts.is_empty()) {
+                        out.push(parts.join("/"));
+                    }
+                }
+            }
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
     /// The vault whose `git_remotes` match the first remote that matches any.
     /// A remote matches by any of its spellings; spellings that match two
     /// vaults are an ambiguity, never a choice.
@@ -149,6 +178,12 @@ fn spellings(folder: &Path) -> Vec<PathBuf> {
         forms.push(canonical);
     }
     forms
+}
+
+/// The repository enclosing `folder`, named by its `origin` remote (else its
+/// first remote) as written, as `host/path` in lowercase. `None` without one.
+pub fn repository_remote(folder: &Path) -> Option<String> {
+    remotes(folder, "").into_iter().next()?.into_iter().next()
 }
 
 /// Normalized remotes of the repository enclosing `folder`: `origin` first,

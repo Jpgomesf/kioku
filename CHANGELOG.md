@@ -8,6 +8,14 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- A code map for small models: `kioku codemap update` parses a repository's
+  source files at HEAD (only those that changed since the last update) into
+  their purpose, main definitions, and the files they import. It is stored
+  apart from notes, in the domain the repository's folder is placed in.
+  `kioku codemap show` and the `code_map` tool (outside the core profile)
+  return a file's entry with up to five neighbouring files, parsing the file
+  again first if it changed. A summarizer program can write purposes for files
+  without a doc comment, and gets code only from vaults its provider may read.
 - Open Knowledge Format (OKF v0.2) bundles. `kioku ingest` reads a folder
   whose `index.md` declares `okf_version` as a bundle (`--format okf` forces
   it): each concept becomes a note keyed by its concept ID, with its producer

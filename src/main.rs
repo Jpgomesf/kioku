@@ -2,7 +2,8 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, ensure};
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use kioku::app::{App, ContextRequest, ImportFormat, SearchRequest};
+use kioku::app::{App, ContextRequest, ImportFormat, SearchRequest, UpdateOptions};
+use kioku::codemap::Summarizer;
 use kioku::config::Config;
 use kioku::eval::{self, EvalOptions};
 use kioku::mcp::MemoryServer;
@@ -22,6 +23,40 @@ struct Cli {
     env_file: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
+}
+
+#[derive(Subcommand)]
+enum CodemapAction {
+    /// Parse the files that changed since the last update (every file the
+    /// first time), as committed at HEAD.
+    Update {
+        /// A folder inside the repository.
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+        /// Parse every file again.
+        #[arg(long)]
+        full: bool,
+        /// Program that writes a one-line purpose for each file without a
+        /// doc comment: a JSON request on stdin, JSON purposes on stdout.
+        #[arg(long, requires = "summarizer_provider")]
+        summarizer: Option<PathBuf>,
+        /// An argument for the summarizer; repeat for several.
+        #[arg(
+            long = "summarizer-arg",
+            requires = "summarizer",
+            allow_hyphen_values = true
+        )]
+        summarizer_args: Vec<String>,
+        /// The provider of the summarizer's model. Code goes to it only from
+        /// vaults that let that provider read.
+        #[arg(long, requires = "summarizer")]
+        summarizer_provider: Option<String>,
+        /// Most files one update sends to the summarizer.
+        #[arg(long, default_value_t = 50)]
+        summary_limit: usize,
+    },
+    /// Print a file's map entry and its neighbours, as a model gets them.
+    Show { file: PathBuf },
 }
 
 #[derive(Subcommand)]
@@ -112,6 +147,13 @@ enum Command {
         /// carries its match kind, the note that linked to it, and its signals.
         #[arg(long)]
         explain: bool,
+    },
+    /// Keep a repository's code map: what each source file is for and what
+    /// it defines, for small local models. It lives in the domain the
+    /// repository's folder is placed in, apart from notes.
+    Codemap {
+        #[command(subcommand)]
+        action: CodemapAction,
     },
     /// Build a bounded evidence pack for a query, like the rag_context tool.
     Context {
@@ -496,6 +538,42 @@ async fn main() -> Result<()> {
             };
             json!({"report": report, "next": next})
         }
+        Command::Codemap { action } => match action {
+            CodemapAction::Update {
+                repo,
+                full,
+                summarizer,
+                summarizer_args,
+                summarizer_provider,
+                summary_limit,
+            } => {
+                let summarizer = match (summarizer, summarizer_provider) {
+                    (Some(program), Some(provider)) => Some(Summarizer {
+                        program,
+                        args: summarizer_args,
+                        provider: kioku::vault::Provider::parse(&provider)?,
+                    }),
+                    _ => None,
+                };
+                let options = UpdateOptions {
+                    full,
+                    summarizer,
+                    summary_limit,
+                };
+                serde_json::to_value(app.codemap_update(&repo, options).await?)?
+            }
+            CodemapAction::Show { file } => {
+                let place = app.code_place(&file)?;
+                let path = place.repo.relative(&file).with_context(|| {
+                    format!(
+                        "{} is not a file in {}",
+                        file.display(),
+                        place.repo.root().display()
+                    )
+                })?;
+                serde_json::to_value(app.codemap_lookup(place, &path).await?)?
+            }
+        },
         Command::Eval(_) | Command::Token { .. } => unreachable!("handled before connecting"),
     };
     emit(&serde_json::to_string_pretty(&output)?)

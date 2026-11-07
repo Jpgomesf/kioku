@@ -167,6 +167,13 @@ pub struct ListArgs {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub struct CodeMapArgs {
+    /// The source file, absolute or relative to the session's folder, e.g. "src/store/mod.rs".
+    pub path: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct EmptyArgs {}
 
 /// Normalize `raw` against `schema` and parse it into `T`. Errors are short

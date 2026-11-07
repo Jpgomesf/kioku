@@ -262,7 +262,8 @@ def main() -> int:
         checks.check("an authenticated client completes initialize", info.get("serverInfo", {}).get("name") == "kioku")
         reader_tools = {t["name"] for t in reader.request("tools/list").get("tools", [])}
         checks.check("tools/list shows a reader only read tools",
-                     reader_tools == {"memory_search", "memory_get", "memory_inspect", "memory_stats", "memory_list"})
+                     reader_tools == {"memory_search", "memory_get", "memory_inspect", "memory_stats", "memory_list",
+                                      "code_map"})
 
         writer = HttpClient(url, writer_token, args.timeout)
         writer.initialize()

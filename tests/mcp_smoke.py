@@ -250,11 +250,12 @@ def run(client: StdioClient, checks: Checks, notes_root: Path, hydration_key: st
 
     tools = {tool["name"]: tool for tool in client.request("tools/list", {}).get("tools", [])}
     expected = {"memory_search", "memory_get", "memory_save", "memory_inspect", "memory_feedback",
-                "memory_retire", "memory_restore", "memory_import", "memory_maintenance", "memory_stats", "memory_list"}
+                "memory_retire", "memory_restore", "memory_import", "memory_maintenance", "memory_stats", "memory_list",
+                "code_map"}
     checks.check("all tools are listed with MEMORY_TOOLS=all", set(tools) == expected)
     checks.check("read tools are annotated read-only", all(
         tools[name].get("annotations", {}).get("readOnlyHint") is True
-        for name in ("memory_search", "memory_get", "memory_inspect", "memory_stats", "memory_list")))
+        for name in ("memory_search", "memory_get", "memory_inspect", "memory_stats", "memory_list", "code_map")))
     checks.check("input schemas are flat and nullable-free", all(
         "$ref" not in json.dumps(t["inputSchema"]) and '"null"' not in json.dumps(t["inputSchema"])
         for t in tools.values()))
@@ -507,7 +508,8 @@ def run_restricted(client: StdioClient, checks: Checks, trace_path: Path) -> Non
     client.send({"jsonrpc": "2.0", "method": "notifications/initialized"})
     listed = {tool["name"] for tool in client.request("tools/list", {}).get("tools", [])}
     checks.check("a read-only profile lists only read tools",
-                 listed == {"memory_search", "memory_get", "memory_inspect", "memory_stats", "memory_list"})
+                 listed == {"memory_search", "memory_get", "memory_inspect", "memory_stats", "memory_list",
+                            "code_map"})
     _, text, error = client.call_raw("memory_save", {
         "key": "reader-write", "title": "Write", "body": "A reader must not write.", "domain": "smoke"})
     checks.check("a read-only profile cannot save", error and text.startswith("refused") and "write scope" in text)
