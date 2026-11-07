@@ -68,3 +68,33 @@ LEFT JOIN LATERAL (
     WHERE r.note_id = n.id ORDER BY r.id DESC LIMIT 1
 ) latest ON true
 WHERE latest.revision IS DISTINCT FROM n.revision OR latest.status IS DISTINCT FROM n.status;
+
+-- The code map: what each source file of a repository is for and what it
+-- defines, for small models that read code. Its own layer: no vectors, so note
+-- search never sees it. `domain` is where the repository's folder is placed,
+-- so vault rules apply as they do to notes. `repo` names the repository by
+-- its remote, else its folder.
+CREATE TABLE IF NOT EXISTS code_repos (
+    domain TEXT NOT NULL,
+    repo TEXT NOT NULL,
+    root TEXT NOT NULL,
+    indexed_commit TEXT,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (domain, repo)
+);
+
+CREATE TABLE IF NOT EXISTS code_files (
+    domain TEXT NOT NULL,
+    repo TEXT NOT NULL,
+    path TEXT NOT NULL,
+    language TEXT NOT NULL,
+    digest TEXT NOT NULL,
+    purpose TEXT,
+    purpose_source TEXT CHECK (purpose_source IN ('doc', 'model')),
+    symbols JSONB NOT NULL DEFAULT '[]'::jsonb,
+    imports TEXT[] NOT NULL DEFAULT '{}',
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (domain, repo, path),
+    FOREIGN KEY (domain, repo) REFERENCES code_repos(domain, repo) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS code_files_imports ON code_files USING GIN (imports);

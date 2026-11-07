@@ -2,6 +2,7 @@
 
 pub mod access;
 pub mod app;
+pub mod codemap;
 pub mod config;
 pub mod embedding;
 pub mod error;

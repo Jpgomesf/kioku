@@ -13,6 +13,7 @@
 
 mod admin_tools;
 mod args;
+mod code_tools;
 mod core_tools;
 mod dispatch;
 mod legacy;
@@ -143,7 +144,7 @@ impl MemoryServer {
 
     /// The tools for a selection, fixed for the life of the process.
     fn router_for(selected: &BTreeSet<String>, can_import: bool) -> ToolRouter<Self> {
-        let mut router = Self::core_router() + Self::admin_router();
+        let mut router = Self::core_router() + Self::admin_router() + Self::code_router();
         for name in ALL_TOOLS {
             if !selected.contains(name) || (name == "memory_import" && !can_import) {
                 router.remove_route(name);

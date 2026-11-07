@@ -16,6 +16,10 @@ use uuid::Uuid;
 
 use crate::model::{Edge, Note, NoteInput, NoteRevision, Status};
 
+mod code;
+
+pub use code::CodeMapChange;
+
 const MAX_NOTES: i64 = 10_000;
 const MUTATION_LOCK: i64 = 0x4d454d4f525931;
 /// Most history entries one call may return.

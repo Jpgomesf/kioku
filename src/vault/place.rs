@@ -151,6 +151,12 @@ fn spellings(folder: &Path) -> Vec<PathBuf> {
     forms
 }
 
+/// The repository enclosing `folder`, named by its `origin` remote (else its
+/// first remote) as written, as `host/path` in lowercase. `None` without one.
+pub fn repository_remote(folder: &Path) -> Option<String> {
+    remotes(folder, "").into_iter().next()?.into_iter().next()
+}
+
 /// Normalized remotes of the repository enclosing `folder`: `origin` first,
 /// then the others in file order. Each remote lists its spellings: as
 /// written, then with its SSH host alias resolved through `ssh_config`.

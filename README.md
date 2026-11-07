@@ -175,6 +175,7 @@ The default `core` profile exposes three tools; `MEMORY_TOOLS=all` (or
 | `memory_maintenance` | all | Preview or apply monthly aging |
 | `memory_stats` | all | Counts by status and domain, index health |
 | `memory_list` | all | Page through a domain's notes (key, title, status, tags, origin, links to active notes, last update), filtered by status, origin, or tag |
+| `code_map` | all | A source file's purpose, main definitions with line numbers, and up to 5 files around it, for clients of small local models (see [Code map](#code-map)) |
 
 **What a save reports.** Besides the key and revision, `memory_save` returns
 `links`, the number of active notes the saved note links to or is linked
@@ -286,6 +287,44 @@ kioku ingest --path ~/work/company-kb --domain company/kb
   it. `lock` and `pinned` in a concept's frontmatter work as in any note, and
   a link to a locked concept keeps only its author's words, so the target's
   title or id never reaches a note that more providers may read.
+
+## Code map
+
+The code map tells a small model what a source file is for before it reads
+it: the file's purpose, its main definitions with line numbers, and up to five
+files it imports or that import it. It is a layer of its own, apart from
+notes: rows in PostgreSQL (`code_repos`, `code_files`) with no vectors, so note
+search never returns them. A repository's map lives in the domain its folder
+places local models in, so vaults and locks apply as they do to notes.
+
+```sh
+kioku codemap update --repo ~/code/app          # files changed since the last update; all of them the first time
+kioku codemap update --repo ~/code/app --full   # parse every file again
+kioku codemap show ~/code/app/src/billing.py    # what a model gets for one file
+```
+
+- **Parsing** is line-based, for Rust, Python, TypeScript and JavaScript, Go,
+  Terraform and HCL, SQL, and shell. A definition is found by how its line
+  starts, and imports are resolved to other tracked files, so packages and
+  standard modules drop out. Files over 512 KB are left out.
+- **Purposes.** A file's doc comment (`//!`, a module docstring, a leading
+  comment block) is its purpose. For the rest, `--summarizer <program>` runs a
+  program that reads `{"repo": ..., "files": [{"path", "language", "text"}]}`
+  on stdin and prints `{"purposes": [{"path", "purpose"}]}`.
+  - `--summarizer-provider` names whose model the program calls. Kioku sends
+    it code only from vaults that let that provider read, and never a file
+    that looks like it holds a credential.
+  - Only one-line purposes for files it asked about are kept.
+  - `--summary-limit` (default 50) caps the files per update: files that
+    changed come first, then files with no purpose yet.
+- **Freshness.** `update` reads files as committed at HEAD, and parses only
+  those that changed since the last update. A lookup parses a file again when
+  its working tree differs from what the map describes, and keeps its
+  model-written purpose until the next update.
+- **Reading it.** The `code_map` tool takes a path, absolute or relative to
+  the session's folder. It is outside the core profile (`--tools
+  core,code_map`), for clients of small local models, where a plugin can call
+  it when the model opens a file.
 
 ## How retrieval works
 

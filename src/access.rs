@@ -57,7 +57,7 @@ impl Scope {
 pub fn required_scope(tool: &str) -> Scope {
     match tool {
         "memory_search" | "memory_get" | "memory_inspect" | "memory_stats" | "memory_list"
-        | "rag_context_query" => Scope::Read,
+        | "rag_context_query" | "code_map" => Scope::Read,
         "memory_save" | "memory_feedback" => Scope::Write,
         _ => Scope::Admin,
     }
