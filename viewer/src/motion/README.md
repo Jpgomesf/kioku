@@ -8,7 +8,7 @@ Motion explains a change; it never decorates. Values live in `index.ts` (JS) and
 | Token | ms | Use |
 | --- | --- | --- |
 | `press` / `--duration-press` | 120 | Hover, press, focus and toggle feedback |
-| `overlay` / `--duration-overlay` | 180 | Dialogs, palette, toasts, panels, the services line, list entry |
+| `overlay` / `--duration-overlay` | 180 | Dialogs, palette, toasts, panels, the services line, list entry, the sidebar collapsing |
 | `view` / `--duration-view` | 240 | Route changes (view transition crossfade and 6px slide) |
 | `zoom` / `--duration-zoom` | 650 | The graph camera's semantic zoom |
 

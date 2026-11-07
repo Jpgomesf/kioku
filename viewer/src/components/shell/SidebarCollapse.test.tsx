@@ -64,6 +64,14 @@ const link = (name: string) =>
   );
 
 describe("collapsed sidebar", () => {
+  it("fades its contents in on every switch, but not on launch", () => {
+    expect(nav()?.hasAttribute("data-switched")).toBe(false);
+    act(() => button("Collapse the sidebar (⌘\\)")?.click());
+    expect(nav()?.hasAttribute("data-switched")).toBe(true);
+    act(() => button("Expand the sidebar (⌘\\)")?.click());
+    expect(nav()?.hasAttribute("data-switched")).toBe(true);
+  });
+
   it("becomes a rail of icons that keeps every name readable", () => {
     expect(nav()?.hasAttribute("data-collapsed")).toBe(false);
     expect(host.querySelector(".k-area-row")).not.toBeNull();

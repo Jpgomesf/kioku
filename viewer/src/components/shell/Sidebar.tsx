@@ -129,6 +129,13 @@ export function Sidebar({ route }: SidebarProps) {
   const requestBadge = useOpenRequestCount();
   // Collapsed, the sidebar is a rail of icons: names become tooltips and stay readable.
   const collapsed = useSidebarCollapsed();
+  // The first switch turns on the fade that hides the swap, so launch doesn't fade in.
+  const [lastCollapsed, setLastCollapsed] = useState(collapsed);
+  const [switched, setSwitched] = useState(false);
+  if (collapsed !== lastCollapsed) {
+    setLastCollapsed(collapsed);
+    setSwitched(true);
+  }
   const badges = { findings: findingBadge, requests: requestBadge };
   // The findings badge reloads when Reflect or Health opens, where runs change.
   const onReflectOrHealth = route.name === "reflect" || route.name === "health";
@@ -218,7 +225,12 @@ export function Sidebar({ route }: SidebarProps) {
     .slice(0, 3);
   const toggleLabel = collapsed ? "Expand the sidebar (⌘\\)" : "Collapse the sidebar (⌘\\)";
   return (
-    <nav className="k-sidebar" aria-label="Views and areas" data-collapsed={collapsed || undefined}>
+    <nav
+      className="k-sidebar"
+      aria-label="Views and areas"
+      data-collapsed={collapsed || undefined}
+      data-switched={switched || undefined}
+    >
       <div className="sidebar-top">
         {/* In the rail the brand is its kanji alone, which reads "kioku". */}
         <div className="k-brand" title={collapsed ? "Kioku" : undefined}>

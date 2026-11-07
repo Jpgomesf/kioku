@@ -69,7 +69,35 @@ body {
 .k-sidebar {
   flex: none;
   min-height: 0;
+  overflow-x: hidden;
   overflow-y: auto;
+  transition:
+    width var(--duration-overlay) var(--ease-standard),
+    padding var(--duration-overlay) var(--ease-standard);
+}
+/* Between the panel and the rail the contents swap at once, hidden by a fade while the width
+   moves. Two names for one fade, so every switch restarts it; nothing fades in on launch. */
+.k-sidebar[data-switched] > * {
+  animation: sidebar-swap-a var(--duration-overlay) var(--ease-standard) both;
+}
+.k-sidebar[data-switched][data-collapsed] > * {
+  animation-name: sidebar-swap-b;
+}
+@keyframes sidebar-swap-a {
+  from {
+    opacity: 0;
+  }
+}
+@keyframes sidebar-swap-b {
+  from {
+    opacity: 0;
+  }
+}
+/* One line each, so names are cut off rather than wrapped while the width moves. */
+.k-brand,
+.k-nav-item,
+.sidebar-recent-head {
+  white-space: nowrap;
 }
 .sidebar-top {
   display: flex;
@@ -81,7 +109,15 @@ body {
 .k-sidebar[data-collapsed] {
   width: 56px;
   padding: var(--space-16) var(--space-8);
-  overflow-x: hidden;
+}
+/* Each block takes the width it has once the move ends, so nothing inside rewraps or slides:
+   the moving edge only reveals or hides it. 216 is the 248px panel less its padding, 40 the
+   56px rail less its padding. */
+.k-sidebar > * {
+  width: 216px;
+}
+.k-sidebar[data-collapsed] > * {
+  width: 40px;
 }
 .k-sidebar[data-collapsed] .sidebar-top,
 .k-sidebar[data-collapsed] .sidebar-recent-head {
