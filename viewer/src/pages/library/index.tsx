@@ -24,6 +24,7 @@ import {
   toCommandError,
 } from "../../api";
 import { useCurrentArea } from "../../app/area";
+import { replaceEntry } from "../../app/history";
 import { useOverlay } from "../../app/overlay";
 import { type LibraryParams, libraryHref, navigate, noteHref } from "../../app/router";
 import { openAreaSwitcher } from "../../components/area-switcher";
@@ -245,9 +246,10 @@ export function LibraryPage({ params }: LibraryPageProps) {
 
   const onQuery = (value: string) => {
     setDraft(value);
-    // Replace the hash quietly so typing does not flood history with entries.
+    // Replace the hash quietly so typing does not flood history with entries; the entry
+    // keeps its place, so a note's Back button still names the Library.
     const href = libraryHref(paramsFromFilters({ ...filters, query: value }));
-    window.history.replaceState(null, "", href);
+    replaceEntry(href);
   };
 
   const onClear = () => {

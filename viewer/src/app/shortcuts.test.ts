@@ -1,6 +1,7 @@
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { recordEntry, resetHistory } from "./history";
 import { closeOverlay, currentOverlay, isMac } from "./overlay";
 import { useGlobalShortcuts } from "./shortcuts";
 import { resetSidebar, useSidebarCollapsed } from "./sidebar";
@@ -59,6 +60,20 @@ describe("global shortcuts", () => {
   it("leaves input-method keys alone", () => {
     press("k", { ...mod(), isComposing: true });
     expect(currentOverlay()).toBeNull();
+  });
+  it("goes back with ⌘[ only when there is a page in the app to go back to", () => {
+    const back = vi.spyOn(window.history, "back").mockImplementation(() => undefined);
+    window.history.replaceState(null, "", "#/library");
+    resetHistory();
+    recordEntry();
+    press("[", mod());
+    expect(back).not.toHaveBeenCalled();
+    window.history.pushState(null, "", "#/note/demo/a");
+    recordEntry();
+    press("[", mod());
+    expect(back).toHaveBeenCalledTimes(1);
+    back.mockRestore();
+    window.history.replaceState(null, "", "#/");
   });
   it("collapses and expands the sidebar", () => {
     const host = document.createElement("div");

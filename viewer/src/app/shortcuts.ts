@@ -1,7 +1,8 @@
-// Global shortcuts: ⌘K toggles the palette, ⌘O the area switcher and ⌘\ the sidebar (Ctrl
-// on other systems; on macOS Ctrl keeps its text-editing meaning). Escape closes whichever
-// overlay is open. Keys typed through an input method are left alone.
+// Global shortcuts: ⌘K toggles the palette, ⌘O the area switcher, ⌘\ the sidebar and ⌘[
+// goes back (Ctrl on other systems; on macOS Ctrl keeps its text-editing meaning). Escape
+// closes whichever overlay is open. Keys typed through an input method are left alone.
 import { useEffect } from "react";
+import { canGoBack } from "./history";
 import { closeOverlay, currentOverlay, hasCommandKey, toggleOverlay } from "./overlay";
 import { toggleSidebar } from "./sidebar";
 
@@ -25,6 +26,10 @@ export function useGlobalShortcuts(): void {
       } else if (key === "\\") {
         event.preventDefault();
         toggleSidebar();
+      } else if (key === "[" && canGoBack()) {
+        // Only within the app: the first page has nothing before it to go back to.
+        event.preventDefault();
+        window.history.back();
       }
     };
     window.addEventListener("keydown", onKey);

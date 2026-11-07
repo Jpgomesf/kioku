@@ -12,6 +12,7 @@ import {
 } from "../../api";
 import { graphHref, libraryHref, navigate, noteHref, reflectHref } from "../../app/router";
 import { openPalette } from "../../components/palette";
+import { BackButton } from "../../components/shell/BackButton";
 import { Button, EmptyState, FindingCallout, Icon, Kbd, StatusPill } from "../../components/ui";
 import { latestFinished } from "../reflect/state";
 import { sentenceCase, shortDate, toParagraphs } from "./body";
@@ -90,6 +91,7 @@ export function NotePage({ domain, noteKey }: NotePageProps) {
   const ready = load.state === "ready";
   return (
     <section className="page-reading note-page" aria-labelledby="note-title">
+      <BackButton fallback={{ href: libraryHref(), label: "Library" }} />
       {ready ? null : (
         <h1 id="note-title" className="k-sr" tabIndex={-1} ref={titleRef}>
           Note {noteKey}

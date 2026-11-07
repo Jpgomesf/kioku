@@ -64,6 +64,12 @@ body {
   flex: 1 0 auto;
   padding: 40px 48px;
 }
+/* Back (components/shell/BackButton.tsx) sits above the page's content, in the top padding,
+   its arrow lined up with the text past the button's own padding. */
+.back-button {
+  align-self: flex-start;
+  margin: calc(-1 * var(--space-16)) 0 calc(-1 * var(--space-8)) calc(-1 * var(--space-10));
+}
 /* The sidebar keeps its width. As a flex item it would shrink to make room for a page's
    longest unbroken line (the Library preview keeps note text unwrapped), clipping its labels. */
 .k-sidebar {

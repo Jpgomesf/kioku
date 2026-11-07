@@ -28,7 +28,7 @@ import {
   useState,
 } from "react";
 import { type GraphData, type GraphNode, kindCounts, type NoteKind, TOPIC_KIND } from "../../api";
-import { hasCommandKey } from "../../app/overlay";
+import { pushEntry, replaceEntry } from "../../app/history";
 import { graphHref, parseHash } from "../../app/router";
 import { EmptyState, IconButton } from "../../components/ui";
 import { duration, usePrefersReducedMotion } from "../../motion";
@@ -968,12 +968,9 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
     const href = graphHref(domain, selected && byKey.has(selected) ? selected : undefined);
     const push = pushNext.current && window.location.hash !== href;
     pushNext.current = false;
-    try {
-      if (push) window.history.pushState(null, "", href);
-      else window.history.replaceState(null, "", href);
-    } catch {
-      // Some embeddings block history changes; the view still works.
-    }
+    // Through the app's history, so these entries keep their place for Back buttons.
+    if (push) pushEntry(href);
+    else replaceEntry(href);
   }, [domain, selected, byKey]);
 
   // A link from elsewhere (the palette, a note's "Show in graph") moves the camera to its
@@ -1351,14 +1348,9 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
   };
 
   // Any key ends Animate. Esc clears the selection from anywhere on the page, except where a field has text to clear.
+  // ⌘[ (back to the previous note) is a global shortcut now: app/shortcuts.ts.
   const onPageKeyDown = (e: KeyboardEvent<HTMLElement>) => {
     stopAnimation();
-    if (e.key === "[" && hasCommandKey(e) && !e.defaultPrevented) {
-      // ⌘[ goes back to the previous note, as in the board.
-      e.preventDefault();
-      window.history.back();
-      return;
-    }
     if (e.key !== "Escape" || e.defaultPrevented) return;
     const target = e.target as HTMLElement;
     if (
