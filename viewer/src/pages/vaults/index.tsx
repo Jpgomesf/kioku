@@ -18,7 +18,7 @@ import {
 import { READ_ONLY_MESSAGE, toCommandError } from "../../api/core";
 import { formatDayTime } from "../../app/dates";
 import { navigate } from "../../app/router";
-import { Button, ConfirmBlock, EmptyState, Icon, Switch } from "../../components/ui";
+import { Button, ConfirmBlock, EmptyState, Icon, IconButton } from "../../components/ui";
 import {
   appOf,
   type Draft,
@@ -37,6 +37,7 @@ import {
   setDrafted,
   useDraftState,
 } from "./draft";
+import { VaultMatrix } from "./VaultMatrix";
 import "./vaults.css";
 
 const REVIEW_HREF = "#/vaults/review";
@@ -125,7 +126,7 @@ export function VaultsPage() {
   useFocusWhenReady(titleRef, load.state === "ok");
 
   return (
-    <section className="page" aria-labelledby="vaults-title">
+    <section className="page vaults-page" aria-labelledby="vaults-title">
       <div className="vaults">
         <header className="vaults-head">
           <h1 id="vaults-title" ref={titleRef} tabIndex={-1}>
@@ -159,6 +160,9 @@ function VaultsBody({
   const requests = openRequests(data.config, data.requests, dismissed);
   const changes = draftChanges(data.config, draft);
   const bannersRef = useRef<HTMLDivElement>(null);
+  // The vault whose folders and areas show beside the matrix.
+  const [openVault, setOpenVault] = useState<string | null>(null);
+  const opened = data.config.vaults.find((v) => v.name === openVault);
 
   const review = (request: AccessRequest) => {
     const vault = data.config.vaults.find((v) => v.name === request.vault);
@@ -217,17 +221,25 @@ function VaultsBody({
           <span className="k-mono">scripts/vaults.py add-vault</span> in the Kioku checkout.
         </EmptyState>
       ) : null}
-      <div className="vaults-cards">
-        {data.config.vaults.map((vault) => (
-          <VaultCard
-            key={vault.name}
-            vault={vault}
-            others={data.config.vaults.filter((v) => v.name !== vault.name)}
+      {data.config.vaults.length > 0 ? (
+        <div className="vaults-main">
+          <VaultMatrix
+            config={data.config}
             draft={draft}
-            asking={requests.filter((r) => r.vault === vault.name)}
+            requests={requests}
+            openVault={opened?.name ?? null}
+            onOpenVault={(name) => setOpenVault((open) => (open === name ? null : name))}
           />
-        ))}
-      </div>
+          {opened ? (
+            <VaultDetails
+              vault={opened}
+              others={data.config.vaults.filter((v) => v.name !== opened.name)}
+              draft={draft}
+              onClose={() => setOpenVault(null)}
+            />
+          ) : null}
+        </div>
+      ) : null}
       <p className="vaults-foot">
         You review every change before it's saved, and each save keeps a backup of the vaults file.
       </p>
@@ -258,16 +270,14 @@ function RequestBanner({
         </h3>
         <p>
           {withPaths(request.reason)} on {formatDayTime(request.requestedAt)}. Kioku turned it away,
-          because {request.vault} doesn't let {name} read it.
+          because {request.vault} doesn't let {name} read it. Its cell is marked in the table.
         </p>
       </div>
       <div className="k-request-actions">
-        <Button variant="primary" size="lg" onClick={onReview}>
+        <Button variant="primary" onClick={onReview}>
           Review the request
         </Button>
-        <Button size="lg" onClick={onLater}>
-          Not now
-        </Button>
+        <Button onClick={onLater}>Not now</Button>
       </div>
     </section>
   );
@@ -280,100 +290,96 @@ function sharesFolders(vault: VaultConfig, others: VaultConfig[]): boolean {
   );
 }
 
-function VaultCard({
+/** One vault's folders and areas, beside the matrix; its switches stay in the matrix. */
+function VaultDetails({
   vault,
   others,
   draft,
-  asking,
+  onClose,
 }: {
   vault: VaultConfig;
   others: VaultConfig[];
   draft: Draft;
-  asking: AccessRequest[];
+  onClose: () => void;
 }) {
-  const base = useId();
-  const areas = vault.areas.map((a) => a.domain.split("/").at(-1) ?? a.domain);
+  const titleId = useId();
   const except = sharesFolders(vault, others) ? ", except folders another vault claims" : "";
+  const readers = vault.apps
+    .filter((a) => draftedCanRead(vault, a.provider, draft))
+    .map((a) => a.name);
   return (
-    <article className="k-vault" aria-labelledby={`${base}-name`}>
-      <div className="k-vault-head">
-        <h3 id={`${base}-name`}>{vault.name}</h3>
-        <span>
-          {pluralise(vault.areas.length, "area", "areas")} ·{" "}
-          <span className="k-mono">{vault.paths.join(", ")}</span>
-          {except}
-        </span>
-      </div>
-      <h4 className="k-section-label">Apps that can read it</h4>
-      <ul className="k-apps">
-        {vault.apps.map((app) => {
-          const request = asking.find((r) => r.app === app.id);
-          const nameId = `${base}-${app.id}-name`;
-          const descId = `${base}-${app.id}-desc`;
-          return (
-            <li key={app.id} className={request ? "k-app-asking" : undefined}>
-              <span className="k-app">
-                <span className="k-app-name" id={nameId}>
-                  {app.name}
-                </span>
-                <span className="k-app-desc" id={descId}>
-                  {app.description}
-                  {request ? ` · asked for access on ${formatDayTime(request.requestedAt)}` : ""}
-                </span>
-              </span>
-              <Switch
-                labelledBy={nameId}
-                describedBy={descId}
-                checked={draftedCanRead(vault, app.provider, draft)}
-                onChange={(next) => setDraft(setDrafted(draft, vault, app.provider, next))}
-              />
-            </li>
-          );
-        })}
-      </ul>
-      <p className="k-apps-note">
-        Each switch stands for the model provider an app uses, so apps on the same provider switch
-        together.
+    // Escape closes the panel from anywhere inside it.
+    <aside
+      className="vaults-details"
+      aria-labelledby={titleId}
+      onKeyDown={(e) => {
+        if (e.key !== "Escape") return;
+        e.stopPropagation();
+        onClose();
+      }}
+    >
+      <header className="vaults-details-head">
+        <h2 id={titleId}>{vault.name}</h2>
+        <IconButton icon="close" label={`Close ${vault.name}`} onClick={onClose} />
+      </header>
+      <p className="vaults-details-readers">
+        {readers.length > 0 ? `${listNames(readers)} can read it.` : "No app can read it."}
       </p>
-      <details className="k-disclosure">
-        <summary>Folders and areas</summary>
-        <dl className="k-dl">
-          <dt>Folders</dt>
-          <dd>
-            {vault.paths.map((p) => (
-              <span key={p} className="k-mono">
-                {p}
-              </span>
-            ))}
-            {except}
-          </dd>
-          {vault.gitRemotes.length > 0 && (
-            <>
-              <dt>Git remotes</dt>
-              <dd>
-                {vault.gitRemotes.map((r) => (
-                  <span key={r} className="k-mono">
-                    {r}
-                  </span>
-                ))}
-              </dd>
-            </>
+      <dl className="k-dl vaults-details-list">
+        <dt>Folders</dt>
+        <dd>
+          {vault.paths.map((p) => (
+            <span key={p} className="k-mono">
+              {p}
+            </span>
+          ))}
+          {except}
+        </dd>
+        {vault.gitRemotes.length > 0 && (
+          <>
+            <dt>Git remotes</dt>
+            <dd>
+              {vault.gitRemotes.map((r) => (
+                <span key={r} className="k-mono">
+                  {r}
+                </span>
+              ))}
+            </dd>
+          </>
+        )}
+        <dt>Domains</dt>
+        <dd>
+          {vault.domains.map((d) => (
+            <span key={d} className="k-fact">
+              <span className="k-mono">{d}</span>
+            </span>
+          ))}
+        </dd>
+        <dt>{pluralise(vault.areas.length, "area", "areas")}</dt>
+        <dd>
+          {vault.areas.length > 0 ? (
+            <ul className="vaults-areas">
+              {vault.areas.map((a) => (
+                <li key={a.domain}>
+                  <span className="k-mono">{a.domain}</span>
+                  {a.paths.length > 0 ? (
+                    <span className="k-mono vaults-area-paths">{a.paths.join(", ")}</span>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+          ) : (
+            "None yet"
           )}
-          <dt>Domains</dt>
-          <dd>
-            {vault.domains.map((d) => (
-              <span key={d} className="k-fact">
-                <span className="k-mono">{d}</span>
-              </span>
-            ))}
-          </dd>
-          <dt>Areas</dt>
-          <dd>{areas.length > 0 ? areas.join(", ") : "None yet"}</dd>
-          <dt>New notes</dt>
-          <dd>{vault.defaultDomain ?? "Not set"}</dd>
-        </dl>
-      </details>
-    </article>
+        </dd>
+        <dt>New notes</dt>
+        <dd>{vault.defaultDomain ?? "Not set"}</dd>
+      </dl>
+      <p className="vaults-details-foot">
+        Its switches stay in the table, so changing who can read it works the same as for every
+        other vault.
+      </p>
+    </aside>
   );
 }
 
@@ -404,18 +410,35 @@ function reviewTitle(changes: VisibilityChange[], config: VaultsConfig): string 
     const name = appOf(config, only.vault, only.app)?.name ?? only.app;
     return only.canRead ? `Let ${name} read ${only.vault}?` : `Stop ${name} reading ${only.vault}?`;
   }
-  return `Change who can read ${listNames([...new Set(changes.map((c) => c.vault))])}?`;
+  const vaults = [...new Set(changes.map((c) => c.vault))];
+  // A column's All can change dozens of vaults: past a few, count them instead of naming them.
+  return vaults.length > NAMED_VAULTS
+    ? `Change who can read ${vaults.length} vaults?`
+    : `Change who can read ${listNames(vaults)}?`;
 }
+
+/** Vaults named one by one in the review; past this, they're counted. */
+const NAMED_VAULTS = 3;
+/** Change lines the review shows before "Show all". */
+const SUMMARY_SHOWN = 8;
 
 /** Plain lines about access that this change leaves alone. */
 export function unchangedLines(config: VaultsConfig, changes: VisibilityChange[]): string[] {
   const lines: string[] = [];
   const changedVaults = new Set(changes.map((c) => c.vault));
+  const untouched = config.vaults.filter((v) => !changedVaults.has(v.name));
+  if (untouched.length > NAMED_VAULTS) {
+    lines.push(`Nothing changes in the other ${untouched.length} vaults.`);
+  } else {
+    for (const vault of untouched) lines.push(`${vault.name}: nothing changes.`);
+  }
+  if (changedVaults.size > NAMED_VAULTS) {
+    // Per-vault lines would run to hundreds; the change list above already names each one.
+    lines.push("Every other app keeps the access it has.");
+    return lines;
+  }
   for (const vault of config.vaults) {
-    if (!changedVaults.has(vault.name)) {
-      lines.push(`${vault.name}: nothing changes.`);
-      continue;
-    }
+    if (!changedVaults.has(vault.name)) continue;
     const kept = vault.apps.filter(
       (a) => !changes.some((c) => c.vault === vault.name && c.app === a.id),
     );
@@ -431,16 +454,20 @@ const sends = (name: string): string => (name.endsWith(" apps") ? "send" : "send
 
 /** Where the data would go: one line per app that gains access and isn't on this Mac. */
 export function warningLines(config: VaultsConfig, changes: VisibilityChange[]): string[] {
-  return changes.flatMap((c) => {
+  const lines = changes.flatMap((c) => {
     const app = appOf(config, c.vault, c.app);
     if (!c.canRead || !app || isLocalProvider(app.provider)) return [];
     return [`${app.name} ${sends(app.name)} what it reads to ${providerWords(app.provider)}.`];
   });
+  // Once per app, however many vaults a column's All gives it.
+  return [...new Set(lines)];
 }
 
 /** "Until now, personal has only been read by A and B." for each vault that gains a reader. */
 function contextLines(config: VaultsConfig, changes: VisibilityChange[]): string[] {
   const vaults = [...new Set(changes.filter((c) => c.canRead).map((c) => c.vault))];
+  // Past a few vaults this history would drown the warning it follows.
+  if (vaults.length > NAMED_VAULTS) return [];
   return vaults.flatMap((name) => {
     const readers = config.vaults
       .find((v) => v.name === name)
@@ -564,6 +591,8 @@ function ReviewBody({
   const unchanged = useMemo(() => unchangedLines(config, changes), [config, changes]);
   const warnings = useMemo(() => warningLines(config, changes), [config, changes]);
   const context = useMemo(() => contextLines(config, changes), [config, changes]);
+  // A column's All can make hundreds of lines: the first few, then the rest on request.
+  const [allChanges, setAllChanges] = useState(false);
 
   if (changes.length === 0 || !preview) {
     return (
@@ -668,12 +697,21 @@ function ReviewBody({
               {whatTitle}
             </h2>
             <ul className="k-reads">
-              {preview.summary.map((line) => (
-                <li key={line}>
-                  <Icon name="eye" />
-                  <span>{line}</span>
+              {(allChanges ? preview.summary : preview.summary.slice(0, SUMMARY_SHOWN)).map(
+                (line) => (
+                  <li key={line}>
+                    <Icon name="eye" />
+                    <span>{line}</span>
+                  </li>
+                ),
+              )}
+              {!allChanges && preview.summary.length > SUMMARY_SHOWN ? (
+                <li>
+                  <Button size="sm" variant="quiet" onClick={() => setAllChanges(true)}>
+                    Show all {preview.summary.length} changes
+                  </Button>
                 </li>
-              ))}
+              ) : null}
               {soleApp && (
                 <li>
                   <Icon name="plus" />

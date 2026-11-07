@@ -62,10 +62,54 @@ const VAULTS: VaultConfig[] = [
   },
 ];
 
-export const getVaultsConfig = (): VaultsConfig => structuredClone({ vaults: VAULTS });
+/** Provider sets the generated vaults cycle through. */
+const PREVIEW_SETS = [
+  ["anthropic", "local"],
+  ["anthropic"],
+  ["local"],
+  ["anthropic", "local", "openai"],
+  ["anthropic", "google"],
+  [],
+];
+
+/**
+ * Extra generated vaults, for trying the Vaults page at scale in a browser: set localStorage
+ * "kioku.viewer.mock.vaults" to a count (up to 500). Generic names only: this repo is public.
+ */
+function previewVaults(): VaultConfig[] {
+  let count = 0;
+  try {
+    count = Number(globalThis.localStorage?.getItem("kioku.viewer.mock.vaults") ?? 0);
+  } catch {
+    count = 0;
+  }
+  if (!Number.isFinite(count) || count <= 0) return [];
+  return Array.from({ length: Math.min(Math.floor(count), 500) }, (_, i) => {
+    const name = `client-${String(i + 1).padStart(3, "0")}`;
+    const providers = PREVIEW_SETS[i % PREVIEW_SETS.length] ?? [];
+    const areas = Array.from({ length: i % 4 }, (_, j) => ({
+      domain: `${name}/area-${j + 1}`,
+      paths: [`~/work/clients/${name}/area-${j + 1}`],
+    }));
+    return {
+      name,
+      paths: [`~/work/clients/${name}`],
+      gitRemotes: [],
+      domains: [name, ...areas.map((a) => a.domain)],
+      providers,
+      areas,
+      defaultDomain: name,
+      apps: apps(providers),
+    };
+  });
+}
+
+const allVaults = (): VaultConfig[] => [...VAULTS, ...previewVaults()];
+
+export const getVaultsConfig = (): VaultsConfig => structuredClone({ vaults: allVaults() });
 
 function findApp(vault: string, appId: string): { vault?: VaultConfig; app?: VaultApp } {
-  const v = VAULTS.find((x) => x.name === vault);
+  const v = allVaults().find((x) => x.name === vault);
   return { vault: v, app: v?.apps.find((a) => a.id === appId) };
 }
 
@@ -77,7 +121,7 @@ export function previewVisibility(changes: VisibilityChange[]): VisibilityPrevie
   const summary: string[] = [];
   const diff: DiffLine[] = [];
   for (const vaultName of [...new Set(changes.map((c) => c.vault))]) {
-    const vault = VAULTS.find((v) => v.name === vaultName);
+    const vault = allVaults().find((v) => v.name === vaultName);
     if (!vault) continue;
     const next = new Set(vault.providers);
     for (const c of changes.filter((x) => x.vault === vaultName)) {

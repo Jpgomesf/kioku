@@ -126,4 +126,22 @@ describe("visibility draft", () => {
     const changes = draftChanges(config, setDrafted({}, personal, "local", false));
     expect(warningLines(config, changes)).toEqual([]);
   });
+
+  it("keeps the review short when a column changes many vaults", () => {
+    // Ten vaults like personal, all given to Codex at once, as a column's All would.
+    const many = {
+      vaults: Array.from({ length: 10 }, (_, i) => ({ ...personal, name: `client-${i}` })),
+    };
+    let draft = {};
+    for (const vault of many.vaults.slice(0, 6)) draft = setDrafted(draft, vault, "openai", true);
+    const changes = draftChanges(many, draft);
+    expect(changes).toHaveLength(6);
+    // One warning per app, not one per vault.
+    expect(warningLines(many, changes)).toEqual(["Codex sends what it reads to OpenAI."]);
+    // The untouched vaults are counted, and per-vault lines give way to one.
+    expect(unchangedLines(many, changes)).toEqual([
+      "Nothing changes in the other 4 vaults.",
+      "Every other app keeps the access it has.",
+    ]);
+  });
 });
