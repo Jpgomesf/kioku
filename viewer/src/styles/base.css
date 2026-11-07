@@ -22,7 +22,9 @@ body {
 :where(a) {
   color: var(--accent);
 }
-:where(a):hover {
+/* Not on links drawn as buttons: :hover weighs as much as a .k-btn variant, so this would win
+   and turn a primary button's text the colour of its own hover background. */
+:where(a:not(.k-btn)):hover {
   color: var(--accent-ink);
 }
 :focus-visible {
