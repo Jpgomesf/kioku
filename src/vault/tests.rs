@@ -83,6 +83,22 @@ fn vaults(tree: &Tree) -> Arc<Vaults> {
     Arc::new(Vaults::parse(&text, Path::new("/cfg/vaults.toml"), None).unwrap())
 }
 
+#[test]
+fn lists_the_configured_folders_inside_a_folder() {
+    let tree = Tree::new();
+    let vaults = vaults(&tree);
+    assert_eq!(
+        vaults.folders_within(&tree.0),
+        vec!["projects/kioku", "work", "work/api"]
+    );
+    assert_eq!(vaults.folders_within(&tree.0.join("work")), vec!["api"]);
+    assert!(
+        vaults
+            .folders_within(&tree.0.join("projects/kioku"))
+            .is_empty()
+    );
+}
+
 fn place(vaults: &Arc<Vaults>, provider: &str, folder: &Path) -> Session {
     Session::for_folder(Some(vaults), Some(provider), Some(folder))
 }

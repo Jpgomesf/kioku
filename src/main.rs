@@ -563,15 +563,15 @@ async fn main() -> Result<()> {
                 serde_json::to_value(app.codemap_update(&repo, options).await?)?
             }
             CodemapAction::Show { file } => {
-                let (repo, domain) = app.code_place(&file)?;
-                let path = repo.relative(&file).with_context(|| {
+                let place = app.code_place(&file)?;
+                let path = place.repo.relative(&file).with_context(|| {
                     format!(
                         "{} is not a file in {}",
                         file.display(),
-                        repo.root().display()
+                        place.repo.root().display()
                     )
                 })?;
-                serde_json::to_value(app.codemap_lookup(repo, &domain, &path).await?)?
+                serde_json::to_value(app.codemap_lookup(place, &path).await?)?
             }
         },
         Command::Eval(_) | Command::Token { .. } => unreachable!("handled before connecting"),

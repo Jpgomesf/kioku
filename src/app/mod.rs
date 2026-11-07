@@ -15,8 +15,8 @@ mod upkeep;
 mod write;
 
 pub use codemap::{
-    FileMap, Neighbour, PurposeCounts, Relation, UpdateOptions, UpdateReport, lookup_file,
-    update_repo,
+    CodePlace, FileMap, Neighbour, PurposeCounts, Relation, UpdateOptions, UpdateReport,
+    lookup_file, update_repo,
 };
 pub use context::{ContextMemory, ContextPack, ContextRequest, SkippedMemory};
 pub use import::{ImportFailure, ImportFormat, ImportReport, ImportedNote, OkfImport};

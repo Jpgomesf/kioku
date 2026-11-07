@@ -1,10 +1,11 @@
-//! Building and reading the code map ([`crate::codemap`]). [`update_repo`] and
-//! [`lookup_file`] take the store and the domain a repository is placed in,
-//! so they run without the rest of the application; [`App`] places the
-//! repository by its folder and checks which provider may read it.
+//! Building and reading the code map ([`crate::codemap`]). [`update_repo`]
+//! and [`lookup_file`] take the store and a [`CodePlace`], so they run
+//! without the rest of the application; [`App::code_place`] places a checkout
+//! by its folder, as a session there would be placed.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::Result;
 use serde::Serialize;
@@ -16,7 +17,33 @@ use crate::codemap::{
 };
 use crate::error::UserError;
 use crate::store::{CodeMapChange, Store};
-use crate::vault::{Provider, Session, Viewer};
+use crate::vault::{Provider, Session, Vaults, Viewer};
+
+/// Files read from git at once, so a large repository is never in memory whole.
+const READ_CHUNK: usize = 200;
+
+/// Where a checkout's map lives.
+pub struct CodePlace {
+    pub repo: Repository,
+    /// The domain the checkout's folder places local models in.
+    pub domain: String,
+    /// Folders inside the checkout, relative to its root, that other vault
+    /// or area rules place elsewhere. Their files stay out of this map.
+    pub excluded: Vec<String>,
+}
+
+impl CodePlace {
+    /// Whether this map may hold the file at `path`, relative to the root.
+    pub fn covers(&self, path: &str) -> bool {
+        covers(&self.excluded, path)
+    }
+}
+
+fn covers(excluded: &[String], path: &str) -> bool {
+    !excluded
+        .iter()
+        .any(|folder| path == folder || path.starts_with(&format!("{folder}/")))
+}
 
 /// How an update runs.
 pub struct UpdateOptions {
@@ -36,13 +63,17 @@ pub struct PurposeCounts {
 
 #[derive(Debug, Serialize)]
 pub struct UpdateReport {
+    /// The checkout's name: its remote, else its folder's name.
     pub repo: String,
+    pub root: String,
     pub domain: String,
     pub commit: String,
     /// Source files in the map after the update.
     pub files: usize,
-    /// Files parsed by this update.
+    /// Files this update parsed.
     pub parsed: usize,
+    /// Entries this update wrote, new or changed.
+    pub updated: usize,
     pub removed: usize,
     /// Files the summarizer wrote a purpose for.
     pub summarized: usize,
@@ -86,242 +117,290 @@ pub enum Relation {
     ImportedBy,
 }
 
-/// What an update read from git, off the async runtime.
-struct Scan {
-    head: String,
-    files: FileSet,
-    /// Files to parse, with their text at HEAD.
-    texts: Vec<(String, Language, String)>,
-    /// Unchanged files with no purpose, to summarize.
-    backfill: Vec<(String, Language, String)>,
-    /// Source files that are too large or not text.
-    unreadable: Vec<String>,
+/// What an update reads before it plans.
+struct PlanInput {
+    base: Option<String>,
+    full: bool,
+    excluded: Vec<String>,
+    existing: HashMap<String, CodeFile>,
+    /// Most files to summarize; 0 without a summarizer.
+    summary_limit: usize,
 }
 
-fn scan_repo(
+/// What an update will save, worked out from git off the async runtime.
+struct Plan {
+    head: String,
+    upserts: Vec<CodeFile>,
+    removed: Vec<String>,
+    parsed: usize,
+    /// Files to summarize, in order: files that changed and have no doc
+    /// comment, then files that have no purpose at all.
+    sources: Vec<Source>,
+}
+
+/// The texts of `paths` at `commit`. A path that is too large or not text
+/// goes to `unreadable`.
+fn read_texts(
     repo: &Repository,
-    base: Option<&str>,
-    full: bool,
-    known: &HashSet<String>,
-    backfill: &[String],
-) -> Result<Scan> {
+    commit: &str,
+    paths: &[String],
+    unreadable: &mut HashSet<String>,
+) -> Result<Vec<(String, Language, String)>> {
+    let contents = repo.contents(commit, paths)?;
+    let mut out = Vec::new();
+    for (path, content) in paths.iter().zip(contents) {
+        match (
+            Language::for_path(path),
+            content.and_then(|bytes| String::from_utf8(bytes).ok()),
+        ) {
+            (Some(language), Some(text)) => out.push((path.clone(), language, text)),
+            _ => {
+                unreadable.insert(path.clone());
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn plan_update(repo: &Repository, input: &PlanInput) -> Result<Plan> {
     let head = repo.head()?.ok_or_else(|| {
         UserError::InvalidArgument(format!("{} has no commits yet", repo.root().display()))
     })?;
-    let files = FileSet::new(repo.files_at(&head)?);
-    let mut wanted: BTreeSet<String> = match base.filter(|commit| !full && repo.has_commit(commit))
-    {
-        Some(commit) => repo
-            .changes(commit, &head)?
+    let files = FileSet::new(
+        repo.files_at(&head)?
             .into_iter()
+            .filter(|path| covers(&input.excluded, path)),
+    );
+    let existing = &input.existing;
+    // Without a usable base, everything is parsed. So it is when a file was
+    // added, deleted or renamed: that can change what other, untouched
+    // files' imports resolve to. Entries that come out the same aren't saved.
+    let changes = match input
+        .base
+        .as_deref()
+        .filter(|commit| !input.full && repo.has_commit(commit))
+    {
+        Some(commit) => Some(repo.changes(commit, &head)?),
+        None => None,
+    };
+    let reshaped = changes.as_ref().is_none_or(|changes| {
+        changes.iter().any(|change| match change {
+            Change::Deleted(path) => existing.contains_key(path),
+            Change::Changed(path) => files.contains(path) && !existing.contains_key(path),
+        })
+    });
+    let mut wanted: BTreeSet<String> = if reshaped {
+        files.paths().map(str::to_owned).collect()
+    } else {
+        changes
+            .into_iter()
+            .flatten()
             .filter_map(|change| match change {
                 Change::Changed(path) => Some(path),
                 Change::Deleted(_) => None,
             })
             .filter(|path| files.contains(path))
-            .collect(),
-        None => files.paths().map(str::to_owned).collect(),
+            .collect()
     };
-    // Files the map lacks (a failed or older update) are parsed as well.
+    // Files the map lacks (a failed or an older update) are parsed as well.
     wanted.extend(
         files
             .paths()
-            .filter(|path| !known.contains(*path))
+            .filter(|path| !existing.contains_key(*path))
             .map(str::to_owned),
     );
     let wanted: Vec<String> = wanted.into_iter().collect();
-    let backfill: Vec<String> = backfill
-        .iter()
-        .filter(|path| files.contains(path) && !wanted.contains(path))
+    let mut plan = Plan {
+        head: head.clone(),
+        upserts: Vec::new(),
+        removed: Vec::new(),
+        parsed: 0,
+        sources: Vec::new(),
+    };
+    let mut unreadable: HashSet<String> = HashSet::new();
+    for chunk in wanted.chunks(READ_CHUNK) {
+        for (path, language, text) in read_texts(repo, &head, chunk, &mut unreadable)? {
+            let previous = existing.get(&path);
+            let changed = previous.is_none_or(|old| old.digest != codemap::digest(&text));
+            let file = CodeFile::build(&path, language, &text, &files, previous);
+            plan.parsed += 1;
+            if changed
+                && file.purpose_source != Some(PurposeSource::Doc)
+                && plan.sources.len() < input.summary_limit
+                && crate::secrets::find_in_text(&text).is_none()
+            {
+                plan.sources.push(Source {
+                    path: path.clone(),
+                    language,
+                    text,
+                });
+            }
+            if previous != Some(&file) {
+                plan.upserts.push(file);
+            }
+        }
+    }
+    // Then files that have no purpose yet, also from earlier updates.
+    if plan.sources.len() < input.summary_limit {
+        let parsed: HashSet<&str> = wanted.iter().map(String::as_str).collect();
+        let mut backfill: Vec<String> = existing
+            .values()
+            .filter(|file| {
+                file.purpose.is_none()
+                    && files.contains(&file.path)
+                    && !parsed.contains(file.path.as_str())
+            })
+            .map(|file| file.path.clone())
+            .collect();
+        backfill.sort();
+        'chunks: for chunk in backfill.chunks(READ_CHUNK) {
+            for (path, language, text) in read_texts(repo, &head, chunk, &mut unreadable)? {
+                if crate::secrets::find_in_text(&text).is_some() {
+                    continue;
+                }
+                plan.sources.push(Source {
+                    path,
+                    language,
+                    text,
+                });
+                if plan.sources.len() >= input.summary_limit {
+                    break 'chunks;
+                }
+            }
+        }
+    }
+    plan.removed = existing
+        .keys()
+        .filter(|path| !files.contains(path) || unreadable.contains(*path))
         .cloned()
         .collect();
-    let read = |paths: Vec<String>,
-                unreadable: &mut Vec<String>|
-     -> Result<Vec<(String, Language, String)>> {
-        let contents = repo.contents(&head, &paths)?;
-        let mut out = Vec::new();
-        for (path, content) in paths.into_iter().zip(contents) {
-            let (Some(language), Some(text)) = (
-                Language::for_path(&path),
-                content.and_then(|bytes| String::from_utf8(bytes).ok()),
-            ) else {
-                unreadable.push(path);
-                continue;
-            };
-            out.push((path, language, text));
-        }
-        Ok(out)
-    };
-    let mut unreadable = Vec::new();
-    let texts = read(wanted, &mut unreadable)?;
-    let backfill = read(backfill, &mut unreadable)?;
-    Ok(Scan {
-        head,
-        files,
-        texts,
-        backfill,
-        unreadable,
-    })
+    Ok(plan)
 }
 
-/// Bring `domain`'s map of `repo` up to HEAD: parse the files that changed
-/// since the last update (every file the first time, or with `full`), drop
-/// the files HEAD no longer has, and ask the summarizer for the purposes
-/// that are missing.
+/// Bring a checkout's map up to HEAD: parse the files that changed since the
+/// last update (every file the first time, with `full`, or when files came
+/// or went), drop the files HEAD no longer has, and ask the summarizer for
+/// the purposes that are missing.
 pub async fn update_repo(
     store: &Store,
-    repo: Repository,
-    domain: &str,
+    place: CodePlace,
     options: &UpdateOptions,
 ) -> Result<UpdateReport> {
+    let CodePlace {
+        repo,
+        domain,
+        excluded,
+    } = place;
     let name = repo.name();
     let root = repo.root().display().to_string();
-    let started_from = store.code_repo_commit(domain, &name).await?;
+    let started_from = store.code_map_commit(&domain, &root).await?;
     let existing: HashMap<String, CodeFile> = store
-        .code_files(domain, &name)
+        .code_map_files(&domain, &root)
         .await?
         .into_iter()
         .map(|file| (file.path.clone(), file))
         .collect();
-    let known: HashSet<String> = existing.keys().cloned().collect();
-    let mut backfill: Vec<String> = match options.summarizer {
-        Some(_) => existing
-            .values()
-            .filter(|file| file.purpose.is_none())
-            .map(|file| file.path.clone())
-            .collect(),
-        None => Vec::new(),
+    let input = PlanInput {
+        base: started_from.clone().flatten(),
+        full: options.full,
+        excluded,
+        existing,
+        summary_limit: if options.summarizer.is_some() {
+            options.summary_limit
+        } else {
+            0
+        },
     };
-    backfill.sort();
-    backfill.truncate(options.summary_limit);
-    let base = started_from.clone().flatten();
-    let full = options.full;
-    let scan = tokio::task::spawn_blocking(move || {
-        scan_repo(&repo, base.as_deref(), full, &known, &backfill)
+    let (mut plan, existing) = tokio::task::spawn_blocking(move || -> Result<_> {
+        let plan = plan_update(&repo, &input)?;
+        Ok((plan, input.existing))
     })
     .await??;
 
-    let mut upserts: Vec<CodeFile> = Vec::new();
-    let mut texts: HashMap<String, (Language, String)> = HashMap::new();
-    for (path, language, text) in scan.texts {
-        let previous = existing.get(&path);
-        if !full && previous.is_some_and(|old| old.digest == codemap::digest(&text)) {
-            continue;
-        }
-        upserts.push(CodeFile::build(
-            &path,
-            language,
-            &text,
-            &scan.files,
-            previous,
-        ));
-        texts.insert(path, (language, text));
-    }
-    let parsed = upserts.len();
-    let removed: Vec<String> = existing
-        .keys()
-        .filter(|path| !scan.files.contains(path) || scan.unreadable.contains(path))
-        .cloned()
-        .collect();
-
     let mut notes = Vec::new();
     let mut summarized = 0;
-    if let Some(summarizer) = &options.summarizer {
-        // Changed files without a doc comment first, then old files without
-        // any purpose; never a file that looks like it holds a credential.
-        let mut sources: Vec<Source> = upserts
-            .iter()
-            .filter(|file| file.purpose_source != Some(PurposeSource::Doc))
-            .filter_map(|file| {
-                let (language, text) = texts.get(&file.path)?;
-                Some(Source {
-                    path: file.path.clone(),
-                    language: *language,
-                    text: text.clone(),
-                })
-            })
-            .chain(
-                scan.backfill
-                    .into_iter()
-                    .map(|(path, language, text)| Source {
-                        path,
-                        language,
-                        text,
-                    }),
-            )
-            .filter(|source| crate::secrets::find_in_text(&source.text).is_none())
-            .collect();
-        sources.truncate(options.summary_limit);
-        if !sources.is_empty() {
-            let summarizer = summarizer.clone();
-            let repo_name = name.clone();
-            let (purposes, errors) =
-                tokio::task::spawn_blocking(move || summarizer.summarize(&repo_name, &sources))
-                    .await?;
-            notes.extend(
-                errors
-                    .into_iter()
-                    .map(|error| format!("summarizer: {error}")),
-            );
-            summarized = purposes.len();
-            for (path, purpose) in purposes {
-                let index = match upserts.iter().position(|file| file.path == path) {
-                    Some(index) => index,
-                    None => match existing.get(&path) {
-                        Some(old) => {
-                            upserts.push(old.clone());
-                            upserts.len() - 1
-                        }
-                        None => continue,
-                    },
-                };
-                upserts[index].purpose = Some(purpose);
-                upserts[index].purpose_source = Some(PurposeSource::Model);
+    if let Some(summarizer) = &options.summarizer
+        && !plan.sources.is_empty()
+    {
+        let summarizer = summarizer.clone();
+        let repo_name = name.clone();
+        let sources = std::mem::take(&mut plan.sources);
+        let (purposes, errors) =
+            tokio::task::spawn_blocking(move || summarizer.summarize(&repo_name, &sources)).await?;
+        notes.extend(
+            errors
+                .into_iter()
+                .map(|error| format!("summarizer: {error}")),
+        );
+        for (path, purpose) in purposes {
+            let index = match plan.upserts.iter().position(|file| file.path == path) {
+                Some(index) => index,
+                None => match existing.get(&path) {
+                    Some(old) => {
+                        plan.upserts.push(old.clone());
+                        plan.upserts.len() - 1
+                    }
+                    None => continue,
+                },
+            };
+            let entry = &mut plan.upserts[index];
+            if entry.purpose_source == Some(PurposeSource::Doc) {
+                continue;
             }
+            entry.purpose = Some(purpose);
+            entry.purpose_source = Some(PurposeSource::Model);
+            summarized += 1;
         }
     }
 
     let change = CodeMapChange {
-        domain,
-        repo: &name,
+        domain: &domain,
         root: &root,
+        name: &name,
         started_from: started_from.as_ref().map(|commit| commit.as_deref()),
-        commit: &scan.head,
-        upserts: &upserts,
-        removed: &removed,
+        commit: &plan.head,
+        upserts: &plan.upserts,
+        removed: &plan.removed,
     };
     if !store.save_code_map(&change).await? {
         notes.push(
-            "another update saved this repository's map first, so this one saved nothing"
-                .to_owned(),
+            "another update saved this checkout's map first, so this one saved nothing".to_owned(),
         );
+        let purposes = count_purposes(existing.values());
         return Ok(UpdateReport {
             repo: name,
-            domain: domain.to_owned(),
-            commit: scan.head,
+            root,
+            domain,
+            commit: plan.head,
             files: existing.len(),
             parsed: 0,
+            updated: 0,
             removed: 0,
             summarized: 0,
-            purposes: count_purposes(existing.values()),
+            purposes,
             notes,
         });
     }
-    let mut map: HashMap<&str, &CodeFile> = existing
-        .iter()
-        .filter(|(path, _)| !removed.contains(path))
-        .map(|(path, file)| (path.as_str(), file))
-        .collect();
-    map.extend(upserts.iter().map(|file| (file.path.as_str(), file)));
+    let (files, purposes) = {
+        let mut map: HashMap<&str, &CodeFile> = existing
+            .iter()
+            .filter(|(path, _)| !plan.removed.contains(path))
+            .map(|(path, file)| (path.as_str(), file))
+            .collect();
+        map.extend(plan.upserts.iter().map(|file| (file.path.as_str(), file)));
+        (map.len(), count_purposes(map.values().copied()))
+    };
     Ok(UpdateReport {
         repo: name,
-        domain: domain.to_owned(),
-        commit: scan.head,
-        files: map.len(),
-        parsed,
-        removed: removed.len(),
+        root,
+        domain,
+        commit: plan.head,
+        files,
+        parsed: plan.parsed,
+        updated: plan.upserts.len(),
+        removed: plan.removed.len(),
         summarized,
-        purposes: count_purposes(map.values().copied()),
+        purposes,
         notes,
     })
 }
@@ -356,16 +435,11 @@ fn read_source(file: &Path) -> Result<String> {
     })
 }
 
-/// `path`'s entry in `domain`'s map of `repo`, with its neighbours. A file
-/// whose content changed since the map described it, or that the map lacks,
-/// is parsed from the working tree first and saved; a model-written purpose
-/// survives until the next update.
-pub async fn lookup_file(
-    store: &Store,
-    repo: Repository,
-    domain: &str,
-    path: &str,
-) -> Result<FileMap> {
+/// `path`'s entry in a checkout's map, with its neighbours. A file whose
+/// content changed since the map described it, or that the map lacks, is
+/// parsed from the working tree first and saved, keeping any model-written
+/// purpose until the next update.
+pub async fn lookup_file(store: &Store, place: CodePlace, path: &str) -> Result<FileMap> {
     let language = Language::for_path(path).ok_or_else(|| {
         let names: Vec<&str> = Language::ALL
             .iter()
@@ -376,10 +450,21 @@ pub async fn lookup_file(
             names.join(", ")
         ))
     })?;
+    if !place.covers(path) {
+        return Err(UserError::Refused(format!(
+            "{path} is in a folder that another vault or area rule places, so this checkout's code map doesn't cover it"
+        ))
+        .into());
+    }
+    let CodePlace {
+        repo,
+        domain,
+        excluded,
+    } = place;
     let name = repo.name();
     let root = repo.root().display().to_string();
     let stored = store
-        .code_files_at(domain, &name, &[path.to_owned()])
+        .code_map_files_at(&domain, &root, &[path.to_owned()])
         .await?
         .into_iter()
         .next();
@@ -390,7 +475,9 @@ pub async fn lookup_file(
         previous => {
             let owned = path.to_owned();
             let file = tokio::task::spawn_blocking(move || -> Result<CodeFile> {
-                let files = FileSet::new(repo.tracked()?);
+                let tracked = repo.tracked()?;
+                let files =
+                    FileSet::new(tracked.into_iter().filter(|path| covers(&excluded, path)));
                 Ok(CodeFile::build(
                     &owned,
                     language,
@@ -400,13 +487,17 @@ pub async fn lookup_file(
                 ))
             })
             .await??;
-            store.save_code_file(domain, &name, &root, &file).await?;
+            store
+                .refresh_code_file(&domain, &root, &name, &file)
+                .await?;
             (file, true)
         }
     };
-    let imported = store.code_files_at(domain, &name, &file.imports).await?;
+    let imported = store
+        .code_map_files_at(&domain, &root, &file.imports)
+        .await?;
     let importers = store
-        .code_importers(domain, &name, path, i64::try_from(MAX_NEIGHBOURS)?)
+        .code_map_importers(&domain, &root, path, i64::try_from(MAX_NEIGHBOURS)?)
         .await?;
     let neighbours = neighbours(&file.imports, &imported, &importers);
     let shown: Vec<Symbol> = file
@@ -416,7 +507,7 @@ pub async fn lookup_file(
         .collect();
     Ok(FileMap {
         repo: name,
-        domain: domain.to_owned(),
+        domain,
         path: file.path.clone(),
         language,
         purpose: file.purpose.clone(),
@@ -466,32 +557,56 @@ pub(crate) fn neighbours(
         if out.len() >= MAX_NEIGHBOURS {
             break;
         }
-        out.push(describe(path, Relation::Imports, entry(path)));
+        if !out.iter().any(|neighbour| neighbour.path == *path) {
+            out.push(describe(path, Relation::Imports, entry(path)));
+        }
     }
     out
 }
 
+/// The domain `folder` places local models in, or why it places them nowhere.
+fn local_domain(vaults: &Arc<Vaults>, folder: &Path) -> Result<String, String> {
+    match Session::for_folder(Some(vaults), Some(Provider::Local.as_str()), Some(folder)) {
+        Session::Placed(placement) => Ok(placement.default_domain().to_owned()),
+        Session::Refused(reason) => Err(reason),
+        Session::Open => Err("no vaults file is in use".to_owned()),
+    }
+}
+
 impl App {
-    /// The repository enclosing `path`, and the domain its map lives in: the
-    /// area, else the vault default, that its folder places local models
-    /// in. Without a vaults file, the default domain.
-    pub fn code_place(&self, path: &Path) -> Result<(Repository, String)> {
+    /// Where the map of the checkout enclosing `path` lives: the domain its
+    /// folder places local models in, less any folders inside it that place
+    /// them elsewhere. Without a vaults file, the default domain.
+    pub fn code_place(&self, path: &Path) -> Result<CodePlace> {
         let repo = Repository::discover(path)?;
         let Some(vaults) = &self.config.vaults else {
-            return Ok((repo, self.config.default_domain.clone()));
+            return Ok(CodePlace {
+                repo,
+                domain: self.config.default_domain.clone(),
+                excluded: Vec::new(),
+            });
         };
-        match Session::for_folder(Some(vaults), Some(Provider::Local.as_str()), Some(repo.root())) {
-            Session::Placed(placement) => {
-                let domain = placement.default_domain().to_owned();
-                Ok((repo, domain))
-            }
-            Session::Refused(reason) => Err(UserError::Refused(format!(
+        let domain = local_domain(vaults, repo.root()).map_err(|reason| {
+            UserError::Refused(format!(
                 "Kioku keeps no code map for {}, because local models can't be placed there: {reason}",
                 repo.root().display()
             ))
-            .into()),
-            Session::Open => Ok((repo, self.config.default_domain.clone())),
-        }
+        })?;
+        let excluded = vaults
+            .folders_within(repo.root())
+            .into_iter()
+            .filter(|folder| {
+                local_domain(vaults, &repo.root().join(folder))
+                    .ok()
+                    .as_deref()
+                    != Some(domain.as_str())
+            })
+            .collect();
+        Ok(CodePlace {
+            repo,
+            domain,
+            excluded,
+        })
     }
 
     /// Whether models from `provider` may read `domain`, where the folder
@@ -506,50 +621,51 @@ impl App {
             .unwrap_or(false)
     }
 
-    /// Update the map of the repository enclosing `folder` (see [`update_repo`]).
-    /// The summarizer runs only if its provider may read the repository's
-    /// domain. A map the same folder left in another domain, as when its
-    /// area changed, is dropped.
+    /// Update the map of the checkout enclosing `folder` (see [`update_repo`]).
+    /// The summarizer runs only if its provider may read the checkout's
+    /// domain. Maps this checkout left in another domain, as when its area
+    /// changed, and maps of the same repository whose folder is gone, are dropped.
     pub async fn codemap_update(
         &self,
         folder: &Path,
         mut options: UpdateOptions,
     ) -> Result<UpdateReport> {
-        let (repo, domain) = self.code_place(folder)?;
+        let place = self.code_place(folder)?;
         let mut notes = Vec::new();
         if let Some(summarizer) = &options.summarizer
-            && !self.provider_reads(repo.root(), &domain, summarizer.provider)
+            && !self.provider_reads(place.repo.root(), &place.domain, summarizer.provider)
         {
             notes.push(format!(
-                "no purposes were written: models from provider {} may not read domain {domain}",
-                summarizer.provider
+                "no purposes were written: models from provider {} may not read domain {}",
+                summarizer.provider, place.domain
             ));
             options.summarizer = None;
         }
-        let name = repo.name();
-        let root = repo.root().display().to_string();
-        for (other, other_root) in self.store.code_repo_roots(&name).await? {
-            if other != domain && other_root == root {
-                let files = self.store.drop_code_repo(&other, &name).await?;
+        let root = place.repo.root().display().to_string();
+        for (domain, other) in self.store.code_maps_named(&place.repo.name()).await? {
+            let moved = other == root && domain != place.domain;
+            let gone = other != root && domain == place.domain && !Path::new(&other).exists();
+            if moved || gone {
+                let files = self.store.drop_code_map(&domain, &other).await?;
+                let why = if moved {
+                    "its area changed"
+                } else {
+                    "its folder is gone"
+                };
                 notes.push(format!(
-                    "dropped the map of {files} files this folder had in domain {other}"
+                    "dropped the map of {files} files at {other} in domain {domain}: {why}"
                 ));
             }
         }
-        let mut report = update_repo(&self.store, repo, &domain, &options).await?;
+        let mut report = update_repo(&self.store, place, &options).await?;
         notes.append(&mut report.notes);
         report.notes = notes;
         Ok(report)
     }
 
-    /// The map entry of a file in `domain`'s map of `repo` (see [`lookup_file`]).
-    pub async fn codemap_lookup(
-        &self,
-        repo: Repository,
-        domain: &str,
-        path: &str,
-    ) -> Result<FileMap> {
-        lookup_file(&self.store, repo, domain, path).await
+    /// The map entry of a file of a checkout (see [`lookup_file`]).
+    pub async fn codemap_lookup(&self, place: CodePlace, path: &str) -> Result<FileMap> {
+        lookup_file(&self.store, place, path).await
     }
 }
 
@@ -593,10 +709,12 @@ mod tests {
         let importers = [
             entry("a.rs", Some("Does A."), &[]),
             entry("x.rs", Some("Uses it."), &[]),
+            entry("d.rs", None, &[]),
         ];
         let out = neighbours(&imports, &imported, &importers);
         let shape: Vec<(&str, Relation)> =
             out.iter().map(|n| (n.path.as_str(), n.relation)).collect();
+        // d.rs both imports and is imported: listed once.
         assert_eq!(
             shape,
             vec![
@@ -604,7 +722,7 @@ mod tests {
                 ("b.rs", Relation::Imports),
                 ("c.rs", Relation::Imports),
                 ("x.rs", Relation::ImportedBy),
-                ("d.rs", Relation::Imports),
+                ("d.rs", Relation::ImportedBy),
             ]
         );
         assert_eq!(out[0].purpose.as_deref(), Some("Does A."));
@@ -612,6 +730,16 @@ mod tests {
         assert!(out[2].purpose.is_none() && out[2].defines.is_empty());
         let many: Vec<String> = (0..9).map(|i| format!("m{i}.rs")).collect();
         assert_eq!(neighbours(&many, &[], &importers).len(), MAX_NEIGHBOURS);
+    }
+
+    #[test]
+    fn excluded_folders_are_not_covered() {
+        let excluded = vec!["services/billing".to_owned()];
+        assert!(!covers(&excluded, "services/billing"));
+        assert!(!covers(&excluded, "services/billing/api.py"));
+        assert!(covers(&excluded, "services/billing-old/api.py"));
+        assert!(covers(&excluded, "app/main.py"));
+        assert!(covers(&[], "anything.rs"));
     }
 
     fn git(dir: &Path, args: &[&str]) -> Result<()> {
@@ -638,6 +766,14 @@ mod tests {
         Ok(())
     }
 
+    fn place(root: &Path) -> Result<CodePlace> {
+        Ok(CodePlace {
+            repo: Repository::discover(root)?,
+            domain: "test".to_owned(),
+            excluded: Vec::new(),
+        })
+    }
+
     /// Creates and drops its own database on the server in MEMORY_TEST_DATABASE_URL.
     #[tokio::test]
     #[ignore = "requires PostgreSQL; set MEMORY_TEST_DATABASE_URL"]
@@ -654,7 +790,7 @@ mod tests {
     }
 
     async fn code_map_checks(store: &Store, dir: &Path) -> Result<()> {
-        let root = dir.join("repo");
+        let root = dir.join("one").join("repo");
         write(&root, "pkg/__init__.py", "")?;
         write(
             &root,
@@ -681,20 +817,22 @@ mod tests {
             args: vec![dir.join("summarize.py").display().to_string()],
             provider: Provider::Local,
         };
-        let with_summaries = UpdateOptions {
+        let summaries = |limit: usize| UpdateOptions {
             full: false,
-            summarizer: Some(summarizer),
-            summary_limit: 10,
+            summarizer: Some(summarizer.clone()),
+            summary_limit: limit,
         };
         let plain = UpdateOptions {
             full: false,
             summarizer: None,
             summary_limit: 10,
         };
-        let discover = || Repository::discover(&root);
 
-        let report = update_repo(store, discover()?, "test", &with_summaries).await?;
-        assert_eq!((report.files, report.parsed, report.removed), (3, 3, 0));
+        let report = update_repo(store, place(&root)?, &summaries(10)).await?;
+        assert_eq!(
+            (report.files, report.parsed, report.updated, report.removed),
+            (3, 3, 3, 0)
+        );
         assert_eq!(
             (
                 report.purposes.doc,
@@ -703,8 +841,9 @@ mod tests {
             ),
             (1, 2, 2)
         );
+        assert_eq!(report.repo, "repo");
 
-        let api = lookup_file(store, discover()?, "test", "pkg/api.py").await?;
+        let api = lookup_file(store, place(&root)?, "pkg/api.py").await?;
         assert_eq!(api.purpose.as_deref(), Some("Handles pkg/api.py."));
         assert_eq!(api.purpose_source, Some(PurposeSource::Model));
         assert!(!api.reparsed);
@@ -715,11 +854,12 @@ mod tests {
             api.neighbours[0].purpose.as_deref(),
             Some("Keeps the records.")
         );
-        let records = lookup_file(store, discover()?, "test", "pkg/store.py").await?;
+        let records = lookup_file(store, place(&root)?, "pkg/store.py").await?;
         assert_eq!(records.neighbours[0].path, "pkg/api.py");
         assert_eq!(records.neighbours[0].relation, Relation::ImportedBy);
 
-        // A commit that changes one file and deletes another.
+        // A commit that changes one file and deletes another: every file is
+        // parsed again, and only what changed is written.
         write(
             &root,
             "pkg/store.py",
@@ -727,9 +867,12 @@ mod tests {
         )?;
         git(&root, &["rm", "-q", "pkg/__init__.py"])?;
         git(&root, &["commit", "-q", "-am", "second"])?;
-        let report = update_repo(store, discover()?, "test", &plain).await?;
-        assert_eq!((report.files, report.parsed, report.removed), (2, 1, 1));
-        let records = lookup_file(store, discover()?, "test", "pkg/store.py").await?;
+        let report = update_repo(store, place(&root)?, &plain).await?;
+        assert_eq!(
+            (report.files, report.parsed, report.updated, report.removed),
+            (2, 2, 1, 1)
+        );
+        let records = lookup_file(store, place(&root)?, "pkg/store.py").await?;
         assert_eq!(
             records.purpose.as_deref(),
             Some("Keeps the records and their history.")
@@ -747,22 +890,97 @@ mod tests {
             "pkg/api.py",
             "from .store import save, history\n\ndef handle():\n    save()\n\ndef audit():\n    history()\n",
         )?;
-        let api = lookup_file(store, discover()?, "test", "pkg/api.py").await?;
+        let api = lookup_file(store, place(&root)?, "pkg/api.py").await?;
         assert!(api.reparsed);
         assert_eq!(api.purpose.as_deref(), Some("Handles pkg/api.py."));
         assert!(api.symbols.iter().any(|symbol| symbol.name == "audit"));
-        let again = lookup_file(store, discover()?, "test", "pkg/api.py").await?;
-        assert!(!again.reparsed);
+        assert!(
+            !lookup_file(store, place(&root)?, "pkg/api.py")
+                .await?
+                .reparsed
+        );
 
-        // Nothing new to parse, and a save that started from an older commit is refused.
+        // Committing what the lookup already saw writes nothing.
         git(&root, &["commit", "-q", "-am", "third"])?;
-        let report = update_repo(store, discover()?, "test", &plain).await?;
-        assert_eq!(report.parsed, 0);
+        let report = update_repo(store, place(&root)?, &plain).await?;
+        assert_eq!((report.parsed, report.updated), (1, 0));
+
+        // A rename leaves api.py untouched, but its import no longer resolves:
+        // the stale neighbour goes. Renaming back brings it back.
+        git(&root, &["mv", "pkg/store.py", "pkg/records.py"])?;
+        git(&root, &["commit", "-q", "-m", "rename"])?;
+        update_repo(store, place(&root)?, &plain).await?;
+        assert!(
+            lookup_file(store, place(&root)?, "pkg/api.py")
+                .await?
+                .neighbours
+                .is_empty()
+        );
+        git(&root, &["mv", "pkg/records.py", "pkg/store.py"])?;
+        git(&root, &["commit", "-q", "-m", "rename back"])?;
+        update_repo(store, place(&root)?, &plain).await?;
+        let api = lookup_file(store, place(&root)?, "pkg/api.py").await?;
+        assert_eq!(api.neighbours.len(), 1);
+        assert_eq!(api.neighbours[0].path, "pkg/store.py");
+
+        // A second checkout with the same folder name keeps its own map.
+        let other = dir.join("two").join("repo");
+        write(&other, "solo.py", "\"\"\"Stands alone.\"\"\"\n")?;
+        git(&other, &["init", "-q"])?;
+        git(&other, &["add", "."])?;
+        git(&other, &["commit", "-q", "-m", "first"])?;
+        let report = update_repo(store, place(&other)?, &plain).await?;
+        assert_eq!((report.repo.as_str(), report.files), ("repo", 1));
+        assert_eq!(update_repo(store, place(&root)?, &plain).await?.files, 2);
+
+        // A file that looks like it holds a credential is never summarized,
+        // and doesn't use up the limit: the next file gets the purpose.
+        let token = format!("{}{}", "ghp_", "a".repeat(36));
+        write(
+            &root,
+            "pkg/a_settings.py",
+            &format!("TOKEN = \"{token}\"\n"),
+        )?;
+        write(&root, "pkg/b_tools.py", "def tool():\n    pass\n")?;
+        git(&root, &["add", "."])?;
+        git(&root, &["commit", "-q", "-m", "more"])?;
+        let report = update_repo(store, place(&root)?, &summaries(1)).await?;
+        assert_eq!(report.summarized, 1);
+        let tools = lookup_file(store, place(&root)?, "pkg/b_tools.py").await?;
+        assert_eq!(tools.purpose.as_deref(), Some("Handles pkg/b_tools.py."));
+        let settings = lookup_file(store, place(&root)?, "pkg/a_settings.py").await?;
+        assert_eq!(settings.purpose, None);
+
+        // A folder other rules place elsewhere stays out of the map.
+        write(&root, "area/inner.py", "\"\"\"Another area's code.\"\"\"\n")?;
+        git(&root, &["add", "."])?;
+        git(&root, &["commit", "-q", "-m", "area"])?;
+        let fenced = || -> Result<CodePlace> {
+            Ok(CodePlace {
+                excluded: vec!["area".to_owned()],
+                ..place(&root)?
+            })
+        };
+        let report = update_repo(store, fenced()?, &plain).await?;
+        assert!(
+            store
+                .code_map_files(&report.domain, &report.root)
+                .await?
+                .iter()
+                .all(|file| !file.path.starts_with("area/"))
+        );
+        assert!(
+            lookup_file(store, fenced()?, "area/inner.py")
+                .await
+                .is_err()
+        );
+
+        // A save that started from an older commit is refused.
         let refused = store
             .save_code_map(&CodeMapChange {
                 domain: "test",
-                repo: &report.repo,
-                root: "/elsewhere",
+                root: &report.root,
+                name: &report.repo,
                 started_from: Some(Some("0000000")),
                 commit: "1111111",
                 upserts: &[],
@@ -771,7 +989,7 @@ mod tests {
             .await?;
         assert!(!refused);
         assert!(
-            lookup_file(store, discover()?, "test", "README.md")
+            lookup_file(store, place(&root)?, "README.md")
                 .await
                 .is_err()
         );

@@ -71,21 +71,22 @@ WHERE latest.revision IS DISTINCT FROM n.revision OR latest.status IS DISTINCT F
 
 -- The code map: what each source file of a repository is for and what it
 -- defines, for small models that read code. Its own layer: no vectors, so note
--- search never sees it. `domain` is where the repository's folder is placed,
--- so vault rules apply as they do to notes. `repo` names the repository by
--- its remote, else its folder.
-CREATE TABLE IF NOT EXISTS code_repos (
+-- search never sees it. `domain` is where the checkout's folder is placed, so
+-- vault rules apply as they do to notes. A checkout is its folder (`root`);
+-- `name` is its remote, else its folder's name, for display.
+CREATE TABLE IF NOT EXISTS code_map_repos (
     domain TEXT NOT NULL,
-    repo TEXT NOT NULL,
     root TEXT NOT NULL,
+    name TEXT NOT NULL,
     indexed_commit TEXT,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (domain, repo)
+    PRIMARY KEY (domain, root)
 );
+CREATE INDEX IF NOT EXISTS code_map_repos_name ON code_map_repos(name);
 
-CREATE TABLE IF NOT EXISTS code_files (
+CREATE TABLE IF NOT EXISTS code_map_files (
     domain TEXT NOT NULL,
-    repo TEXT NOT NULL,
+    root TEXT NOT NULL,
     path TEXT NOT NULL,
     language TEXT NOT NULL,
     digest TEXT NOT NULL,
@@ -94,7 +95,7 @@ CREATE TABLE IF NOT EXISTS code_files (
     symbols JSONB NOT NULL DEFAULT '[]'::jsonb,
     imports TEXT[] NOT NULL DEFAULT '{}',
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (domain, repo, path),
-    FOREIGN KEY (domain, repo) REFERENCES code_repos(domain, repo) ON DELETE CASCADE
+    PRIMARY KEY (domain, root, path),
+    FOREIGN KEY (domain, root) REFERENCES code_map_repos(domain, root) ON DELETE CASCADE
 );
-CREATE INDEX IF NOT EXISTS code_files_imports ON code_files USING GIN (imports);
+CREATE INDEX IF NOT EXISTS code_map_files_imports ON code_map_files USING GIN (imports);

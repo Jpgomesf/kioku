@@ -139,7 +139,11 @@ pub fn purpose_from(lines: &[String]) -> Option<String> {
         .collect::<Vec<_>>()
         .join(" ");
     let lower = text.to_lowercase();
-    if text.is_empty() || lower.contains("copyright") || lower.contains("spdx-license") {
+    let license = lower.starts_with("copyright")
+        || lower.contains("all rights reserved")
+        || lower.contains("licensed under")
+        || lower.contains("spdx-license");
+    if text.is_empty() || license {
         return None;
     }
     Some(cut(&text, MAX_PURPOSE_CHARS))
@@ -263,15 +267,10 @@ fn rust(lines: &[&str]) -> Parsed {
         purpose: purpose_from(&doc),
         ..Parsed::default()
     };
-    let mut test_module = false;
     let mut after_cfg_test = false;
     let mut statement: Option<String> = None;
     for (index, line) in lines.iter().enumerate() {
-        let trimmed = line.trim();
-        if test_module {
-            test_module = !line.starts_with('}');
-            continue;
-        }
+        let trimmed = line.split("//").next().unwrap_or_default().trim();
         if let Some(mut text) = statement.take() {
             text.push(' ');
             text.push_str(trimmed);
@@ -289,8 +288,12 @@ fn rust(lines: &[&str]) -> Parsed {
             continue;
         }
         if std::mem::take(&mut after_cfg_test) {
-            // Test-only code: skip the item, and a whole inline test module.
-            test_module = trimmed.contains("mod ") && trimmed.ends_with('{');
+            // Test-only code: skip the item. An inline test module usually
+            // closes the file, and its end can't be found reliably without a
+            // real parser (fixtures put `}` anywhere), so it ends the parse.
+            if trimmed.contains("mod ") && trimmed.ends_with('{') {
+                break;
+            }
             continue;
         }
         if let Some(found) = RUST_MOD_FILE.captures(line) {
@@ -330,7 +333,7 @@ fn rust(lines: &[&str]) -> Parsed {
 /// `use crate::a::{b, c::d};` gives `crate::a::b` and `crate::a::c::d`.
 fn rust_use_paths(statement: &str) -> Vec<String> {
     let body = RUST_USE.replace(statement.trim(), "");
-    let body = body.trim().trim_end_matches(';').trim();
+    let body = body.split(';').next().unwrap_or_default().trim();
     let mut out = Vec::new();
     expand_use("", body, &mut out);
     out.retain(|path| {
@@ -412,7 +415,18 @@ fn python(lines: &[&str]) -> Parsed {
     };
     let mut in_class = false;
     let mut pending: Option<(String, String)> = None;
+    // The quote that closes the multi-line string the current line is in.
+    let mut in_string: Option<&str> = None;
     for (index, line) in lines.iter().enumerate() {
+        if let Some(quote) = in_string {
+            if line.contains(quote) {
+                in_string = None;
+            }
+            continue;
+        }
+        in_string = ["\"\"\"", "'''"]
+            .into_iter()
+            .find(|quote| line.matches(quote).count() % 2 == 1);
         if let Some((module, mut names)) = pending.take() {
             names.push(' ');
             names.push_str(line.trim());
@@ -533,7 +547,7 @@ fn python_docstring(lines: &[&str]) -> Vec<String> {
 
 pattern!(
     TS_EXPORT,
-    r"^export\s+(?:default\s+)?(?:declare\s+)?(?:async\s+)?(?P<kind>function\*?|abstract\s+class|class|const|let|var|interface|type|enum)\s+(?P<name>[A-Za-z_$][\w$]*)"
+    r"^export\s+(?:default\s+)?(?:declare\s+)?(?:async\s+)?(?P<kind>function\*?|abstract\s+class|class|const\s+enum|const|let|var|interface|type|enum)\s+(?P<name>[A-Za-z_$][\w$]*)"
 );
 pattern!(
     TS_LOCAL,
@@ -569,14 +583,27 @@ fn script(lines: &[&str]) -> Parsed {
         ..Parsed::default()
     };
     for (index, line) in lines.iter().enumerate() {
+        let trimmed = line.trim_start();
+        // A commented-out import names no neighbour.
+        if trimmed.starts_with("//") || trimmed.starts_with('*') || trimmed.starts_with("/*") {
+            continue;
+        }
         for found in TS_IMPORT.captures_iter(line) {
             parsed.imports.push(found["spec"].to_owned());
         }
         if let Some(found) = TS_EXPORT.captures(line) {
-            let kind = found["kind"].trim_end_matches('*').replace("abstract ", "");
+            let kind = found["kind"]
+                .trim_end_matches('*')
+                .replace("abstract ", "")
+                .replace("const ", "");
+            // `export default class extends Base` has no name of its own.
+            let name = match &found["name"] {
+                "extends" | "implements" => "default",
+                name => name,
+            };
             parsed
                 .symbols
-                .push(symbol(&found["name"], kind.trim(), index, line, true));
+                .push(symbol(name, kind.trim(), index, line, true));
         } else if line.starts_with("export default function") {
             parsed
                 .symbols
@@ -690,7 +717,7 @@ fn terraform(lines: &[&str]) -> Parsed {
 
 pattern!(
     SQL_CREATE,
-    r#"^\s*CREATE\s+(?:OR\s+REPLACE\s+)?(?:UNIQUE\s+)?(?:MATERIALIZED\s+)?(?P<kind>TABLE|VIEW|FUNCTION|INDEX|TYPE|TRIGGER|PROCEDURE|SCHEMA|SEQUENCE)\s+(?:IF\s+NOT\s+EXISTS\s+)?(?P<name>[\w."]+)"#
+    r#"^\s*CREATE\s+(?:OR\s+REPLACE\s+)?(?:UNIQUE\s+)?(?:MATERIALIZED\s+)?(?P<kind>TABLE|VIEW|FUNCTION|INDEX|TYPE|TRIGGER|PROCEDURE|SCHEMA|SEQUENCE)\s+(?:CONCURRENTLY\s+)?(?:IF\s+NOT\s+EXISTS\s+)?(?P<name>[\w."]+)"#
 );
 
 fn sql(lines: &[&str]) -> Parsed {
@@ -718,7 +745,7 @@ fn sql(lines: &[&str]) -> Parsed {
 
 pattern!(
     SH_FUNCTION,
-    r"^(?:function\s+)?(?P<name>[A-Za-z_][\w-]*)\s*\(\)\s*\{?"
+    r"^(?:function\s+(?P<keyword>[A-Za-z_][\w-]*)|(?P<name>[A-Za-z_][\w-]*)\s*\(\))"
 );
 
 fn shell(lines: &[&str]) -> Parsed {
@@ -731,9 +758,13 @@ fn shell(lines: &[&str]) -> Parsed {
     };
     for (index, line) in lines.iter().enumerate() {
         if let Some(found) = SH_FUNCTION.captures(line) {
+            // `function name {` or `name() {`.
+            let Some(name) = found.name("keyword").or_else(|| found.name("name")) else {
+                continue;
+            };
             parsed
                 .symbols
-                .push(symbol(&found["name"], "function", index, line, true));
+                .push(symbol(name.as_str(), "function", index, line, true));
         }
     }
     parsed

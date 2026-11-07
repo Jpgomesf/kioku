@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use super::git::parse_name_status;
+use super::git::{Header, parse_header, parse_name_status};
 use super::lang::{cut, purpose_from};
 use super::summarize::parse_response;
 use super::*;
@@ -89,7 +89,6 @@ fn after_tests() {}
             ("private_helper", "fn", 26, false),
             ("LIMIT", "const", 29, true),
             ("pattern", "macro_rules", 30, false),
-            ("after_tests", "fn", 37, false),
         ]
     );
     assert_eq!(
@@ -297,7 +296,13 @@ fn go_terraform_sql_and_shell() {
         sh.purpose.as_deref(),
         Some("Start the server with this checkout's env.")
     );
-    assert_eq!(names(&sh), vec![("start", "function", 5, true)]);
+    assert_eq!(
+        names(&sh),
+        vec![
+            ("start", "function", 5, true),
+            ("stop", "function", 7, true)
+        ]
+    );
 }
 
 #[test]
@@ -582,5 +587,146 @@ fn a_rebuilt_entry_keeps_a_model_purpose_but_not_a_stale_doc() {
     assert_eq!(
         undocumented.purpose, None,
         "a removed doc comment is no purpose"
+    );
+}
+
+#[test]
+fn cat_file_headers() {
+    assert_eq!(
+        parse_header("HEAD:src/a b.rs missing\n").unwrap(),
+        Header::Missing
+    );
+    assert_eq!(parse_header("HEAD:x ambiguous").unwrap(), Header::Missing);
+    assert_eq!(
+        parse_header("0123abcd blob 42\n").unwrap(),
+        Header::Object {
+            blob: true,
+            size: 42
+        }
+    );
+    assert_eq!(
+        parse_header("0123abcd tree 7").unwrap(),
+        Header::Object {
+            blob: false,
+            size: 7
+        }
+    );
+    assert!(parse_header("garbage").is_err());
+}
+
+#[test]
+fn review_cases_for_rust() {
+    // A comment after a `use` is not part of the path, and a lowercase
+    // path that names no file gets no neighbour from the fallback.
+    let parsed = parse(
+        Language::Rust,
+        "use crate::store::Store; // the database\nuse crate::missing;\n",
+    );
+    assert_eq!(
+        parsed.imports,
+        vec!["crate::store::Store", "crate::missing"]
+    );
+    let set = files(&[
+        "src/lib.rs",
+        "src/store.rs",
+        "src/bin/tool.rs",
+        "tests/smoke.rs",
+    ]);
+    let imports: Vec<String> = parsed.imports.clone();
+    assert_eq!(
+        set.resolve(Language::Rust, "src/main.rs", &imports),
+        vec!["src/store.rs"]
+    );
+    // A bin target or an integration test is a crate of its own.
+    assert!(
+        set.resolve(Language::Rust, "src/bin/tool.rs", &imports)
+            .is_empty()
+    );
+    assert!(
+        set.resolve(Language::Rust, "tests/smoke.rs", &imports)
+            .is_empty()
+    );
+    // A purpose that mentions copyright is kept; a license header isn't.
+    let doc = parse(Language::Rust, "//! Checks copyright notices in headers.\n");
+    assert_eq!(
+        doc.purpose.as_deref(),
+        Some("Checks copyright notices in headers.")
+    );
+    let license = parse(Language::Rust, "//! Licensed under the MIT license.\n");
+    assert_eq!(license.purpose, None);
+}
+
+#[test]
+fn review_cases_for_scripts_python_and_sql() {
+    let ts = parse(
+        Language::TypeScript,
+        "// import { old } from './old';\n * from './doc'\nexport const enum Color { Red }\nexport default class extends Base {}\nimport { a } from './a';\n",
+    );
+    assert_eq!(ts.imports, vec!["./a"]);
+    let shape: Vec<(&str, &str)> = ts
+        .symbols
+        .iter()
+        .map(|s| (s.name.as_str(), s.kind.as_str()))
+        .collect();
+    assert_eq!(shape, vec![("Color", "enum"), ("default", "class")]);
+
+    let py = parse(
+        Language::Python,
+        r#""""Tools.
+
+import fake
+def not_code():
+"""
+
+class Store:
+    QUERY = """
+SELECT *
+FROM records
+"""
+
+    def save(self):
+        pass
+"#,
+    );
+    let names: Vec<&str> = py.symbols.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(names, vec!["Store", "save"]);
+    assert!(py.imports.is_empty());
+
+    let sql = parse(
+        Language::Sql,
+        "CREATE INDEX CONCURRENTLY records_by_day ON records (day);\n",
+    );
+    assert_eq!(sql.symbols[0].name, "records_by_day");
+}
+
+#[test]
+fn python_modules_resolve_only_from_a_source_root() {
+    let set = files(&[
+        "backend/app/models.py",
+        "backend/app/api.py",
+        "vendor/lib/utils/helpers.py",
+        "utils/helpers.py",
+    ]);
+    let imports =
+        |from: &str, import: &str| set.resolve(Language::Python, from, &[import.to_owned()]);
+    // From inside backend/, `app.models` is backend/app/models.py.
+    assert_eq!(
+        imports("backend/app/api.py", "app.models"),
+        vec!["backend/app/models.py"]
+    );
+    // The repository root wins over a vendored copy.
+    assert_eq!(
+        imports("backend/app/api.py", "utils.helpers"),
+        vec!["utils/helpers.py"]
+    );
+    let only_vendored = files(&["vendor/lib/utils/helpers.py", "app/main.py"]);
+    assert!(
+        only_vendored
+            .resolve(
+                Language::Python,
+                "app/main.py",
+                &["utils.helpers".to_owned()]
+            )
+            .is_empty()
     );
 }

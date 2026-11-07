@@ -44,31 +44,49 @@ impl MemoryServer {
 
 impl MemoryServer {
     async fn code_map_for(&self, path: &str) -> anyhow::Result<Value> {
-        let file = self.session_path(path)?;
-        let (repo, domain) = self.app.code_place(&file)?;
-        self.authorize_domain(&domain)?;
-        let relative = repo
+        let (file, folder) = self.session_path(path)?;
+        // Without vaults, nothing says which repositories a caller may read:
+        // only the session's own folder.
+        if self.app.config.vaults.is_none() {
+            let inside = match (file.canonicalize(), folder.canonicalize()) {
+                (Ok(file), Ok(folder)) => file.starts_with(folder),
+                _ => false,
+            };
+            if !inside {
+                return Err(UserError::Refused(format!(
+                    "without a vaults file, code_map reads only files in this session's folder ({})",
+                    folder.display()
+                ))
+                .into());
+            }
+        }
+        let place = self.app.code_place(&file)?;
+        self.authorize_domain(&place.domain)?;
+        let relative = place
+            .repo
             .relative(&file)
             .ok_or_else(|| UserError::NotFound(format!("{} does not exist", file.display())))?;
-        let map = self.app.codemap_lookup(repo, &domain, &relative).await?;
+        let map = self.app.codemap_lookup(place, &relative).await?;
         let mut value = serde_json::to_value(map)?;
         value["untrusted_evidence"] = json!(true);
         Ok(value)
     }
 
-    /// `path` as an absolute path: `~` expanded, and a relative path taken
-    /// from the session's folder.
-    fn session_path(&self, path: &str) -> anyhow::Result<PathBuf> {
+    /// `path` as an absolute path, with `~` expanded and a relative path
+    /// taken from the session's folder, and that folder.
+    fn session_path(&self, path: &str) -> anyhow::Result<(PathBuf, PathBuf)> {
         let home = std::env::var_os("HOME").map(PathBuf::from);
         let path = crate::vault::expand_home(path, home.as_deref())
             .map_err(|error| UserError::InvalidArgument(format!("{error:#}")))?;
-        if path.is_absolute() {
-            return Ok(path);
-        }
-        let base = match &self.app.config.session_dir {
+        let folder = match &self.app.config.session_dir {
             Some(dir) => dir.clone(),
             None => std::env::current_dir()?,
         };
-        Ok(base.join(path))
+        let file = if path.is_absolute() {
+            path
+        } else {
+            folder.join(path)
+        };
+        Ok((file, folder))
     }
 }

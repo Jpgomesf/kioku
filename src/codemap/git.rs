@@ -138,32 +138,62 @@ impl Repository {
         let mut reader = BufReader::new(child.stdout.take().context("git has no stdout")?);
         for &index in &asked {
             let mut header = String::new();
-            reader.read_line(&mut header)?;
-            let header = header.trim_end();
-            if header.is_empty() || header.ends_with(" missing") || header.ends_with(" ambiguous") {
-                continue;
+            // Running out of answers means git failed: never read it as
+            // "missing", or an update would drop the files it didn't read.
+            if reader.read_line(&mut header)? == 0 {
+                let _ = child.kill();
+                let _ = child.wait();
+                bail!("git cat-file stopped before answering for every file");
             }
-            let mut fields = header.splitn(3, ' ');
-            let (_, kind, size) = (fields.next(), fields.next(), fields.next());
-            let size: u64 = size
-                .and_then(|size| size.parse().ok())
-                .with_context(|| format!("unexpected git output {header:?}"))?;
-            if kind == Some("blob") && size <= MAX_FILE_BYTES as u64 {
-                let mut data = vec![0; usize::try_from(size)?];
-                reader.read_exact(&mut data)?;
-                out[index] = Some(data);
-            } else {
-                std::io::copy(&mut (&mut reader).take(size), &mut std::io::sink())?;
+            match parse_header(&header)? {
+                Header::Missing => continue,
+                Header::Object { blob, size } => {
+                    if blob && size <= MAX_FILE_BYTES as u64 {
+                        let mut data = vec![0; usize::try_from(size)?];
+                        reader.read_exact(&mut data)?;
+                        out[index] = Some(data);
+                    } else {
+                        std::io::copy(&mut (&mut reader).take(size), &mut std::io::sink())?;
+                    }
+                    let mut newline = [0u8; 1];
+                    reader.read_exact(&mut newline)?;
+                }
             }
-            let mut newline = [0u8; 1];
-            reader.read_exact(&mut newline)?;
         }
         writer
             .join()
             .map_err(|_| anyhow!("the git writer thread panicked"))??;
-        child.wait()?;
+        let status = child.wait()?;
+        if !status.success() {
+            bail!("git cat-file failed ({status})");
+        }
         Ok(out)
     }
+}
+
+/// One answer of `git cat-file --batch`.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Header {
+    /// `<spec> missing` or `<spec> ambiguous`: no object.
+    Missing,
+    /// `<oid> <type> <size>`, followed by the object and a newline.
+    Object { blob: bool, size: u64 },
+}
+
+pub(super) fn parse_header(line: &str) -> Result<Header> {
+    let line = line.trim_end_matches('\n');
+    if line.ends_with(" missing") || line.ends_with(" ambiguous") {
+        return Ok(Header::Missing);
+    }
+    let mut fields = line.splitn(3, ' ');
+    let (_, kind, size) = (fields.next(), fields.next(), fields.next());
+    let size = size
+        .and_then(|size| size.parse().ok())
+        .with_context(|| format!("unexpected git cat-file output {line:?}"))?;
+    Ok(Header::Object {
+        blob: kind == Some("blob"),
+        size,
+    })
 }
 
 fn run(dir: &Path, args: &[&str]) -> Result<Vec<u8>> {

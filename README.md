@@ -293,9 +293,11 @@ kioku ingest --path ~/work/company-kb --domain company/kb
 The code map tells a small model what a source file is for before it reads
 it: the file's purpose, its main definitions with line numbers, and up to five
 files it imports or that import it. It is a layer of its own, apart from
-notes: rows in PostgreSQL (`code_repos`, `code_files`) with no vectors, so note
-search never returns them. A repository's map lives in the domain its folder
-places local models in, so vaults and locks apply as they do to notes.
+notes: rows in PostgreSQL (`code_map_repos`, `code_map_files`) with no
+vectors, so note search never returns them. Each checkout has its own map, in
+the domain its folder places local models in, so vaults and locks apply as
+they do to notes. Files under a folder that another vault or area places stay
+out of it.
 
 ```sh
 kioku codemap update --repo ~/code/app          # files changed since the last update; all of them the first time
@@ -318,13 +320,16 @@ kioku codemap show ~/code/app/src/billing.py    # what a model gets for one file
   - `--summary-limit` (default 50) caps the files per update: files that
     changed come first, then files with no purpose yet.
 - **Freshness.** `update` reads files as committed at HEAD, and parses only
-  those that changed since the last update. A lookup parses a file again when
-  its working tree differs from what the map describes, and keeps its
-  model-written purpose until the next update.
+  those that changed since the last update. When files were added, deleted,
+  or renamed, it parses every file, because other files' imports may now
+  resolve differently, and saves only the entries that changed. A lookup
+  parses a file again when its working tree differs from what the map
+  describes, and keeps its model-written purpose.
 - **Reading it.** The `code_map` tool takes a path, absolute or relative to
   the session's folder. It is outside the core profile (`--tools
   core,code_map`), for clients of small local models, where a plugin can call
-  it when the model opens a file.
+  it when the model opens a file. Without a vaults file, it reads only files
+  inside the session's folder.
 
 ## How retrieval works
 

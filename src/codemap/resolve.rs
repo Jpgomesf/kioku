@@ -110,11 +110,16 @@ impl FileSet {
                 return Some(found);
             }
         }
-        if root == "mod" {
+        // An item of the module itself, such as `super::Vaults` defined in
+        // the parent's `mod.rs`, or `crate::Error` in `lib.rs`. Only a type
+        // or trait name (capitalized) counts: a lowercase path that names no
+        // file is more likely a module this map can't see than an item.
+        let item = segments
+            .first()
+            .is_some_and(|name| name.starts_with(|c: char| c.is_ascii_uppercase()));
+        if root == "mod" || !item {
             return None;
         }
-        // An item of the module itself, such as `super::Vaults` defined in
-        // the parent's `mod.rs`, or `crate::Error` in `lib.rs`.
         self.first_existing([
             join(&base, "mod.rs"),
             format!("{base}.rs"),
@@ -124,7 +129,19 @@ impl FileSet {
     }
 
     /// The folder holding the crate root (`lib.rs` or `main.rs`) above `from`.
+    /// `None` for a target that is its own crate (`src/bin/`, `examples/`,
+    /// `benches/`, integration `tests/`), whose `crate::` this map can't place.
     fn rust_crate_root(&self, from: &str) -> Option<String> {
+        if from.contains("src/bin/") {
+            return None;
+        }
+        for part in from.split('/') {
+            match part {
+                "src" => break,
+                "examples" | "benches" | "tests" => return None,
+                _ => {}
+            }
+        }
         let mut dir = parent_dir(from);
         loop {
             if ["lib.rs", "main.rs"]
@@ -151,19 +168,20 @@ impl FileSet {
             return self.first_existing([format!("{module}.py"), format!("{module}/__init__.py")]);
         }
         let candidates = self.python.get(import)?;
-        let here = parent_dir(from);
-        // Several files can end in the same dotted name (`app/utils.py` and
-        // `tests/utils.py`): prefer the one nearest the importing file. A
-        // one-word import (`json`) names a file only at a source root or
-        // beside the importer, so a standard module never matches a file
-        // deep in the tree.
+        let module = import.replace('.', "/");
+        // A module resolves only from a source root: the repository's root,
+        // `src`, or a folder above the importing file. So `json` never names
+        // `tools/deep/json.py`, and a vendored copy of a package is no
+        // neighbour. Of what remains, the file nearest the importer wins.
         candidates
             .iter()
             .filter(|path| {
-                import.contains('.') || {
-                    let dir = parent_dir(path.trim_end_matches("/__init__.py"));
-                    dir.is_empty() || dir == "src" || dir == here
-                }
+                let root = path
+                    .strip_suffix(&format!("{module}.py"))
+                    .or_else(|| path.strip_suffix(&format!("{module}/__init__.py")))
+                    .unwrap_or(path)
+                    .trim_end_matches('/');
+                root.is_empty() || root == "src" || from.starts_with(&format!("{root}/"))
             })
             .max_by_key(|path| (shared_prefix(path, from), std::cmp::Reverse(path.len())))
             .cloned()
