@@ -50,7 +50,7 @@ describe("GraphPage", () => {
     expect(host.textContent).toContain("Loading");
     await act(async () => resolve(mockGraph({ domain: "demo" })));
     await settle();
-    expect(host.textContent).toContain("Whole area:");
+    expect(host.textContent).toContain("notes and");
   });
 
   it("says when the graph didn't load", async () => {

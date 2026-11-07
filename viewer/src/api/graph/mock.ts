@@ -1,4 +1,4 @@
-import { demoGraph, LARGE_DOMAIN, largeGraph, sampleNotes } from "../fixtures";
+import { demoGraph, LARGE_DOMAIN, largeGraph, noteNode, sampleNotes } from "../fixtures";
 import type { GraphData, GraphEdge, GraphNode, GraphQuery } from "./types";
 
 /** Topic pages of the demo area; each synthetic key carries its topic (demo-<topic>-NNN). */
@@ -41,6 +41,8 @@ function richDemo(): GraphData {
       kind: "topic",
       status: "active",
       degree: 0,
+      tags: [topic],
+      updatedAt: "2026-06-01T09:00:00Z",
     };
     nodes.push(node);
     byKey.set(key, node);
@@ -50,24 +52,52 @@ function richDemo(): GraphData {
       bump(key);
     }
   }
-  const work: Array<[string, GraphNode["kind"], string, string[]]> = [
-    ["T-101", "ticket", "Move indexing onto the jobs worker", ["jobs-worker", "demo-indexing-001"]],
+  // Key, type, title, links, tags, last update: the work items arrive late in the area's story.
+  const work: Array<[string, GraphNode["kind"], string, string[], string[], string]> = [
+    [
+      "T-101",
+      "ticket",
+      "Move indexing onto the jobs worker",
+      ["jobs-worker", "demo-indexing-001"],
+      ["ops"],
+      "2026-10-20T10:00:00Z",
+    ],
     [
       "T-102",
       "ticket",
       "Show retired notes dimmed in search",
       ["demo-search-010", "demo-search-020"],
+      ["search"],
+      "2026-10-22T10:00:00Z",
     ],
-    ["PR-17", "pull-request", "feat: queue indexing jobs", ["T-101", "jobs-worker"]],
+    [
+      "PR-17",
+      "pull-request",
+      "feat: queue indexing jobs",
+      ["T-101", "jobs-worker"],
+      ["ops", "release"],
+      "2026-10-28T10:00:00Z",
+    ],
     [
       "PR-18",
       "pull-request",
       "fix: keep legacy notes out of ranking",
       ["T-102", "demo-ranking-005"],
+      ["search", "release"],
+      "2026-11-02T10:00:00Z",
     ],
   ];
-  for (const [key, kind, title, links] of work) {
-    const node: GraphNode = { key, domain: "demo", title, kind, status: "active", degree: 0 };
+  for (const [key, kind, title, links, tags, updatedAt] of work) {
+    const node: GraphNode = {
+      key,
+      domain: "demo",
+      title,
+      kind,
+      status: "active",
+      degree: 0,
+      tags,
+      updatedAt,
+    };
     nodes.push(node);
     byKey.set(key, node);
     for (const target of links) {
@@ -90,14 +120,7 @@ function graphFor(domain: string): GraphData {
   if (domain === LARGE_DOMAIN) return largeGraph();
   const notes = sampleNotes.filter((n) => n.domain === domain);
   return {
-    nodes: notes.map((n) => ({
-      key: n.key,
-      domain: n.domain,
-      title: n.title,
-      kind: n.kind,
-      status: n.status,
-      degree: n.links.length,
-    })),
+    nodes: notes.map(noteNode),
     edges: notes.flatMap((n) =>
       n.links.map((l) => ({
         source: n.key,

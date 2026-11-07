@@ -21,6 +21,8 @@ const node = (key: string): GraphNode => ({
   kind: "decision",
   status: "active",
   degree: 0,
+  tags: [],
+  updatedAt: "2026-11-01T10:00:00Z",
 });
 
 const graph = (keys: string[]): GraphData => ({

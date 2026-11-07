@@ -22,6 +22,10 @@ pub struct GraphNode {
     pub kind: String,
     pub status: NoteStatus,
     pub degree: u32,
+    /// The note's tags, as stored.
+    pub tags: Vec<String>,
+    /// Last update, ISO 8601 UTC like `NoteSummary.updated_at`; Animate replays in this order.
+    pub updated_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -117,6 +121,8 @@ pub(crate) fn build_graph(
             kind: notes::kind_of(&n.input),
             status: notes::status_of(n.status),
             degree: degree.get(&n.id).copied().unwrap_or(0),
+            tags: n.input.tags.clone(),
+            updated_at: notes::timestamp(n.updated_at),
         })
         .collect();
     let edges = edges
@@ -180,6 +186,17 @@ mod tests {
             g.nodes.iter().find(|n| n.key == "b").map(|n| n.degree),
             Some(2)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn nodes_carry_tags_and_update_time() -> Result<(), Box<dyn std::error::Error>> {
+        let notes = vec![note("demo", "a", &["search", "api"], None)];
+        let g = build_graph(&notes, &[], None, 1)?;
+        let json = serde_json::to_value(&g.nodes[0])?;
+        assert_eq!(json["tags"], serde_json::json!(["search", "api"]));
+        assert_eq!(json["updatedAt"], "2026-11-01T10:00:00Z");
+        assert!(json.get("updated_at").is_none());
         Ok(())
     }
 

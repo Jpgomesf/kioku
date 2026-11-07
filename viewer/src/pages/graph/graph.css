@@ -9,38 +9,16 @@
   min-width: 0;
   min-height: 0;
 }
-.graph-head {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-12) var(--space-16);
-  padding: var(--space-16) var(--space-24);
-  border-bottom: 1px solid var(--border-subtle);
-  background: var(--surface);
-}
-.graph-head-text {
-  flex: 1 1 260px;
-  min-width: 0;
-}
-.graph-head h1 {
-  margin: 0;
-  font-size: 18px;
-  line-height: 24px;
-}
-.graph-head .k-count {
-  margin: var(--space-2) 0 0;
-}
-.graph-steps {
-  display: flex;
-  align-items: center;
-  gap: var(--space-6);
-}
+/* Loading and load errors: centred where the canvas will be. */
 .graph-empty {
+  display: grid;
+  flex: 1 1 auto;
+  place-items: center;
   padding: var(--space-32);
 }
 
-/* The canvas takes the full width; the inspector and the settings float over it, as in
-   Obsidian. They sit beside the stage, not in it, so its wheel and drag handlers leave them be. */
+/* The canvas fills the page; the area button, the inspector and the settings float over it,
+   as in Obsidian. They sit beside the stage, not in it, so its wheel and drag handlers leave them be. */
 .graph-body {
   position: relative;
   display: flex;
@@ -60,6 +38,17 @@
   align-items: flex-end;
   gap: var(--space-8);
   max-height: calc(100% - 2 * var(--space-12));
+}
+/* The current area at the top left, the way into the area picker. */
+.graph-float-area {
+  top: var(--space-12);
+  left: var(--space-12);
+  max-width: calc(100% - 2 * var(--space-12) - 48px);
+}
+.graph-float-area > * {
+  max-width: 100%;
+  background: var(--surface);
+  box-shadow: var(--shadow-overlay);
 }
 .graph-settings-button {
   flex: none;
@@ -159,6 +148,7 @@
 
 .graph-status {
   position: absolute;
+  z-index: 3;
   top: var(--space-12);
   left: 50%;
   margin: 0;
@@ -170,6 +160,13 @@
   line-height: 16px;
   transform: translateX(-50%);
   pointer-events: none;
+}
+/* A focus from the URL that isn't in the area: under the arranging line, and readable. */
+.graph-notice {
+  top: calc(var(--space-12) + 32px);
+  max-width: min(480px, calc(100% - 2 * var(--space-16)));
+  color: var(--fg-2);
+  box-shadow: var(--shadow-overlay);
 }
 
 .graph-edge-strong {
@@ -275,40 +272,6 @@
   pointer-events: none;
 }
 
-/* Find a note: a compact search in the header, its matches dropping down over the canvas. */
-.graph-find {
-  position: relative;
-  flex: 0 1 260px;
-  min-width: 180px;
-}
-.graph-find .k-field {
-  margin: 0;
-}
-/* Compact: the label stays for screen readers, the placeholder says it on screen. */
-.graph-find .k-field-label {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  overflow: hidden;
-  clip-path: inset(50%);
-  white-space: nowrap;
-}
-.graph-matches {
-  position: absolute;
-  top: calc(100% + var(--space-4));
-  right: 0;
-  left: 0;
-  z-index: 6;
-  min-width: 280px;
-  margin: 0;
-  padding: var(--space-4);
-  list-style: none;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-panel);
-  background: var(--surface);
-  box-shadow: var(--shadow-overlay);
-}
-.graph-match,
 .graph-link {
   display: flex;
   width: 100%;
@@ -324,20 +287,12 @@
   text-align: left;
   cursor: pointer;
 }
-.graph-match:hover,
 .graph-link:hover {
   background: var(--surface-2);
 }
-.graph-match:focus-visible,
 .graph-link:focus-visible {
   outline: var(--focus-width) solid var(--focus);
   outline-offset: calc(-1 * var(--focus-width));
-}
-.graph-match-title {
-  overflow: hidden;
-  color: var(--fg-2);
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .graph-inspector {
   display: flex;
@@ -393,34 +348,4 @@
   flex-wrap: wrap;
   gap: var(--space-8);
   margin-top: var(--space-8);
-}
-
-@media (max-width: 600px) {
-  .graph-find {
-    flex: 1 1 100%;
-  }
-}
-
-/* The note step can hold a long key: it shrinks with an ellipsis rather than overflow. */
-.graph-steps {
-  min-width: 0;
-}
-.graph-steps .k-seg {
-  min-width: 0;
-  max-width: 100%;
-}
-.graph-steps .k-seg button {
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.graph-steps .k-seg button:last-child {
-  max-width: 14rem;
-}
-.graph-hops {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-4);
-  white-space: nowrap;
-  font-size: 12px;
-  color: var(--fg-2);
 }

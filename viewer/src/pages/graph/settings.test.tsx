@@ -64,7 +64,13 @@ describe("defaultSettings", () => {
     const s = defaultSettings(types);
     expect(s.groups.map((g) => g.query)).toEqual(["type:decision", "type:question"]);
     expect(s.groups[0]?.color).toBe(paletteColour(0));
-    expect(s.filters).toEqual({ query: "", legacy: true, suggested: true, orphans: true });
+    expect(s.filters).toEqual({
+      query: "",
+      tags: false,
+      legacy: true,
+      suggested: true,
+      orphans: true,
+    });
     expect(s.display).toEqual({
       arrows: false,
       textFade: 0,
@@ -95,6 +101,8 @@ describe("validateSettings", () => {
     );
     expect(v.filters.legacy).toBe(false);
     expect(v.filters.query).toBe("");
+    // Saved before the tags switch existed: it takes the default.
+    expect(v.filters.tags).toBe(false);
     expect(v.display.nodeSize).toBe(5);
     expect(v.display.textFade).toBe(0);
     expect(v.forces.repel).toBe(0);

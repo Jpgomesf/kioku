@@ -8,6 +8,9 @@ export interface GraphNode {
   kind: NoteKind;
   status: NoteStatus;
   degree: number;
+  tags: string[];
+  /** Last update, ISO 8601 UTC like NoteSummary.updatedAt. */
+  updatedAt: string;
 }
 
 export interface GraphEdge {

@@ -23,15 +23,14 @@
   z-index: 1;
   display: flex;
   align-items: center;
-  gap: var(--space-4);
-  padding: var(--space-6) var(--space-6) var(--space-6) var(--space-12);
+  gap: var(--space-2);
+  padding: var(--space-4) var(--space-6) 0;
   background: var(--surface);
-  border-bottom: 1px solid var(--border-subtle);
 }
 
-.gs-title {
-  flex: 1;
-  font-weight: 600;
+/* Restore and close sit together at the right, as in Obsidian. */
+.gs-head {
+  justify-content: flex-end;
 }
 
 .gs-section + .gs-section {
@@ -104,6 +103,26 @@
   outline-offset: 0;
 }
 
+.gs-search {
+  position: relative;
+  display: flex;
+}
+
+.gs-search-icon {
+  position: absolute;
+  left: var(--space-8);
+  top: 50%;
+  transform: translateY(-50%);
+  display: inline-flex;
+  color: var(--muted);
+  pointer-events: none;
+}
+
+/* Room for the lens. */
+.gs-search .gs-input {
+  padding-left: calc(var(--space-8) * 2 + 12px);
+}
+
 .gs-hint {
   margin: 0;
   color: var(--muted);
@@ -142,7 +161,13 @@
 }
 
 .gs-new-group {
-  align-self: flex-start;
+  width: 100%;
+  justify-content: center;
+}
+
+.gs-actions {
+  display: flex;
+  justify-content: flex-end;
 }
 
 .gs-slider {
@@ -151,17 +176,23 @@
   gap: var(--space-2);
 }
 
-.gs-slider-label {
+.gs-slider-track {
   display: flex;
-  justify-content: space-between;
+  align-items: center;
+  gap: var(--space-8);
 }
 
+/* A fixed width keeps the track still while the value changes. */
 .gs-slider output {
+  flex: none;
+  min-width: 3ch;
   color: var(--muted);
   font-variant-numeric: tabular-nums;
+  text-align: right;
 }
 
 .gs-slider input[type="range"] {
-  width: 100%;
+  flex: 1;
+  min-width: 0;
   accent-color: var(--accent);
 }

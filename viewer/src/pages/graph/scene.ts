@@ -12,6 +12,8 @@ export interface SceneNode {
   color: string;
   /** Drawn as a ring instead of a filled dot. */
   topic: boolean;
+  /** A tag node (Tags filter on): a smaller dot labelled "#name". */
+  tag: boolean;
   /** Drawn fainter. */
   legacy: boolean;
   /** The note title, drawn under the dot when zoomed in. */
@@ -47,4 +49,6 @@ export interface DisplayOptions {
   arrows: boolean;
   /** -3..3 as in Obsidian: higher shows labels at a lower zoom. */
   textFade: number;
+  /** Topic names show as page labels; when off, the canvas names a hovered or selected topic. */
+  topicLabels?: boolean;
 }

@@ -1,6 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { GraphRenderer } from "./renderer";
-import { cameraEase, cubicBezier, labelAlpha, labelThreshold, SpatialGrid } from "./renderer-math";
+import {
+  cameraEase,
+  cubicBezier,
+  DIM_ALPHA,
+  dimmedEdgeAlpha,
+  edgeAlpha,
+  LEGACY_ALPHA,
+  labelAlpha,
+  labelOpacity,
+  labelThreshold,
+  SpatialGrid,
+  TAG_SCALE,
+} from "./renderer-math";
 import type { Scene, SceneNode } from "./scene";
 
 function node(key: string, x: number, y: number, extra: Partial<SceneNode> = {}): SceneNode {
@@ -11,6 +23,7 @@ function node(key: string, x: number, y: number, extra: Partial<SceneNode> = {})
     size: 1,
     color: "#2a78d6",
     topic: false,
+    tag: false,
     legacy: false,
     label: key,
     ...extra,
@@ -28,6 +41,8 @@ function recordingContext() {
     arcs: [] as [number, number][],
     radii: [] as number[],
     texts: [] as string[],
+    textAlphas: [] as number[],
+    strokeAlphas: [] as number[],
     lineWidths: [] as number[],
     setTransform: count("setTransform"),
     clearRect: count("clearRect"),
@@ -42,9 +57,11 @@ function recordingContext() {
     stroke() {
       calls.stroke = (calls.stroke ?? 0) + 1;
       ctx.lineWidths.push(ctx.lineWidth);
+      ctx.strokeAlphas.push(ctx.globalAlpha);
     },
     fillText(text: string) {
       ctx.texts.push(text);
+      ctx.textAlphas.push(ctx.globalAlpha);
     },
     strokeText: count("strokeText"),
     font: "",
@@ -423,5 +440,111 @@ describe("GraphRenderer", () => {
     const shown = texts.find((t) => t.startsWith("A very"));
     expect(shown?.endsWith("\u2026")).toBe(true);
     expect(shown?.length).toBeLessThanOrEqual(28);
+  });
+
+  function emphasised(
+    nodes: SceneNode[],
+    emphasis: Parameters<GraphRenderer["setEmphasis"]>[0],
+    camera = { x: 0, y: 0, s: 1 },
+    edges: Scene["edges"] = [],
+  ) {
+    const ctx = recordingContext();
+    const r = new GraphRenderer(canvasWith(ctx), { ...noMotion, fitScale: () => 1 });
+    r.resize(400, 400);
+    r.setScene({ nodes, edges });
+    r.setCamera(camera);
+    r.setEmphasis(emphasis);
+    flushFrames();
+    return ctx;
+  }
+
+  it("always labels the hovered and focused notes at full strength, even zoomed out", () => {
+    const nodes = [node("a", 10, 10), node("b", 50, 50), node("c", 90, 90)];
+    const ctx = emphasised(nodes, { focusKey: "a", hoverKey: "b", lit: null });
+    expect(ctx.texts.sort()).toEqual(["a", "b"]);
+    expect(ctx.textAlphas).toEqual([1, 1]);
+  });
+
+  it("labels lit notes while hovering and fades the rest with their dots", () => {
+    const nodes = [node("a", 10, 10), node("b", 50, 50), node("c", 90, 90)];
+    const lit = new Set(["a", "b"]);
+    const out = emphasised(nodes, { focusKey: null, hoverKey: "a", lit });
+    expect(out.texts.sort()).toEqual(["a", "b"]);
+    // Zoomed in, the unlit label still shows but dimmed.
+    const zoomed = emphasised(nodes, { focusKey: null, hoverKey: "a", lit }, { x: 0, y: 0, s: 4 });
+    const alphaOf = (t: string) => zoomed.textAlphas[zoomed.texts.indexOf(t)];
+    expect(alphaOf("b")).toBe(1);
+    expect(alphaOf("c")).toBeCloseTo(DIM_ALPHA);
+  });
+
+  it("names a hovered topic on the canvas only when the page's topic labels are off", () => {
+    const nodes = [node("t", 10, 10, { topic: true, label: "A topic" })];
+    const hovered = (topicLabels: boolean) => {
+      const { ctx, r } = drawn(nodes, undefined, { topicLabels });
+      r.setEmphasis({ focusKey: null, hoverKey: "t", lit: null });
+      flushFrames();
+      return ctx.texts;
+    };
+    expect(hovered(true)).toEqual([]);
+    expect(hovered(false)).toContain("A topic");
+  });
+
+  it("keeps dimmed links visible on large areas", () => {
+    expect(dimmedEdgeAlpha(edgeAlpha(5000))).toBeGreaterThanOrEqual(0.04);
+    expect(dimmedEdgeAlpha(0.2)).toBeCloseTo(0.08);
+  });
+
+  it("computes label opacity from zoom, emphasis and legacy", () => {
+    expect(labelOpacity(0, true, false, true)).toBe(1);
+    expect(labelOpacity(0, false, true, false)).toBe(1);
+    expect(labelOpacity(1, false, false, false)).toBe(DIM_ALPHA);
+    expect(labelOpacity(0.5, false, null, true)).toBeCloseTo(0.5 * LEGACY_ALPHA);
+    expect(labelOpacity(0, false, null, false)).toBe(0);
+  });
+
+  it("keeps hover and focus labels inside the cap", () => {
+    const nodes = Array.from({ length: 400 }, (_, i) =>
+      node(`n${i}`, (i % 20) * 5, Math.floor(i / 20) * 5, { size: i === 0 ? 1 : 10 }),
+    );
+    const ctx = emphasised(
+      nodes,
+      { focusKey: null, hoverKey: "n0", lit: null },
+      { x: 0, y: 0, s: 4 },
+    );
+    expect(ctx.texts).toHaveLength(300);
+    expect(ctx.texts[0]).toBe("n0");
+  });
+
+  it("draws the hovered note's links in the accent and dims unlit links", () => {
+    const nodes = [node("a", 10, 10), node("b", 100, 10), node("c", 10, 200), node("d", 200, 200)];
+    const edges = [
+      { a: 0, b: 1, suggested: false },
+      { a: 2, b: 3, suggested: false },
+    ];
+    const ctx = emphasised(
+      nodes,
+      { focusKey: null, hoverKey: "a", lit: new Set(["a", "b"]) },
+      undefined,
+      edges,
+    );
+    // The first stroke is the dimmed batch: fainter than rest, but still visible.
+    const rest = edgeAlpha(2);
+    expect(ctx.strokeAlphas[0]).toBeCloseTo(dimmedEdgeAlpha(rest));
+    expect(ctx.strokeAlphas[0]).toBeGreaterThan(0);
+    expect(ctx.strokeAlphas[0]).toBeLessThan(rest);
+    expect(ctx.strokeAlphas).toContain(0.75);
+  });
+
+  it("draws tag nodes as smaller dots labelled #name", () => {
+    const nodes = [
+      node("n", 10, 10, { size: 4 }),
+      node("t", 100, 100, { size: 4, tag: true, label: "ideas" }),
+    ];
+    const { ctx } = drawn(nodes, { x: 0, y: 0, s: 4 });
+    expect(ctx.radii[1]).toBeCloseTo((ctx.radii[0] as number) * TAG_SCALE);
+    expect(ctx.texts).toContain("#ideas");
+    expect(
+      drawn([node("t", 0, 0, { tag: true, label: "#x" })], { x: 0, y: 0, s: 4 }).ctx.texts,
+    ).toEqual(["#x"]);
   });
 });

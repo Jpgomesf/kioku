@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { GraphData, GraphNode } from "../../api";
 import { getGraph } from "../../api/graph/mock";
 import { graphHref } from "../../app/router";
-import { type Camera, STEPS, toScreen } from "./camera";
+import { type Camera, toScreen } from "./camera";
 import { GraphView } from "./GraphView";
 import { clearLayoutCache } from "./layout";
 import { paletteColour } from "./palette";
@@ -85,7 +85,7 @@ const frames = () =>
   });
 
 const stageOf = (host: HTMLElement) => host.querySelector<HTMLElement>(".graph-stage");
-const caption = (host: HTMLElement) => host.querySelector(".k-count")?.textContent ?? "";
+const caption = (host: HTMLElement) => host.querySelector("#graph-caption")?.textContent ?? "";
 
 function key(target: Element | null, k: string) {
   act(() => {
@@ -167,21 +167,25 @@ const node = (key: string, kind: GraphNode["kind"] = "decision"): GraphNode => (
   kind,
   status: "active",
   degree: 1,
+  tags: [],
+  updatedAt: "2026-11-01T10:00:00Z",
 });
 
 describe("GraphView", () => {
-  it("opens on the whole area without a focus", () => {
+  it("opens on the whole area without a focus, with no header", () => {
     const host = render(undefined);
-    expect(caption(host)).toContain("Whole area:");
-    expect(host.querySelector(".graph-card-focus")).toBeNull();
+    expect(caption(host)).toContain("notes and");
+    expect(caption(host)).not.toContain("Selected");
+    expect(host.querySelector("header")).toBeNull();
+    expect(host.querySelector(".graph-card")).toBeNull();
   });
 
-  it("opens zoomed on the focus note, with its cards and inspector", () => {
+  it("opens with the focus note selected and inspected, but no cards", () => {
     const host = render("jobs-worker");
-    expect(caption(host)).toContain("Around jobs-worker");
-    expect(host.querySelector(".graph-card-focus")?.getAttribute("href")).toContain("jobs-worker");
-    expect(host.querySelectorAll(".graph-card:not(.graph-card-focus)").length).toBeGreaterThan(0);
+    expect(caption(host)).toContain("Selected jobs-worker");
     expect(host.querySelector("#graph-inspector-title")).not.toBeNull();
+    expect(host.querySelector(".graph-card")).toBeNull();
+    expect(lastEmphasis()?.focusKey).toBe("jobs-worker");
   });
 
   it("formats counts with thousands separators", () => {
@@ -190,30 +194,30 @@ describe("GraphView", () => {
     expect(caption(host)).toContain("1,200 notes");
   });
 
-  it("zooms out one step on Escape", () => {
+  it("clears the selection on Escape", () => {
     const host = render("jobs-worker");
     key(stageOf(host), "Escape");
-    expect(caption(host)).toContain("Neighbourhood: jobs-worker");
+    expect(host.querySelector("#graph-inspector-title")).toBeNull();
+    expect(caption(host)).not.toContain("Selected");
   });
 
-  it("zooms out on Escape from the step buttons too", () => {
-    const host = render("jobs-worker");
-    key(host.querySelector('button[aria-label="Zoom in"]'), "Escape");
-    expect(caption(host)).toContain("Neighbourhood: jobs-worker");
-  });
-
-  it("selects a note when its dot is clicked, and grows its cards out of the dots", async () => {
+  it("selects a clicked note without moving the camera", () => {
+    const animate = vi.spyOn(GraphRenderer.prototype, "animateTo");
     const host = render(undefined);
+    const before = cameraOf();
     clickDot(host, "jobs-worker");
-    expect(caption(host)).toContain("jobs-worker");
-    const card = host.querySelector<HTMLElement>(".graph-card:not(.graph-card-focus)");
-    expect(card).not.toBeNull();
-    expect(card?.style.opacity).toBe("0");
-    expect(card?.hasAttribute("inert")).toBe(true);
-    await frames();
-    const after = host.querySelector<HTMLElement>(".graph-card:not(.graph-card-focus)");
-    expect(after?.style.opacity).toBe("1");
-    expect(after?.hasAttribute("inert")).toBe(false);
+    expect(caption(host)).toContain("Selected jobs-worker");
+    expect(host.querySelector("#graph-inspector-title")).not.toBeNull();
+    expect(cameraOf()).toEqual(before);
+    expect(animate).not.toHaveBeenCalled();
+    expect(host.querySelector(".graph-card")).toBeNull();
+  });
+
+  it("clears the selection on a click on empty canvas", () => {
+    const host = render("jobs-worker");
+    pointer(host, "pointerdown", 1, 1);
+    pointer(host, "pointerup", 1, 1, 0);
+    expect(host.querySelector("#graph-inspector-title")).toBeNull();
   });
 
   it("draws on one hidden canvas, not SVG elements per note", () => {
@@ -226,15 +230,7 @@ describe("GraphView", () => {
     expect(renderer?.pick(dotAt("jobs-worker").x, dotAt("jobs-worker").y)).toBe("jobs-worker");
   });
 
-  it("animates step moves", () => {
-    const animate = vi.spyOn(GraphRenderer.prototype, "animateTo");
-    const host = render(undefined);
-    clickDot(host, "jobs-worker");
-    expect(animate).toHaveBeenCalled();
-    expect(animate.mock.calls.at(-1)?.[1]).toBeGreaterThan(0);
-  });
-
-  it("makes moves instant under reduced motion", () => {
+  it("makes key moves instant under reduced motion", () => {
     vi.stubGlobal("matchMedia", (query: string) => ({
       matches: query.includes("reduce"),
       media: query,
@@ -243,33 +239,29 @@ describe("GraphView", () => {
     }));
     const host = render(undefined);
     const fitS = cameraOf().s;
-    clickDot(host, "jobs-worker");
-    // The renderer is already at the neighbourhood step, with no frames in between.
-    expect(cameraOf().s).toBeCloseTo(fitS * STEPS[2]);
-    const card = host.querySelector<HTMLElement>(".graph-card:not(.graph-card-focus)");
-    expect(card?.style.opacity).toBe("1");
+    key(stageOf(host), "+");
+    expect(cameraOf().s).toBeCloseTo(fitS * 1.25);
   });
 
-  it("zooms with ctrl and the wheel", async () => {
+  it("zooms freely with the wheel, never into the card levels", async () => {
     const host = render(undefined);
+    clickDot(host, "jobs-worker");
     act(() => {
-      for (let i = 0; i < 4; i += 1) {
+      for (let i = 0; i < 12; i += 1) {
         stageOf(host)?.dispatchEvent(
           new WheelEvent("wheel", { deltaY: -200, ctrlKey: true, cancelable: true }),
         );
       }
     });
-    // The renderer moves at once; React hears about it once the wheel goes quiet.
-    expect(cameraOf().s).toBeGreaterThan(1);
-    expect(caption(host)).toContain("Whole area:");
+    expect(cameraOf().s).toBeGreaterThan(2);
     await act(async () => {
       await new Promise((r) => setTimeout(r, 200));
     });
-    expect(caption(host)).not.toContain("Whole area:");
+    expect(host.querySelector(".graph-card")).toBeNull();
   });
 
   it("drags the camera on the renderer, and a drag is not a click", () => {
-    const host = render(undefined);
+    const host = render("jobs-worker");
     const before = cameraOf();
     pointer(host, "pointerdown", 500, 300);
     pointer(host, "pointermove", 560, 330);
@@ -278,48 +270,54 @@ describe("GraphView", () => {
     expect(stageOf(host)?.classList.contains("graph-live")).toBe(true);
     pointer(host, "pointerup", 620, 360, 0);
     expect(stageOf(host)?.classList.contains("graph-live")).toBe(false);
-    expect(caption(host)).toContain("Whole area:");
-    // A drag is not a click: nothing got focused.
-    expect(host.querySelector("#graph-inspector-title")).toBeNull();
+    // A drag is not a click: the selection stays.
+    expect(host.querySelector("#graph-inspector-title")).not.toBeNull();
   });
 
   it("moves the dot grid and the overlay with the renderer's camera", () => {
-    const host = render("jobs-worker");
-    const card = host.querySelector<HTMLElement>(".graph-card-focus");
-    const before = card?.style.transform;
+    const host = render(undefined);
+    const label = host.querySelector<HTMLElement>(".graph-topic-label");
+    expect(label).not.toBeNull();
+    const before = label?.style.transform;
     const gridBefore = stageOf(host)?.style.getPropertyValue("--dot-x");
     act(() => renderer?.setCamera({ ...cameraOf(), x: cameraOf().x + 40 }));
-    expect(card?.style.transform).not.toBe(before);
+    expect(label?.style.transform).not.toBe(before);
     expect(stageOf(host)?.style.getPropertyValue("--dot-x")).not.toBe(gridBefore);
   });
 
-  it("points over notes on hover", async () => {
-    const host = render(undefined);
-    const s = dotAt("jobs-worker");
+  it("lights the hovered note and its neighbours", async () => {
+    const nodes = [node("a"), node("b"), node("c")];
+    const edges = [{ source: "a", target: "b", relation: "related", suggested: false }];
+    const host = render(undefined, { nodes, edges });
+    const s = dotAt("a");
     pointer(host, "pointermove", s.x, s.y, 0);
     await frames();
     expect(stageOf(host)?.style.cursor).toBe("pointer");
-    pointer(host, "pointermove", 2, 2, 0);
+    expect(lastEmphasis()?.hoverKey).toBe("a");
+    expect([...(lastEmphasis()?.lit ?? [])].sort()).toEqual(["a", "b"]);
+    pointer(host, "pointermove", 1, 1, 0);
     await frames();
     expect(stageOf(host)?.style.cursor).toBe("");
+    expect(lastEmphasis()?.lit ?? null).toBeNull();
   });
 
-  it("opens the note nearest the centre on Enter", () => {
+  it("selects the note nearest the centre on Enter", () => {
     const host = render(undefined);
     const expected = renderer?.nearest(VIEW.width / 2, VIEW.height / 2);
     expect(expected).toBeTruthy();
     key(stageOf(host), "Enter");
-    expect(caption(host)).toContain(`Neighbourhood: ${expected}`);
+    expect(caption(host)).toContain(`Selected ${expected}`);
   });
 
-  it("zooms with plus and minus, animated", () => {
+  it("zooms with plus and minus, animated, and fits with 0", () => {
     const animate = vi.spyOn(GraphRenderer.prototype, "animateTo");
     const host = render(undefined);
+    const fitS = cameraOf().s;
     for (let i = 0; i < 3; i += 1) key(stageOf(host), "+");
-    expect(caption(host)).not.toContain("Whole area:");
     expect(animate).toHaveBeenCalledTimes(3);
-    for (let i = 0; i < 3; i += 1) key(stageOf(host), "-");
-    expect(caption(host)).toContain("Whole area:");
+    expect(animate.mock.calls.at(-1)?.[0].s).toBeGreaterThan(fitS);
+    key(stageOf(host), "0");
+    expect(animate.mock.calls.at(-1)?.[0].s).toBeCloseTo(fitS);
   });
 
   it("keeps the URL on the selection", () => {
@@ -328,56 +326,16 @@ describe("GraphView", () => {
     expect(window.location.hash).toBe(graphHref("demo", "jobs-worker"));
   });
 
-  it("keeps keyboard focus on the stage after a card click, so Esc still works", async () => {
-    const host = render("jobs-worker");
-    await frames();
-    const card = host.querySelector<HTMLButtonElement>("button.graph-card");
-    card?.focus();
-    act(() => card?.click());
-    expect(stageOf(host)?.contains(document.activeElement)).toBe(true);
-    const before = caption(host);
-    key(document.activeElement, "Escape");
-    expect(caption(host)).not.toBe(before);
-  });
-
-  it("follows a link back to the original focus after moving", async () => {
-    const host = render("jobs-worker");
-    await frames();
-    const card = host.querySelector<HTMLButtonElement>("button.graph-card");
-    act(() => card?.click());
-    expect(host.querySelector(".graph-card-focus")?.getAttribute("href")).not.toContain(
-      "jobs-worker",
-    );
+  it("selects a note a link names", () => {
+    const host = render(undefined);
     act(() => {
       window.location.hash = graphHref("demo", "jobs-worker");
       window.dispatchEvent(new HashChangeEvent("hashchange"));
     });
-    expect(host.querySelector(".graph-card-focus")?.getAttribute("href")).toContain("jobs-worker");
+    expect(caption(host)).toContain("Selected jobs-worker");
   });
 
-  it("opens a folded group into its notes", async () => {
-    const nodes = [node("f"), ...Array.from({ length: 6 }, (_, i) => node(`d${i}`))];
-    const edges = nodes
-      .slice(1)
-      .map((n) => ({ source: "f", target: n.key, relation: "narrows", suggested: false }));
-    const host = render("f", { nodes, edges });
-    await frames();
-    const group = host.querySelector<HTMLButtonElement>(".graph-card-group");
-    expect(group).not.toBeNull();
-    act(() => group?.click());
-    expect(host.querySelector(".graph-card-group")).toBeNull();
-    expect(host.querySelectorAll("button.graph-card")).toHaveLength(6);
-  });
-
-  it("draws legacy links as neutral dashes, not reflect findings", () => {
-    const nodes = [node("f"), { ...node("old"), status: "legacy" as const }];
-    const edges = [{ source: "f", target: "old", relation: "supersedes", suggested: false }];
-    const host = render("f", { nodes, edges });
-    expect(host.querySelector(".graph-focus-edges .graph-edge-legacy")).not.toBeNull();
-    expect(host.querySelector(".graph-focus-edges .graph-edge-suggested")).toBeNull();
-  });
-
-  it("drops the focus and inspector when the selected note is filtered out", () => {
+  it("drops the selection and inspector when the selected note is filtered out", () => {
     const nodes = [node("f"), { ...node("old"), status: "legacy" as const }];
     const edges = [{ source: "f", target: "old", relation: "supersedes", suggested: false }];
     const host = render("old", { nodes, edges });
@@ -385,24 +343,75 @@ describe("GraphView", () => {
     openSettings(host);
     act(() => switchNamed(host, "Legacy notes").click());
     expect(host.querySelector("#graph-inspector-title")).toBeNull();
-    expect(host.querySelector(".graph-card-focus")?.getAttribute("href") ?? "").not.toContain(
-      "old",
-    );
+    // Cleared, not hidden: showing legacy notes again does not bring the selection back.
+    act(() => switchNamed(host, "Legacy notes").click());
+    expect(host.querySelector("#graph-inspector-title")).toBeNull();
   });
 
   it("does not add a history entry for a later Esc after re-picking the same note", () => {
     const host = render("jobs-worker");
-    typeInto(host.querySelector<HTMLInputElement>(".graph-find input"), "jobs-worker");
-    const match = Array.from(host.querySelectorAll<HTMLButtonElement>(".graph-match")).find((b) =>
-      b.textContent?.includes("jobs-worker"),
-    );
-    expect(match).toBeDefined();
-    act(() => match?.click());
+    clickDot(host, "jobs-worker");
     const push = vi.spyOn(window.history, "pushState");
     for (let i = 0; i < 4; i += 1) key(stageOf(host), "Escape");
     expect(window.location.hash).toBe(graphHref("demo"));
     expect(push).not.toHaveBeenCalled();
     push.mockRestore();
+  });
+
+  it("adds a node per tag, linked to its notes, when Tags is on", () => {
+    const nodes = [
+      { ...node("a"), tags: ["search"] },
+      { ...node("b"), tags: ["#Search", "ops"] },
+      node("c"),
+    ];
+    const host = render(undefined, { nodes, edges: [] });
+    expect(scene.nodes.some((n) => n.tag)).toBe(false);
+    openSettings(host);
+    act(() => switchNamed(host, "Tags").click());
+    const tags = scene.nodes.filter((n) => n.tag);
+    expect(tags.map((n) => [n.key, n.label])).toEqual([
+      ["tag:ops", "#ops"],
+      ["tag:search", "#search"],
+    ]);
+    expect(scene.edges).toHaveLength(3);
+    expect(tags[0]?.color).toBe("#9a8f7a");
+    expect(caption(host)).toContain("2 tags");
+  });
+
+  it("replays the area's growth on Animate, and a click stops it", () => {
+    const nodes = [
+      { ...node("a"), updatedAt: "2026-01-01T00:00:00Z" },
+      { ...node("b"), updatedAt: "2026-02-01T00:00:00Z" },
+    ];
+    const edges = [{ source: "a", target: "b", relation: "related", suggested: false }];
+    const host = render(undefined, { nodes, edges });
+    const panel = openSettings(host);
+    const button = Array.from(panel.querySelectorAll("button")).find(
+      (b) => b.textContent === "Animate",
+    );
+    act(() => button?.click());
+    expect(scene.nodes.length).toBeLessThan(2);
+    pointer(host, "pointerdown", 1, 1);
+    expect(scene.nodes.map((n) => n.key).sort()).toEqual(["a", "b"]);
+    expect(scene.edges).toHaveLength(1);
+  });
+
+  it("shows the end state at once on Animate under reduced motion", () => {
+    vi.stubGlobal("matchMedia", (query: string) => ({
+      matches: query.includes("reduce"),
+      media: query,
+      addEventListener: () => undefined,
+      removeEventListener: () => undefined,
+    }));
+    const nodes = [node("a"), node("b")];
+    const edges = [{ source: "a", target: "b", relation: "related", suggested: false }];
+    const host = render(undefined, { nodes, edges });
+    const panel = openSettings(host);
+    const button = Array.from(panel.querySelectorAll("button")).find(
+      (b) => b.textContent === "Animate",
+    );
+    act(() => button?.click());
+    expect(scene.nodes).toHaveLength(2);
   });
 
   it("says when an area has no notes", () => {
@@ -413,13 +422,28 @@ describe("GraphView", () => {
   it("says when a focus isn't in the area", () => {
     const host = render("not-a-note");
     expect(host.textContent).toContain("isn't in demo");
-    expect(caption(host)).toContain("Whole area:");
+    expect(caption(host)).not.toContain("Selected");
   });
 
-  it("gives the canvas the full width, with find-a-note in the header", () => {
-    const host = render(undefined);
-    expect(host.querySelector("aside")).toBeNull();
-    expect(host.querySelector(".graph-head .graph-find input")).not.toBeNull();
+  it("floats the area button over the canvas, with no find-a-note", () => {
+    renderer = null;
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    roots.push({ root, host });
+    act(() =>
+      root.render(
+        <GraphView
+          domain="demo"
+          areaLabel="demo"
+          data={getGraph({ domain: "demo" })}
+          initialFocus={undefined}
+          areaButton={<button type="button">Area</button>}
+        />,
+      ),
+    );
+    expect(host.querySelector(".graph-float-area button")?.textContent).toBe("Area");
+    expect(host.querySelector('input[type="search"], .graph-find')).toBeNull();
     expect(panelOf(host)).toBeNull();
   });
 
@@ -521,7 +545,13 @@ describe("GraphView", () => {
 
   it("hands the display settings to the renderer", () => {
     const host = render(undefined);
-    expect(lastDisplay()).toEqual({ nodeSize: 1, linkThickness: 1, arrows: false, textFade: 0 });
+    expect(lastDisplay()).toEqual({
+      nodeSize: 1,
+      linkThickness: 1,
+      arrows: false,
+      textFade: 0,
+      topicLabels: true,
+    });
     openSettings(host);
     act(() => switchNamed(host, "Arrows").click());
     expect(lastDisplay()?.arrows).toBe(true);
@@ -535,6 +565,7 @@ describe("GraphView", () => {
     openSettings(host);
     act(() => switchNamed(host, "Topic labels").click());
     expect(host.querySelector(".graph-topic-label")).toBeNull();
+    expect(lastDisplay()?.topicLabels).toBe(false);
   });
 
   it("keeps the camera when the forces change after the viewer moved it", () => {

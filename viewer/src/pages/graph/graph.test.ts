@@ -32,6 +32,8 @@ const node = (key: string, kind: GraphNode["kind"] = "decision"): GraphNode => (
   kind,
   status: "active",
   degree: 0,
+  tags: [],
+  updatedAt: "2026-11-01T10:00:00Z",
 });
 
 function chainAndStar(): GraphData {

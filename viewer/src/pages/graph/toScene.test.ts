@@ -10,6 +10,8 @@ const node = (key: string, kind: string, degree = 0, legacy = false): GraphNode 
   kind,
   status: legacy ? "legacy" : "active",
   degree,
+  tags: [],
+  updatedAt: "2026-11-01T10:00:00Z",
 });
 
 describe("toScene", () => {

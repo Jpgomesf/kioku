@@ -5,9 +5,10 @@ export interface QueryTarget {
   key: string;
   title: string;
   kind: string;
+  tags: readonly string[];
 }
 
-type Field = "type" | "path" | "text";
+type Field = "type" | "path" | "tag" | "text";
 
 interface Term {
   field: Field;
@@ -26,6 +27,11 @@ function normaliseType(text: string): string {
     .split(/[\s_-]+/)
     .filter((w) => w.length > 0)
     .join("-");
+}
+
+/** Tags compare without case or a leading #, so tag:#Idea and tag:idea both find "idea". */
+function normaliseTag(text: string): string {
+  return text.trim().replace(/^#+/, "").toLowerCase();
 }
 
 /** Splits on spaces, keeping "quoted phrases" (also after an operator, as in type:"design review") whole. */
@@ -58,11 +64,12 @@ function toTerm(token: string): Term | null {
     negate = true;
     rest = rest.slice(1);
   }
-  const match = /^(type|path):(.*)$/i.exec(rest);
+  const match = /^(type|path|tag):(.*)$/i.exec(rest);
   if (match) {
     const field = (match[1] ?? "").toLowerCase() as Field;
     const raw = match[2] ?? "";
-    const value = field === "type" ? normaliseType(raw) : raw.trim();
+    const value =
+      field === "type" ? normaliseType(raw) : field === "tag" ? normaliseTag(raw) : raw.trim();
     // "type:" with nothing after it is still being typed; ignore it instead of matching nothing.
     return value === "" ? null : { field, value, negate };
   }
@@ -83,6 +90,8 @@ function termMatches(term: Term, note: QueryTarget): boolean {
   switch (term.field) {
     case "type":
       return note.kind === term.value;
+    case "tag":
+      return note.tags.some((t) => normaliseTag(t) === term.value);
     case "path":
       return note.key.startsWith(term.value);
     case "text":

@@ -179,6 +179,39 @@ export function labelAlpha(zoom: number, textFade: number): number {
   return Math.max(0, Math.min(1, (zoom / t - 1) / 0.5));
 }
 
+/** Alpha for notes and labels outside a hover's lit set: clearly faded but still visible. */
+export const DIM_ALPHA = 0.15;
+/** Alpha for links outside a hover's lit set. Links already rest faint (as low as 0.06 on a
+ * large area), so DIM_ALPHA would erase them; a gentler factor with a floor keeps context. */
+export function dimmedEdgeAlpha(restAlpha: number): number {
+  return Math.max(restAlpha * 0.4, 0.04);
+}
+/** Alpha for legacy notes and their labels. */
+export const LEGACY_ALPHA = 0.45;
+/** Tag nodes draw this much smaller than a note of the same size, as in Obsidian. */
+export const TAG_SCALE = 0.6;
+
+/** A label's opacity: hovered and focused (`active`) always at full strength; while a hover
+ * lights a neighbourhood, lit labels show whatever the zoom and the others fade with their dots.
+ * `lit` is null when nothing is lit. Positional so the per-node call allocates nothing. */
+export function labelOpacity(
+  zoomAlpha: number,
+  active: boolean,
+  lit: boolean | null,
+  legacy: boolean,
+): number {
+  if (active) return 1;
+  const legacyAlpha = legacy ? LEGACY_ALPHA : 1;
+  if (lit === true) return legacyAlpha;
+  if (lit === false) return zoomAlpha * DIM_ALPHA;
+  return zoomAlpha * legacyAlpha;
+}
+
+/** The text drawn for a node: tags read "#name", long titles end in an ellipsis. */
+export function nodeLabel(label: string, tag: boolean): string {
+  return shortLabel(tag && !label.startsWith("#") ? `#${label}` : label);
+}
+
 /** Shortest on-screen link, in pixels, that still gets an arrowhead. */
 export const ARROW_MIN_LENGTH = 24;
 

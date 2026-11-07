@@ -11,6 +11,8 @@ const node = (key: string): GraphNode => ({
   kind: "decision",
   status: "active",
   degree: 1,
+  tags: [],
+  updatedAt: "2026-11-01T10:00:00Z",
 });
 
 let root: Root | null = null;

@@ -261,8 +261,59 @@ const TOPICS = [
   "access",
 ];
 
+// Generic tags and update dates for synthetic notes. They come from their own generator so the
+// existing kinds, statuses and links stay exactly as they were.
+const DEMO_TAGS = [
+  "search",
+  "storage",
+  "api",
+  "ops",
+  "onboarding",
+  "billing",
+  "security",
+  "release",
+];
+/** Synthetic notes' updates spread over the 180 days before this date, so Animate has a story. */
+const LAST_UPDATE = Date.UTC(2026, 10, 5, 12);
+const DAY_MS = 86_400_000;
+
+/** One to three tags (one note in ten has none), led by a tag tied to the note's cluster. */
+function syntheticTags(rand: () => number, cluster: number): string[] {
+  if (rand() < 0.1) return [];
+  const count = 1 + Math.floor(rand() * 3);
+  const tags = new Set([DEMO_TAGS[cluster % DEMO_TAGS.length] ?? "ops"]);
+  while (tags.size < count) tags.add(DEMO_TAGS[Math.floor(rand() * DEMO_TAGS.length)] ?? "ops");
+  return [...tags];
+}
+
+/** An ISO 8601 UTC time, whole seconds, in the same format the backend sends. */
+function syntheticUpdate(rand: () => number): string {
+  const at = LAST_UPDATE - Math.floor(rand() * 180 * DAY_MS);
+  return `${new Date(Math.floor(at / 1000) * 1000).toISOString().slice(0, 19)}Z`;
+}
+
+/** A real sample note's date as a full timestamp, so every graph node has one format. */
+function noteUpdate(n: Note): string {
+  return n.updatedAt.length === 10 ? `${n.updatedAt}T12:00:00Z` : n.updatedAt;
+}
+
+/** A sample note as a graph node, its degree counted from its own links. */
+export function noteNode(n: Note): GraphNode {
+  return {
+    key: n.key,
+    domain: n.domain,
+    title: n.title,
+    kind: n.kind,
+    status: n.status,
+    degree: n.links.length,
+    tags: [...n.tags],
+    updatedAt: noteUpdate(n),
+  };
+}
+
 function buildDemoGraph(): GraphData {
   const rand = rng(42);
+  const extra = rng(4242);
   const nodes: GraphNode[] = [];
   const edges: GraphEdge[] = [];
   for (let i = 0; i < 300; i += 1) {
@@ -276,6 +327,8 @@ function buildDemoGraph(): GraphData {
       kind,
       status: rand() < 0.12 ? "legacy" : "active",
       degree: 0,
+      tags: syntheticTags(extra, i % TOPICS.length),
+      updatedAt: syntheticUpdate(extra),
     });
   }
   for (let i = 1; i < nodes.length; i += 1) {
@@ -292,14 +345,7 @@ function buildDemoGraph(): GraphData {
     }
   }
   for (const n of sampleNotes.filter((s) => s.domain === "demo")) {
-    nodes.push({
-      key: n.key,
-      domain: n.domain,
-      title: n.title,
-      kind: n.kind,
-      status: n.status,
-      degree: n.links.length,
-    });
+    nodes.push(noteNode(n));
     for (const l of n.links)
       edges.push({ source: n.key, target: l.targetKey, relation: l.relation, suggested: false });
   }
@@ -339,11 +385,11 @@ export function summariesIn(domain: string): NoteSummary[] {
         kind: n.kind,
         status: n.status,
         origin: "file",
-        tags: [],
+        tags: n.tags,
         linkCount: n.degree,
         findingCount: 0,
         source: "demo-kb",
-        updatedAt: "2026-10-29",
+        updatedAt: n.updatedAt,
       }),
     );
   return [...real, ...synthetic];
@@ -357,11 +403,11 @@ function syntheticSummary(n: GraphNode): NoteSummary {
     kind: n.kind,
     status: n.status,
     origin: "file",
-    tags: [],
+    tags: n.tags,
     linkCount: n.degree,
     findingCount: 0,
     source: "demo-kb",
-    updatedAt: "2026-10-29",
+    updatedAt: n.updatedAt,
   };
 }
 
@@ -423,6 +469,7 @@ function weightedKind(rand: () => number): NoteKind {
 
 function buildLargeGraph(): GraphData {
   const rand = rng(7);
+  const extra = rng(77);
   const nodes: GraphNode[] = [];
   for (let i = 0; i < LARGE_NOTES; i += 1) {
     const cluster = LARGE_CLUSTERS[i % LARGE_CLUSTERS.length] ?? "misc";
@@ -437,6 +484,8 @@ function buildLargeGraph(): GraphData {
       kind,
       status: i % LEGACY_EVERY === LEGACY_EVERY - 1 ? "legacy" : "active",
       degree: 0,
+      tags: syntheticTags(extra, i % LARGE_CLUSTERS.length),
+      updatedAt: syntheticUpdate(extra),
     });
   }
   const edges: GraphEdge[] = [];

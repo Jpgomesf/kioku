@@ -35,6 +35,7 @@ function setup(
     onPanelChange: vi.fn<(next: PanelState) => void>(),
     onHighlight: vi.fn<(q: string | null) => void>(),
     onClose: vi.fn(),
+    onAnimate: vi.fn(),
   };
   const host = document.createElement("div");
   document.body.append(host);
@@ -180,5 +181,37 @@ describe("GraphSettings", () => {
     host.remove();
     expect(document.activeElement).toBe(opener);
     opener.remove();
+  });
+
+  it("lays out the filters and groups in Obsidian's order", () => {
+    const { host } = setup();
+    const switches = [...host.querySelectorAll(".gs-section:first-of-type .gs-row > span")].map(
+      (el) => el.textContent,
+    );
+    expect(switches).toEqual(["Tags", "Orphans", "Legacy notes", "Links Reflect suggests"]);
+    const groupsBody = host.querySelectorAll(".gs-section-body")[1];
+    expect(groupsBody?.firstElementChild?.textContent).toBe("New group");
+    expect(host.querySelector(".gs-head")?.textContent).toBe("");
+  });
+
+  it("toggles the tags filter", () => {
+    const { host, props } = setup();
+    const span = [...host.querySelectorAll("span")].find((s) => s.textContent === "Tags");
+    click(host.querySelector(`[aria-labelledby="${span?.id}"]`));
+    expect(props.onChange.mock.lastCall?.[0].filters.tags).toBe(true);
+  });
+
+  it("calls onAnimate from the Animate button", () => {
+    const { host, props } = setup();
+    click([...host.querySelectorAll("button")].find((b) => b.textContent === "Animate") ?? null);
+    expect(props.onAnimate).toHaveBeenCalledTimes(1);
+    expect(props.onChange).not.toHaveBeenCalled();
+  });
+
+  it("shows each slider's value left of its track", () => {
+    const { host } = setup();
+    const track = host.querySelector(".gs-slider-track");
+    expect(track?.firstElementChild?.tagName).toBe("OUTPUT");
+    expect(track?.lastElementChild?.getAttribute("type")).toBe("range");
   });
 });

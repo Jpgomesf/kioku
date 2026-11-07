@@ -1,5 +1,5 @@
-// The Graph page: one semantic zoom from the whole area down to a note's neighbourhood.
-// Without a domain in the URL it shows the current area; with a focus it opens zoomed on it.
+// The Graph page: the whole area on a canvas, as in Obsidian's graph view. Without a domain
+// in the URL it shows the current area; with a focus it opens with that note selected.
 import { useEffect, useRef, useState } from "react";
 import { type Area, type GraphData, getGraph, listAreas } from "../../api";
 import { useCurrentArea } from "../../app/area";
@@ -89,21 +89,20 @@ export function GraphPage({ domain, focus }: GraphPageProps) {
           areaButton={areaButton}
         />
       ) : (
-        <div className="graph-main">
-          <header className="graph-head">
-            <div className="graph-head-text">
-              <h1 id="graph-title">Graph</h1>
-              <p className="k-count" aria-live="polite">
-                {load.state === "error" ? "The graph didn't load." : `Loading ${label}…`}
-              </p>
-            </div>
-            {areaButton}
-          </header>
-          {load.state === "error" && (
-            <div className="graph-empty">
+        <div className="graph-main graph-body">
+          <h1 id="graph-title" className="graph-sr">
+            Graph
+          </h1>
+          <div className="graph-float graph-float-area">{areaButton}</div>
+          <div className="graph-empty">
+            {load.state === "error" ? (
               <EmptyState title="The graph didn't load">{load.message}</EmptyState>
-            </div>
-          )}
+            ) : (
+              <p className="k-meta" aria-live="polite">
+                Loading {label}…
+              </p>
+            )}
+          </div>
         </div>
       )}
     </section>

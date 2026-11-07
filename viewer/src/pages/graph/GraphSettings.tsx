@@ -25,6 +25,8 @@ export interface GraphSettingsProps {
   onPanelChange: (next: PanelState) => void;
   onHighlight: (query: string | null) => void;
   onClose: () => void;
+  /** Replays how the area grew, as Obsidian's Animate button does. */
+  onAnimate: () => void;
 }
 
 type SectionId = keyof PanelState["sections"];
@@ -109,19 +111,21 @@ function Slider({
   const inputId = useId();
   return (
     <div className="gs-slider">
-      <div className="gs-slider-label">
-        <label htmlFor={inputId}>{label}</label>
+      <label htmlFor={inputId}>{label}</label>
+      {/* The value sits left of the track, as in Obsidian. */}
+      <div className="gs-slider-track">
         <output htmlFor={inputId}>{format(value, range.step)}</output>
+        <input
+          id={inputId}
+          type="range"
+          min={range.min}
+          max={range.max}
+          step={range.step}
+          value={value}
+          aria-valuetext={format(value, range.step)}
+          onChange={(e) => onChange(clampNumber(Number(e.currentTarget.value), range, value))}
+        />
       </div>
-      <input
-        id={inputId}
-        type="range"
-        min={range.min}
-        max={range.max}
-        step={range.step}
-        value={value}
-        onChange={(e) => onChange(clampNumber(Number(e.currentTarget.value), range, value))}
-      />
     </div>
   );
 }
@@ -154,14 +158,6 @@ function GroupRow({
         if (!e.currentTarget.contains(e.relatedTarget as Node | null)) onHighlight(null);
       }}
     >
-      <label className="gs-swatch" style={{ background: group.color }} title="Colour">
-        <input
-          type="color"
-          aria-label={`${name} colour`}
-          value={group.color}
-          onChange={(e) => onChange({ ...group, color: e.currentTarget.value.toLowerCase() })}
-        />
-      </label>
       <input
         type="text"
         className="gs-input"
@@ -175,6 +171,14 @@ function GroupRow({
           highlight(query);
         }}
       />
+      <label className="gs-swatch" style={{ background: group.color }} title="Colour">
+        <input
+          type="color"
+          aria-label={`${name} colour`}
+          value={group.color}
+          onChange={(e) => onChange({ ...group, color: e.currentTarget.value.toLowerCase() })}
+        />
+      </label>
       <IconButton icon="close" label={`Remove ${name.toLowerCase()}`} onClick={onRemove} />
     </div>
   );
@@ -196,6 +200,7 @@ export function GraphSettings({
   onPanelChange,
   onHighlight,
   onClose,
+  onAnimate,
 }: GraphSettingsProps) {
   const hintId = useId();
   // Give focus back to whatever opened the panel (the settings button) when it closes.
@@ -227,8 +232,8 @@ export function GraphSettings({
 
   return (
     <section className="gs-panel" aria-label="Graph settings" onKeyDown={onKeyDown}>
+      {/* Only the two small icons, as in Obsidian; the panel's name is its aria-label. */}
       <div className="gs-head">
-        <span className="gs-title">Graph settings</span>
         <IconButton icon="restore" label="Restore default settings" onClick={onReset} />
         <IconButton icon="close" label="Close" onClick={onClose} />
       </div>
@@ -237,19 +242,34 @@ export function GraphSettings({
         "filters",
         "Filters",
         <>
-          <input
-            type="search"
-            className="gs-input"
-            aria-label="Search notes"
-            aria-describedby={hintId}
-            placeholder="Search notes"
-            spellCheck={false}
-            value={settings.filters.query}
-            onChange={(e) => setFilters({ query: e.currentTarget.value })}
-          />
+          <div className="gs-search">
+            <span className="gs-search-icon" aria-hidden="true">
+              <Icon name="search" size={12} />
+            </span>
+            <input
+              type="search"
+              className="gs-input"
+              aria-label="Search notes"
+              aria-describedby={hintId}
+              placeholder="Search notes"
+              spellCheck={false}
+              value={settings.filters.query}
+              onChange={(e) => setFilters({ query: e.currentTarget.value })}
+            />
+          </div>
           <p id={hintId} className="gs-hint">
-            Words, "phrases", type:decision, path:folder/, -word to exclude
+            Try type:, tag:, path: or -word to exclude
           </p>
+          <SwitchRow
+            label="Tags"
+            checked={settings.filters.tags}
+            onChange={(tags) => setFilters({ tags })}
+          />
+          <SwitchRow
+            label="Orphans"
+            checked={settings.filters.orphans}
+            onChange={(orphans) => setFilters({ orphans })}
+          />
           <SwitchRow
             label="Legacy notes"
             checked={settings.filters.legacy}
@@ -260,11 +280,6 @@ export function GraphSettings({
             checked={settings.filters.suggested}
             onChange={(suggested) => setFilters({ suggested })}
           />
-          <SwitchRow
-            label="Orphans"
-            checked={settings.filters.orphans}
-            onChange={(orphans) => setFilters({ orphans })}
-          />
         </>,
       )}
 
@@ -272,6 +287,19 @@ export function GraphSettings({
         "groups",
         "Groups",
         <>
+          <button
+            type="button"
+            className="k-btn gs-new-group"
+            disabled={settings.groups.length >= MAX_GROUPS}
+            onClick={() =>
+              setGroups([
+                ...settings.groups,
+                { id: newGroupId(), query: "", color: unusedColour(settings.groups) },
+              ])
+            }
+          >
+            New group
+          </button>
           {settings.groups.map((group, i) => (
             <GroupRow
               key={group.id}
@@ -287,19 +315,6 @@ export function GraphSettings({
               }}
             />
           ))}
-          <button
-            type="button"
-            className="k-btn gs-new-group"
-            disabled={settings.groups.length >= MAX_GROUPS}
-            onClick={() =>
-              setGroups([
-                ...settings.groups,
-                { id: newGroupId(), query: "", color: unusedColour(settings.groups) },
-              ])
-            }
-          >
-            New group
-          </button>
         </>,
       )}
 
@@ -330,6 +345,11 @@ export function GraphSettings({
             range={DISPLAY_RANGES.linkThickness}
             onChange={(linkThickness) => setDisplay({ linkThickness })}
           />
+          <div className="gs-actions">
+            <button type="button" className="k-btn gs-animate" onClick={onAnimate}>
+              Animate
+            </button>
+          </div>
           <SwitchRow
             label="Topic labels"
             checked={settings.display.topicLabels}

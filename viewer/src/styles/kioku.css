@@ -1128,17 +1128,12 @@ fieldset:disabled .k-check,
   color: var(--warn-ink-2);
 }
 
-/* Small notes under graph controls, and the colour dot in graph search results. */
+/* Small notes under graph controls. */
 .k-legend-note {
   margin-top: var(--space-6);
   font-size: 12px;
   line-height: 16px;
   color: var(--muted);
-}
-.k-swatch {
-  width: 12px;
-  height: 12px;
-  flex: none;
 }
 
 /* Command palette */

@@ -5,6 +5,7 @@ const note: QueryTarget = {
   key: "projects/alpha-plan",
   title: "Alpha launch plan",
   kind: "design-review",
+  tags: ["Idea", "#roadmap"],
 };
 const m = (q: string, n: QueryTarget = note) => matchesQuery(parseQuery(q), n);
 
@@ -58,5 +59,20 @@ describe("query", () => {
     ];
     expect(groupColour(groups, note)).toBe("#111111");
     expect(groupColour(groups, { ...note, kind: "x", title: "y", key: "z" })).toBeNull();
+  });
+
+  it("matches tag: against a whole tag, ignoring case and a leading #", () => {
+    expect(m("tag:idea")).toBe(true);
+    expect(m("tag:#IDEA")).toBe(true);
+    expect(m("tag:roadmap")).toBe(true);
+    expect(m("tag:ide")).toBe(false);
+    expect(m("-tag:idea")).toBe(false);
+    expect(m("-tag:other")).toBe(true);
+    expect(m("tag:idea", { ...note, tags: [] })).toBe(false);
+  });
+
+  it("ignores an empty tag: still being typed", () => {
+    expect(m("tag:")).toBe(true);
+    expect(m("tag:#")).toBe(true);
   });
 });

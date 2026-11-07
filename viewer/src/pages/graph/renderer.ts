@@ -6,11 +6,16 @@ import type { Bounds } from "./layout";
 import {
   ARROW_MIN_LENGTH,
   cameraEase,
+  DIM_ALPHA,
+  dimmedEdgeAlpha,
   edgeAlpha,
+  LEGACY_ALPHA,
   labelAlpha,
+  labelOpacity,
+  nodeLabel,
   SpatialGrid,
   screenRadius,
-  shortLabel,
+  TAG_SCALE,
   visibleWorld,
 } from "./renderer-math";
 import type { DisplayOptions, Emphasis, Scene, SceneNode } from "./scene";
@@ -65,8 +70,8 @@ interface ColourBatches {
 
 /** Screen margin around the viewport inside which notes and links still draw. */
 const CULL_MARGIN = 24;
-const DIM_ALPHA = 0.15;
-const LEGACY_ALPHA = 0.45;
+/** Links inside a hover's lit set draw at least this strong, so the neighbourhood stands out. */
+const LIT_EDGE_ALPHA = 0.5;
 /** Note strengths, as indices into STRENGTH_ALPHA and the node batches. */
 const FULL = 0;
 const LEGACY = 1;
@@ -105,6 +110,7 @@ export class GraphRenderer {
   private readonly edgeBatches = {
     rest: new PathBatch(),
     strong: new PathBatch(),
+    lit: new PathBatch(),
     suggested: new PathBatch(),
     dimmed: new PathBatch(),
     dimmedSuggested: new PathBatch(),
@@ -113,6 +119,7 @@ export class GraphRenderer {
   private readonly arrowBatches = {
     rest: new PathBatch(),
     strong: new PathBatch(),
+    lit: new PathBatch(),
     suggested: new PathBatch(),
     dimmed: new PathBatch(),
     dimmedSuggested: new PathBatch(),
@@ -123,6 +130,10 @@ export class GraphRenderer {
   private batchOf = new Int32Array(0);
   private readonly ringBatch = new PathBatch();
   private labelOrder: number[] = [];
+  // Per-frame label opacity, aligned with scene.nodes; only entries in labelOrder are read.
+  private labelAlphas = new Float32Array(0);
+  // Per-frame cap priority: 2 hovered or focused, 1 lit, 0 the rest.
+  private labelRanks = new Uint8Array(0);
   // Shortened titles, aligned with scene.nodes, so long titles never form a wall of text.
   private labels: string[] = [];
   private destroyed = false;
@@ -171,7 +182,9 @@ export class GraphRenderer {
   setScene(scene: Scene): void {
     // Copy the notes: setPositions moves them in place, and the page's objects stay untouched.
     this.scene = { nodes: scene.nodes.map((n) => ({ ...n })), edges: scene.edges };
-    this.labels = this.scene.nodes.map((n) => shortLabel(n.label));
+    this.labels = this.scene.nodes.map((n) => nodeLabel(n.label, n.tag));
+    this.labelAlphas = new Float32Array(this.scene.nodes.length);
+    this.labelRanks = new Uint8Array(this.scene.nodes.length);
     this.indexColours();
     this.rebuildGrid();
     this.schedule();
@@ -345,7 +358,8 @@ export class GraphRenderer {
   }
 
   private radius(n: SceneNode, zoom: number): number {
-    return screenRadius(n.size, n.topic, zoom) * this.display.nodeSize;
+    const r = screenRadius(n.size, n.topic, zoom) * this.display.nodeSize;
+    return n.tag ? r * TAG_SCALE : r;
   }
 
   private moveCamera(camera: Camera): void {
@@ -413,12 +427,8 @@ export class GraphRenderer {
     const zoom = this.zoomRatio();
 
     // Links: sorted into one path per style, so the whole set costs a few strokes.
-    const { rest, strong, suggested, dimmed, dimmedSuggested } = this.edgeBatches;
-    rest.reset();
-    strong.reset();
-    suggested.reset();
-    dimmed.reset();
-    dimmedSuggested.reset();
+    const edgeBatches = this.edgeBatches;
+    for (const batch of Object.values(edgeBatches)) batch.reset();
     const arrows = this.arrowBatches;
     for (const batch of Object.values(arrows)) batch.reset();
     const arrowLength = 6 * Math.max(0.6, Math.sqrt(display.linkThickness));
@@ -440,7 +450,9 @@ export class GraphRenderer {
           ? "suggested"
           : touchesActive
             ? "strong"
-            : "rest";
+            : lit !== null
+              ? "lit"
+              : "rest";
       const ax = c.x + c.s * a.x;
       const ay = c.y + c.s * a.y;
       const bx = c.x + c.s * b.x;
@@ -462,17 +474,20 @@ export class GraphRenderer {
     const thick = display.linkThickness;
     const p = this.palette;
     ctx.lineWidth = thick;
-    dimmed.stroke(ctx, p.edge, restAlpha * DIM_ALPHA);
-    rest.stroke(ctx, p.edge, restAlpha);
+    const litAlpha = Math.max(restAlpha, LIT_EDGE_ALPHA);
+    edgeBatches.dimmed.stroke(ctx, p.edge, dimmedEdgeAlpha(restAlpha));
+    edgeBatches.rest.stroke(ctx, p.edge, restAlpha);
+    edgeBatches.lit.stroke(ctx, p.edge, litAlpha);
     ctx.setLineDash([4, 3]);
-    suggested.stroke(ctx, p.suggested, 0.8);
-    dimmedSuggested.stroke(ctx, p.suggested, 0.8 * DIM_ALPHA);
+    edgeBatches.suggested.stroke(ctx, p.suggested, 0.8);
+    edgeBatches.dimmedSuggested.stroke(ctx, p.suggested, 0.8 * DIM_ALPHA);
     ctx.setLineDash([]);
     ctx.lineWidth = 1.5 * thick;
-    strong.stroke(ctx, p.edgeStrong, 0.75);
+    edgeBatches.strong.stroke(ctx, p.edgeStrong, 0.75);
     // Heads read better a little stronger than their faint lines.
-    arrows.dimmed.fill(ctx, p.edge, Math.min(1, restAlpha * 2) * DIM_ALPHA);
+    arrows.dimmed.fill(ctx, p.edge, Math.min(1, dimmedEdgeAlpha(restAlpha) * 2));
     arrows.rest.fill(ctx, p.edge, Math.min(1, restAlpha * 2));
+    arrows.lit.fill(ctx, p.edge, Math.min(1, litAlpha * 2));
     arrows.suggested.fill(ctx, p.suggested, 0.8);
     arrows.dimmedSuggested.fill(ctx, p.suggested, 0.8 * DIM_ALPHA);
     arrows.strong.fill(ctx, p.edgeStrong, 0.75);
@@ -481,7 +496,9 @@ export class GraphRenderer {
     const groups = this.colourBatches;
     for (const group of groups) for (const path of group.paths) path.reset();
     const batchOf = this.batchOf;
-    const labels = labelAlpha(zoom, display.textFade);
+    const zoomAlpha = labelAlpha(zoom, display.textFade);
+    const labelAlphas = this.labelAlphas;
+    const labelRanks = this.labelRanks;
     const labelOrder = this.labelOrder;
     labelOrder.length = 0;
     const ring = this.ringBatch;
@@ -500,7 +517,22 @@ export class GraphRenderer {
       const y = c.y + c.s * n.y;
       const r = this.radius(n, zoom);
       group.paths[strength].circle(x, y, r);
-      if (labels > 0 && !n.topic && n.label) labelOrder.push(i);
+      const active = n.key === hoverKey || n.key === focusKey;
+      // Topics are named by the page's labels; without them, only an active topic gets a name.
+      const labelled = !n.topic || (active && this.display.topicLabels === false);
+      if (labelled && n.label) {
+        const isLitLabel = lit === null ? null : lit.has(n.key);
+        // Below the fade threshold with nothing hovered, no label shows: skip the work.
+        const a =
+          zoomAlpha === 0 && lit === null && !active
+            ? 0
+            : labelOpacity(zoomAlpha, active, isLitLabel, n.legacy);
+        if (a > 0) {
+          labelAlphas[i] = a;
+          labelRanks[i] = active ? 2 : isLitLabel ? 1 : 0;
+          labelOrder.push(i);
+        }
+      }
       // Hover and focus each get a ring, whatever their order in the scene.
       if (n.key === hoverKey) {
         ring.circle(x, y, r + 3);
@@ -529,25 +561,26 @@ export class GraphRenderer {
       ctx.lineWidth = 1.5;
       ring.stroke(ctx, this.palette.edgeStrong, 1);
     }
-    if (labelOrder.length > 0) this.drawLabels(ctx, labelOrder, labels, zoom);
+    if (labelOrder.length > 0) this.drawLabels(ctx, labelOrder, zoom);
     ctx.globalAlpha = 1;
     this.drawMs = now() - started;
   }
 
-  /** Titles under their dots, biggest notes first, capped, with a halo so links don't cut them. */
-  private drawLabels(
-    ctx: CanvasRenderingContext2D,
-    order: number[],
-    alpha: number,
-    zoom: number,
-  ): void {
+  /** Titles centred under their dots, capped, with a halo so links don't cut them. Hovered
+   * and focused labels win the cap, then lit ones, then the biggest notes. */
+  private drawLabels(ctx: CanvasRenderingContext2D, order: number[], zoom: number): void {
     const { nodes } = this.scene;
-    const { lit } = this.emphasis;
+    const alphas = this.labelAlphas;
+    const ranks = this.labelRanks;
     const c = this.cam;
     const p = this.palette;
-    order.sort((i, j) => (nodes[j] as SceneNode).size - (nodes[i] as SceneNode).size);
+    order.sort(
+      (i, j) =>
+        (ranks[j] as number) - (ranks[i] as number) ||
+        (nodes[j] as SceneNode).size - (nodes[i] as SceneNode).size,
+    );
     const count = Math.min(order.length, LABEL_CAP);
-    ctx.font = `11px ${p.font}`;
+    ctx.font = `12px ${p.font}`;
     ctx.textAlign = "center";
     ctx.textBaseline = "top";
     ctx.lineJoin = "round";
@@ -556,8 +589,7 @@ export class GraphRenderer {
     ctx.fillStyle = p.label;
     for (let k = 0; k < count; k += 1) {
       const n = nodes[order[k] as number] as SceneNode;
-      const dim = lit !== null && !lit.has(n.key);
-      ctx.globalAlpha = alpha * (dim ? DIM_ALPHA : n.legacy ? LEGACY_ALPHA : 1);
+      ctx.globalAlpha = alphas[order[k] as number] as number;
       const x = c.x + c.s * n.x;
       const y = c.y + c.s * n.y + this.radius(n, zoom) + 3;
       const text = this.labels[order[k] as number] as string;

@@ -3,6 +3,7 @@
 // live layout moves them in place through renderer.setPositions.
 import { type GraphEdge, type GraphNode, TOPIC_KIND } from "../../api";
 import type { Scene, SceneEdge, SceneNode } from "./scene";
+import { isTagKey } from "./tags";
 
 /** The notes and links to draw. Callers pass only visible ones; links to a note that is not
  * among `nodes` are left out. `colourOf` must return a concrete CSS colour, not a var(). */
@@ -22,6 +23,7 @@ export function toScene(
       size: 1 + n.degree,
       color: colourOf(n),
       topic: n.kind === TOPIC_KIND,
+      tag: isTagKey(n.key),
       legacy: n.status === "legacy",
       label: n.title,
     });

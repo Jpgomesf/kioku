@@ -14,6 +14,8 @@ export interface GraphGroup {
 
 export interface GraphFilters {
   query: string;
+  /** Show each tag as its own node linked to the notes that carry it; off by default, as in Obsidian. */
+  tags: boolean;
   legacy: boolean;
   suggested: boolean;
   orphans: boolean;
@@ -69,7 +71,7 @@ export function defaultSettings(types: readonly KindCount[]): GraphSettings {
   // Most common first, so the strongest colours go to the types seen most.
   const sorted = [...types].sort((a, b) => b.count - a.count);
   return {
-    filters: { query: "", legacy: true, suggested: true, orphans: true },
+    filters: { query: "", tags: false, legacy: true, suggested: true, orphans: true },
     groups: sorted.slice(0, MAX_GROUPS).map((t, i) => ({
       id: `type-${t.kind}`,
       query: `type:${t.kind}`,
@@ -117,6 +119,8 @@ export function validateSettings(input: unknown, fallback: GraphSettings): Graph
   return {
     filters: {
       query: text(f.query, base.filters.query),
+      // Settings saved before tags existed have no field, so they fall back to the default.
+      tags: bool(f.tags, base.filters.tags),
       legacy: bool(f.legacy, base.filters.legacy),
       suggested: bool(f.suggested, base.filters.suggested),
       orphans: bool(f.orphans, base.filters.orphans),
