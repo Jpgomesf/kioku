@@ -113,6 +113,8 @@
   }
 }
 .library-filters {
+  /* Positioned for the fading copies of chips that More types / Fewer types takes away. */
+  position: relative;
   margin: 0;
   padding: 0;
   border: 0;

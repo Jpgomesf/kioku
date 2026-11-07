@@ -40,7 +40,8 @@ export function usePrefersReducedMotion(): boolean {
   return reduced;
 }
 
-export { type PresenceState, staggerStyle, usePresence } from "./presence";
+export { useFlip } from "./flip";
+export { type PresenceState, staggerDelay, staggerStyle, usePresence } from "./presence";
 export {
   canViewTransition,
   runViewTransition,

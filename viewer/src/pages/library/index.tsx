@@ -38,6 +38,7 @@ import {
   StatusPill,
   showToast,
 } from "../../components/ui";
+import { useFlip } from "../../motion";
 import { latestFinished } from "../reflect/state";
 import {
   areaLabel,
@@ -278,6 +279,8 @@ export function LibraryPage({ params }: LibraryPageProps) {
   const typeChips = kindChips(areaKinds, filters.kinds, typesExpanded);
   const moreRef = useRef<HTMLButtonElement>(null);
   const filtersRef = useRef<HTMLFieldSetElement>(null);
+  // More types and Fewer types animate the chips' reflow (motion/flip.ts).
+  const flipFilters = useFlip(filtersRef);
   const refocusChips = useRef(false);
 
   // A cleared chip that showed only because it was selected unmounts with focus on it; move
@@ -457,7 +460,10 @@ export function LibraryPage({ params }: LibraryPageProps) {
               type="button"
               className="k-btn k-btn-quiet k-btn-sm"
               aria-expanded={typesExpanded}
-              onClick={() => setExpandedFor(typesExpanded ? null : domain)}
+              onClick={() => {
+                flipFilters();
+                setExpandedFor(typesExpanded ? null : domain);
+              }}
             >
               {typesExpanded ? "Fewer types" : `More types (${typeChips.hidden})`}
             </button>

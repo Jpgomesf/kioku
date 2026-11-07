@@ -31,6 +31,11 @@ Motion explains a change; it never decorates. Values live in `index.ts` (JS) and
 - `usePresence(open)`: keeps a panel mounted while it leaves; set `data-presence` on a
   `.motion-panel`. Overlays still use `app/overlay.ts`'s `usePresence`; a merge is pending.
 - `.motion-list` plus `staggerStyle(i)`: list items rise in, the stagger capped at 8 items.
+  `staggerDelay(i)` gives the same delay in milliseconds for script-driven animation.
+- `useFlip(ref)`: for a container whose children reflow (the Library's More types). Call the
+  returned `capture()` right before the change; children that stay glide to their new places,
+  new ones fade in a step apart, removed ones fade out where they stood, and the container's
+  height follows. The container must be `position: relative`.
 
 ## Reduced motion
 

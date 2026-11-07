@@ -38,5 +38,10 @@ export function usePresence(open: boolean, ms: number = duration.overlay): Prese
 
 /** Inline style for a list item's staggered entry; capped so long lists stay quick. */
 export function staggerStyle(index: number, step = 20, max = 8): { animationDelay: string } {
-  return { animationDelay: `${Math.min(index, max) * step}ms` };
+  return { animationDelay: `${staggerDelay(index, step, max)}ms` };
+}
+
+/** The same stagger in milliseconds, for animations started from script. */
+export function staggerDelay(index: number, step = 20, max = 8): number {
+  return Math.min(index, max) * step;
 }
