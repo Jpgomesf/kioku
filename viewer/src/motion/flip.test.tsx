@@ -23,6 +23,44 @@ function boxOf(el: Element): DOMRect {
   return { left: x, top: y, width: w, height: h, right: x + w, bottom: y + h, x, y } as DOMRect;
 }
 
+/** An open row that folds shut on its first click: x and y go, b moves back up a row. */
+function Fold() {
+  const ref = useRef<HTMLDivElement>(null);
+  const capture = useFlip(ref);
+  const [open, setOpen] = useState(true);
+  const chips = open
+    ? [
+        ["a", "0,0,90,30"],
+        ["x", "100,0,90,30"],
+        ["y", "200,0,90,30"],
+        ["b", "0,40,90,30"],
+      ]
+    : [
+        ["a", "0,0,90,30"],
+        ["b", "100,0,90,30"],
+      ];
+  return (
+    <>
+      <div ref={ref} data-box={open ? "0,0,300,70" : "0,0,300,30"}>
+        {chips.map(([key, box]) => (
+          <span key={key} data-box={box}>
+            {key}
+          </span>
+        ))}
+      </div>
+      <button
+        type="button"
+        onClick={() => {
+          capture(open ? { duration: 300, easing: "ease-in-out" } : undefined);
+          setOpen((o) => !o);
+        }}
+      >
+        toggle
+      </button>
+    </>
+  );
+}
+
 /** Two layouts of the same chips: B moves down a row, C goes, N arrives, the row grows. */
 function Chips() {
   const ref = useRef<HTMLDivElement>(null);
@@ -119,6 +157,18 @@ describe("useFlip", () => {
       "n",
       "b",
     ]);
+  });
+
+  it("folds shut with the timing it is given, the chips that came in last leaving first", () => {
+    act(() => root.render(<Fold />));
+    toggle();
+    // The moves and the height take the fold's timing.
+    expect(callFor("b")?.options).toMatchObject({ duration: 300, easing: "ease-in-out" });
+    const row = calls.find((c) => c.el === host.querySelector("div"));
+    expect(row?.options).toMatchObject({ duration: 300, easing: "ease-in-out" });
+    // The fades keep their own, cascading back from the end: y came in after x, so it goes first.
+    expect(callFor("y")?.options).toMatchObject({ duration: 180, delay: 0 });
+    expect(callFor("x")?.options).toMatchObject({ duration: 180, delay: 20 });
   });
 
   it("lands at once under reduced motion", () => {

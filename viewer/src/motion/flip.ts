@@ -15,13 +15,20 @@ interface Box {
   height: number;
 }
 
+/** How the moves and the height run. Fades keep the overlay timing and their cascade. */
+export interface FlipTiming {
+  duration: number;
+  easing: string;
+}
+
 interface Snapshot {
   boxes: Map<Element, Box>;
   height: number;
+  timing: FlipTiming;
 }
 
 /** Each child's box, relative to the container's padding box (where absolute children sit). */
-function measure(container: HTMLElement): Snapshot {
+function measure(container: HTMLElement): Omit<Snapshot, "timing"> {
   const base = container.getBoundingClientRect();
   const left = base.left + container.clientLeft;
   const top = base.top + container.clientTop;
@@ -35,7 +42,8 @@ function measure(container: HTMLElement): Snapshot {
 
 function play(container: HTMLElement, before: Snapshot): void {
   const after = measure(container);
-  const timing = { duration: duration.overlay, easing: easing.standard };
+  const fade = { duration: duration.overlay, easing: easing.standard };
+  const timing = before.timing;
   let entering = 0;
   for (const [child, box] of after.boxes) {
     if (!(child instanceof HTMLElement)) continue;
@@ -47,7 +55,7 @@ function play(container: HTMLElement, before: Snapshot): void {
           { opacity: 1, transform: "none" },
         ],
         {
-          ...timing,
+          ...fade,
           delay: staggerDelay(entering),
           fill: "backwards",
         },
@@ -61,9 +69,13 @@ function play(container: HTMLElement, before: Snapshot): void {
       child.animate([{ transform: `translate(${dx}px, ${dy}px)` }, { transform: "none" }], timing);
     }
   }
-  // React has already taken removed children out; a copy of each fades where it stood.
-  for (const [child, was] of before.boxes) {
-    if (after.boxes.has(child) || !(child instanceof HTMLElement)) continue;
+  // React has already taken removed children out; a copy of each fades where it stood, the
+  // last first, so they leave in the reverse of the order they came in.
+  const removed = [...before.boxes].filter(
+    (entry): entry is [HTMLElement, Box] =>
+      !after.boxes.has(entry[0]) && entry[0] instanceof HTMLElement,
+  );
+  for (const [i, [child, was]] of removed.entries()) {
     const ghost = child.cloneNode(true) as HTMLElement;
     ghost.removeAttribute("id");
     for (const el of ghost.querySelectorAll("[id]")) el.removeAttribute("id");
@@ -79,11 +91,12 @@ function play(container: HTMLElement, before: Snapshot): void {
       pointerEvents: "none",
     });
     container.append(ghost);
-    const fade = ghost.animate([{ opacity: 1 }, { opacity: 0, transform: "scale(0.96)" }], {
-      ...timing,
-      fill: "forwards",
+    const out = ghost.animate([{ opacity: 1 }, { opacity: 0, transform: "scale(0.96)" }], {
+      ...fade,
+      delay: staggerDelay(removed.length - 1 - i),
+      fill: "both",
     });
-    fade.finished.then(
+    out.finished.then(
       () => ghost.remove(),
       () => ghost.remove(),
     );
@@ -99,8 +112,14 @@ function play(container: HTMLElement, before: Snapshot): void {
   }
 }
 
-/** Returns capture(): call it right before a change whose reflow should animate. */
-export function useFlip(ref: RefObject<HTMLElement | null>): () => void {
+/**
+ * Returns capture(): call it right before a change whose reflow should animate. Pass a timing
+ * for the moves and the height when the change wants its own, such as a fold that closes
+ * slower than it opens; otherwise they take the overlay timing.
+ */
+export function useFlip(
+  ref: RefObject<HTMLElement | null>,
+): (timing?: Partial<FlipTiming>) => void {
   const snapshot = useRef<Snapshot | null>(null);
 
   // After every commit: a waiting snapshot means this commit is the change to animate.
@@ -111,14 +130,23 @@ export function useFlip(ref: RefObject<HTMLElement | null>): () => void {
     if (ref.current) play(ref.current, before);
   });
 
-  return useCallback(() => {
-    const container = ref.current;
-    if (!container || prefersReducedMotion() || typeof container.animate !== "function") return;
-    const taken = measure(container);
-    snapshot.current = taken;
-    // A click that changes nothing commits nothing: drop the snapshot before it goes stale.
-    requestAnimationFrame(() => {
-      if (snapshot.current === taken) snapshot.current = null;
-    });
-  }, [ref]);
+  return useCallback(
+    (timing?: Partial<FlipTiming>) => {
+      const container = ref.current;
+      if (!container || prefersReducedMotion() || typeof container.animate !== "function") return;
+      const taken: Snapshot = {
+        ...measure(container),
+        timing: {
+          duration: timing?.duration ?? duration.overlay,
+          easing: timing?.easing ?? easing.standard,
+        },
+      };
+      snapshot.current = taken;
+      // A click that changes nothing commits nothing: drop the snapshot before it goes stale.
+      requestAnimationFrame(() => {
+        if (snapshot.current === taken) snapshot.current = null;
+      });
+    },
+    [ref],
+  );
 }

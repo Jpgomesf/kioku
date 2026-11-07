@@ -10,11 +10,15 @@ export const duration = {
   press: 120,
   overlay: 180,
   view: 240,
+  /** A row folding shut (Fewer types): slower than opening, which its cascade already lengthens. */
+  fold: 300,
   zoom: 650,
 } as const;
 
 export const easing = {
   standard: "cubic-bezier(0, 0, 0.2, 1)",
+  /** Eases in as well as out, so a fold is seen closing rather than snapping shut. */
+  inOut: "cubic-bezier(0.4, 0, 0.2, 1)",
   zoom: "cubic-bezier(0.2, 0.7, 0.2, 1)",
 } as const;
 

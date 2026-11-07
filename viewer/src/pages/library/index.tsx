@@ -38,7 +38,7 @@ import {
   StatusPill,
   showToast,
 } from "../../components/ui";
-import { useFlip } from "../../motion";
+import { duration, easing, useFlip } from "../../motion";
 import { latestFinished } from "../reflect/state";
 import {
   areaLabel,
@@ -73,6 +73,8 @@ export interface LibraryPageProps {
 
 /** Rows rendered at a time; more are added on request, so 1,600 notes stay fast. */
 const PAGE = 100;
+/** Fewer types: the chips fold away slower than More types brings them in. */
+const FOLD = { duration: duration.fold, easing: easing.inOut };
 const SEARCH_DELAY_MS = 200;
 const rowId = (key: string) => `library-row-${key}`;
 
@@ -461,7 +463,8 @@ export function LibraryPage({ params }: LibraryPageProps) {
               className="k-btn k-btn-quiet k-btn-sm"
               aria-expanded={typesExpanded}
               onClick={() => {
-                flipFilters();
+                // Closing folds slower than opening, whose cascade already lengthens it.
+                flipFilters(typesExpanded ? FOLD : undefined);
                 setExpandedFor(typesExpanded ? null : domain);
               }}
             >
