@@ -1,8 +1,9 @@
-// Global shortcuts: ⌘K toggles the palette, ⌘O the area switcher (Ctrl+K and Ctrl+O on other
-// systems; on macOS Ctrl keeps its text-editing meaning). Escape closes whichever overlay is
-// open. Keys typed through an input method are left alone.
+// Global shortcuts: ⌘K toggles the palette, ⌘O the area switcher and ⌘\ the sidebar (Ctrl
+// on other systems; on macOS Ctrl keeps its text-editing meaning). Escape closes whichever
+// overlay is open. Keys typed through an input method are left alone.
 import { useEffect } from "react";
 import { closeOverlay, currentOverlay, hasCommandKey, toggleOverlay } from "./overlay";
+import { toggleSidebar } from "./sidebar";
 
 export function useGlobalShortcuts(): void {
   useEffect(() => {
@@ -21,6 +22,9 @@ export function useGlobalShortcuts(): void {
       } else if (key === "o") {
         event.preventDefault();
         toggleOverlay("area-switcher");
+      } else if (key === "\\") {
+        event.preventDefault();
+        toggleSidebar();
       }
     };
     window.addEventListener("keydown", onKey);

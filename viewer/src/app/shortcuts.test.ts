@@ -3,6 +3,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { closeOverlay, currentOverlay, isMac } from "./overlay";
 import { useGlobalShortcuts } from "./shortcuts";
+import { resetSidebar, useSidebarCollapsed } from "./sidebar";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -11,6 +12,10 @@ let root: Root;
 function Host() {
   useGlobalShortcuts();
   return null;
+}
+
+function SidebarProbe() {
+  return createElement("span", null, useSidebarCollapsed() ? "rail" : "panel");
 }
 
 beforeEach(() => {
@@ -54,5 +59,16 @@ describe("global shortcuts", () => {
   it("leaves input-method keys alone", () => {
     press("k", { ...mod(), isComposing: true });
     expect(currentOverlay()).toBeNull();
+  });
+  it("collapses and expands the sidebar", () => {
+    const host = document.createElement("div");
+    const probe = createRoot(host);
+    act(() => probe.render(createElement(SidebarProbe)));
+    press("\\", mod());
+    expect(host.textContent).toBe("rail");
+    press("\\", mod());
+    expect(host.textContent).toBe("panel");
+    act(() => probe.unmount());
+    resetSidebar();
   });
 });

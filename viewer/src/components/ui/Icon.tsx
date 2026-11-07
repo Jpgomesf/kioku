@@ -107,6 +107,13 @@ const paths = {
     </>
   ),
   play: <path d="M8 5.5v13l10-6.5z" />,
+  // A window with a side panel: shows or hides the sidebar.
+  sidebar: (
+    <>
+      <rect x="3.5" y="4.5" width="17" height="15" rx="2.5" />
+      <path d="M9.5 4.5v15" />
+    </>
+  ),
   // A wand with a sparkle at its tip: Obsidian's Animate.
   wand: (
     <>

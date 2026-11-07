@@ -97,6 +97,7 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
     items: [
       { keys: ["⌘K"], label: "Search notes and commands" },
       { keys: ["⌘O"], label: "Switch area" },
+      { keys: ["⌘\\"], label: "Collapse or expand the sidebar" },
     ],
   },
   {

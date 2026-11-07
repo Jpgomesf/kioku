@@ -64,9 +64,49 @@ body {
   flex: 1 0 auto;
   padding: 40px 48px;
 }
+/* The sidebar keeps its width. As a flex item it would shrink to make room for a page's
+   longest unbroken line (the Library preview keeps note text unwrapped), clipping its labels. */
 .k-sidebar {
+  flex: none;
   min-height: 0;
   overflow-y: auto;
+}
+.sidebar-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-8);
+}
+/* Collapsed (app/sidebar.ts): a rail of icons, with the names as tooltips. */
+.k-sidebar[data-collapsed] {
+  width: 56px;
+  padding: var(--space-16) var(--space-8);
+  overflow-x: hidden;
+}
+.k-sidebar[data-collapsed] .sidebar-top,
+.k-sidebar[data-collapsed] .sidebar-recent-head {
+  justify-content: center;
+  padding: 0;
+}
+.k-sidebar[data-collapsed] .k-nav-item,
+.k-sidebar[data-collapsed] .sidebar-services-toggle {
+  position: relative;
+  justify-content: center;
+  padding: 0;
+}
+.k-sidebar[data-collapsed] .sidebar-chevron {
+  display: none;
+}
+/* The count sits on the icon's corner. */
+.k-sidebar[data-collapsed] .k-nav-badge {
+  position: absolute;
+  top: 1px;
+  right: 1px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 var(--space-4);
+  font-size: 10px;
+  line-height: 16px;
 }
 fieldset.k-seg {
   margin: 0;

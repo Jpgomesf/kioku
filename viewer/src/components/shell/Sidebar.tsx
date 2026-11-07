@@ -15,6 +15,7 @@ import {
 import { pickArea, reconcileAreas, useCurrentArea, useRecentAreas } from "../../app/area";
 import { refreshAreas } from "../../app/overlay";
 import type { Route } from "../../app/router";
+import { toggleSidebar, useSidebarCollapsed } from "../../app/sidebar";
 import { confirmedOpen } from "../../pages/reflect/state";
 import { useOpenRequestCount } from "../../pages/vaults/draft";
 import { openAreaSwitcher } from "../area-switcher";
@@ -126,6 +127,8 @@ export function Sidebar({ route }: SidebarProps) {
   const [services, setServices] = useState<ServicesView>({ kind: "loading" });
   const [findingBadge, setFindingBadge] = useState(0);
   const requestBadge = useOpenRequestCount();
+  // Collapsed, the sidebar is a rail of icons: names become tooltips and stay readable.
+  const collapsed = useSidebarCollapsed();
   const badges = { findings: findingBadge, requests: requestBadge };
   // The findings badge reloads when Reflect or Health opens, where runs change.
   const onReflectOrHealth = route.name === "reflect" || route.name === "health";
@@ -213,10 +216,24 @@ export function Sidebar({ route }: SidebarProps) {
   const recent = [...new Set([currentDomain, ...recentDomains, ...areas.map((a) => a.domain)])]
     .filter((d) => areas.length === 0 || listed.has(d))
     .slice(0, 3);
+  const toggleLabel = collapsed ? "Expand the sidebar (⌘\\)" : "Collapse the sidebar (⌘\\)";
   return (
-    <nav className="k-sidebar" aria-label="Views and areas">
-      <div className="k-brand">
-        Kioku <span lang="ja">記憶</span>
+    <nav className="k-sidebar" aria-label="Views and areas" data-collapsed={collapsed || undefined}>
+      <div className="sidebar-top">
+        {collapsed ? null : (
+          <div className="k-brand">
+            Kioku <span lang="ja">記憶</span>
+          </div>
+        )}
+        <button
+          type="button"
+          className="k-btn k-btn-icon"
+          aria-label={toggleLabel}
+          title={toggleLabel}
+          onClick={toggleSidebar}
+        >
+          <Icon name="sidebar" />
+        </button>
       </div>
       <div className="k-nav">
         {NAV.map((item) => {
@@ -227,10 +244,11 @@ export function Sidebar({ route }: SidebarProps) {
               key={item.href}
               className="k-nav-item"
               href={item.href}
+              title={collapsed ? item.label : undefined}
               aria-current={item.matches.includes(route.name) ? "page" : undefined}
             >
               <Icon name={item.icon} size={18} />
-              {item.label}
+              <span className={collapsed ? "k-sr" : undefined}>{item.label}</span>
               {words && n > 0 ? (
                 <span className="k-nav-badge">
                   {n}
@@ -243,7 +261,7 @@ export function Sidebar({ route }: SidebarProps) {
       </div>
       <div className="k-areas">
         <div className="sidebar-recent-head">
-          <span className="k-section-label">Recent areas</span>
+          {collapsed ? null : <span className="k-section-label">Recent areas</span>}
           <button
             type="button"
             className="k-btn k-btn-icon"
@@ -255,7 +273,7 @@ export function Sidebar({ route }: SidebarProps) {
             <Icon name="search" />
           </button>
         </div>
-        {recent.map((domain) => {
+        {(collapsed ? [] : recent).map((domain) => {
           const { label, vault } = areaLabel(domain, areas);
           return (
             <button
@@ -272,31 +290,41 @@ export function Sidebar({ route }: SidebarProps) {
           );
         })}
       </div>
-      <ServicesLine services={services} />
+      <ServicesLine services={services} collapsed={collapsed} />
     </nav>
   );
 }
 
-function ServicesLine({ services }: { services: ServicesView }) {
+function ServicesLine({ services, collapsed }: { services: ServicesView; collapsed: boolean }) {
   const [open, setOpen] = useState(false);
   const panelId = useId();
   const summary = servicesSummary(services);
+  // The rail has room for the dot only: a click there expands the sidebar with the details.
+  const shown = open && !collapsed;
   return (
-    <div className="sidebar-services" data-state={summary.tone} data-open={open || undefined}>
+    <div className="sidebar-services" data-state={summary.tone} data-open={shown || undefined}>
       <button
         type="button"
         className="sidebar-services-toggle"
-        aria-expanded={open}
+        aria-expanded={shown}
         aria-controls={panelId}
-        onClick={() => setOpen((o) => !o)}
+        title={collapsed ? summary.text : undefined}
+        onClick={() => {
+          if (collapsed) {
+            toggleSidebar();
+            setOpen(true);
+          } else {
+            setOpen((o) => !o);
+          }
+        }}
       >
         <span className="k-dot" />
-        <span className="k-grow" role="status" aria-live="polite">
+        <span className={collapsed ? "k-sr" : "k-grow"} role="status" aria-live="polite">
           {summary.text}
         </span>
         <Icon name="chevron" className="sidebar-chevron" />
       </button>
-      <div className="sidebar-services-panel" id={panelId} inert={!open}>
+      <div className="sidebar-services-panel" id={panelId} inert={!shown}>
         <div className="sidebar-services-inner">
           {services.kind === "ok" ? <ServiceDetails status={services.status} /> : null}
           {services.kind === "error" ? (
