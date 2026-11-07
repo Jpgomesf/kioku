@@ -40,6 +40,7 @@ use crate::model::NoteInput;
 use crate::text::truncate_chars;
 
 use concept::Concept;
+pub use concept::{imported_type, type_tag};
 use links::{Target, Targets};
 
 /// The largest note an OKF import writes, facts line included. It keeps a

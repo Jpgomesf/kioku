@@ -1,0 +1,51 @@
+# cargo-deny configuration for the Kioku Viewer. Run from the repo root:
+#   cargo deny --manifest-path viewer/src-tauri/Cargo.toml --locked --config viewer/deny.toml check
+# Kept apart from the root deny.toml so the viewer's wider graph (Tauri, WebKit glue)
+# never loosens the policy that guards the kioku crate.
+
+[graph]
+# The viewer ships only as a macOS bundle. Leaving Linux out keeps Tauri's gtk3 stack,
+# which is never built, out of the advisory and license checks.
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+]
+
+[advisories]
+yanked = "deny"
+ignore = []
+
+[licenses]
+# The root list plus MPL-2.0, which Servo's cssparser, selectors and dtoa-short
+# (pulled in by Tauri) and option-ext use. MPL-2.0 is file-level copyleft and fine to link.
+allow = [
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "ISC",
+    "MIT",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Zlib",
+]
+exceptions = [
+    # Mozilla's CA bundle is published as data under CDLA-Permissive-2.0.
+    { allow = ["CDLA-Permissive-2.0"], crate = "webpki-roots" },
+    { allow = ["CDLA-Permissive-2.0"], crate = "webpki-root-certs" },
+]
+confidence-threshold = 0.93
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# The viewer depends on the kioku crate by path; that is not a registry wildcard.
+allow-wildcard-paths = true
+highlight = "all"
+deny = [
+    { crate = "openssl-sys", reason = "TLS is rustls-only; keep system OpenSSL out of the binary" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

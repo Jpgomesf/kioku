@@ -1,0 +1,49 @@
+[package]
+name = "kioku-viewer"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+description = "Kioku Viewer: browse and govern Kioku memory"
+license = "MIT"
+publish = false
+
+# Standalone package, kept out of the root crate's build.
+[workspace]
+
+[lib]
+name = "kioku_viewer_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "=2.7.4", features = [] }
+
+[dependencies]
+tauri = { version = "=2.12.5", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1.54", features = ["macros", "rt-multi-thread", "sync", "time"] }
+thiserror = "2.0.21"
+anyhow = "1.0.104"
+kioku = { path = "../.." }
+chrono = { version = "0.4.45", features = ["serde"] }
+dotenvy = "0.15.7"
+toml = { version = "1.1.8", default-features = false, features = ["std", "parse", "serde"] }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls-aws-lc-rs", "postgres", "uuid"] }
+uuid = { version = "1.29", features = ["v5", "serde"] }
+
+# Touch ID, or the Mac password, before a visibility change is written (src/auth.rs). The
+# crate holds LocalAuthentication's unsafe calls, so this one keeps forbidding unsafe code.
+[target.'cfg(target_os = "macos")'.dependencies]
+robius-authentication = "0.3.1"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+await_holding_lock = "deny"
+dbg_macro = "warn"
+expect_used = "warn"
+print_stdout = "warn"
+todo = "warn"
+unwrap_used = "warn"

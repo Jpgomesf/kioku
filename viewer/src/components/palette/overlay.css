@@ -1,0 +1,148 @@
+/* Overlay open and close: fade and scale. Duration and easing are set inline from src/motion. */
+@keyframes k-overlay-in {
+  from {
+    opacity: 0;
+    transform: scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+@keyframes k-overlay-out {
+  from {
+    opacity: 1;
+    transform: scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: scale(0.97);
+  }
+}
+/* The Dialog panel is a bare shell; the animated inner panel carries the look. */
+.k-overlay-shell {
+  outline: none;
+  max-width: 100%;
+}
+.k-overlay-shell:focus-visible {
+  outline: 2px solid var(--focus);
+  border-radius: var(--radius-overlay);
+}
+.k-area-panel {
+  display: flex;
+  flex-direction: column;
+  width: 420px;
+  max-width: 100%;
+  box-sizing: border-box;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-overlay);
+  background: var(--surface);
+  box-shadow: var(--shadow-overlay);
+}
+.k-palette-meta {
+  display: block;
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--muted);
+}
+.k-palette-item[aria-selected="true"] .k-palette-meta {
+  color: var(--accent-ink);
+}
+.k-palette-empty {
+  margin: 0;
+  padding: var(--space-10) var(--space-16);
+  color: var(--muted);
+}
+.k-palette-empty:empty {
+  display: none;
+}
+.k-palette-item:focus-visible,
+.k-area-option:focus-visible {
+  outline: 2px solid var(--focus);
+}
+
+/* The scrim fades with the panel. base.css cancels animations under reduced motion. */
+@keyframes k-scrim-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes k-scrim-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+.app-scrim:has(> .k-overlay-shell) {
+  animation: k-scrim-in var(--duration-overlay) cubic-bezier(0, 0, 0.2, 1) both;
+}
+.app-scrim:has(> .k-overlay-shell [data-closing]) {
+  animation-name: k-scrim-out;
+  pointer-events: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .app-scrim:has(> .k-overlay-shell) {
+    animation: none;
+  }
+}
+/* Keep the shadow: the shell does not clip; the lists scroll instead. */
+.app-scrim > .k-overlay-shell[role="dialog"] {
+  overflow: visible;
+  max-height: none;
+}
+.k-overlay-shell .k-palette-list {
+  max-height: min(60vh, 480px);
+  overflow-y: auto;
+}
+
+/* Scope chip: the area in fg-2, then a muted "in <vault>". */
+.k-palette-scope {
+  flex: none;
+  max-width: 45%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 2px var(--space-8);
+  border-radius: var(--radius-chip);
+  background: var(--sunken);
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--muted);
+}
+.k-palette-scope-area {
+  color: var(--fg-2);
+}
+
+/* Note rows: a fixed key column, wrapped titles, top aligned with the matched-by line. */
+.k-palette-item:has(.k-palette-meta) {
+  align-items: flex-start;
+  padding-block: var(--space-10);
+}
+.k-overlay-shell .k-palette-item .k-mono {
+  flex: 0 0 64px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.k-overlay-shell .k-palette-item .k-grow {
+  white-space: normal;
+}
+.k-palette-item[aria-selected="true"] .k-palette-title {
+  font-weight: 600;
+}
+.k-palette-foot-end {
+  margin-left: auto;
+}
+
+/* The current area keeps its mark while the highlight moves. */
+.k-area-option[aria-current="true"] .k-grow {
+  font-weight: 600;
+}
+.k-area-option[aria-current="true"]:not([aria-selected="true"]) {
+  color: var(--accent-ink);
+}

@@ -1,0 +1,347 @@
+/* Graph page. Colours and motion come from tokens.css and motion.css. */
+.graph-page {
+  min-width: 0;
+}
+.graph-main {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+/* Loading and load errors: centred where the canvas will be. */
+.graph-empty {
+  display: grid;
+  flex: 1 1 auto;
+  place-items: center;
+  padding: var(--space-32);
+}
+
+/* The canvas fills the page; the area button, the inspector and the settings float over it,
+   as in Obsidian. They sit beside the stage, not in it, so its wheel and drag handlers leave them be. */
+.graph-body {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+}
+.graph-float {
+  position: absolute;
+  z-index: 4;
+}
+.graph-float-settings {
+  top: var(--space-12);
+  right: var(--space-12);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--space-8);
+  max-height: calc(100% - 2 * var(--space-12));
+}
+/* The current area at the top left, the way into the area picker. */
+.graph-float-area {
+  top: var(--space-12);
+  left: var(--space-12);
+  max-width: calc(100% - 2 * var(--space-12) - 48px);
+}
+.graph-float-area > * {
+  max-width: 100%;
+  background: var(--surface);
+  box-shadow: var(--shadow-overlay);
+}
+/* The canvas's own controls above the box: Fit, then the settings gear. */
+/* Two columns, so the wand can sit under the gear while the box is closed. */
+.graph-tools {
+  display: grid;
+  grid-template-columns: auto auto;
+  flex: none;
+  gap: var(--space-4);
+}
+.graph-tool-animate {
+  grid-column: 2;
+}
+.graph-tool {
+  background: var(--surface);
+  box-shadow: var(--shadow-overlay);
+}
+/* The gear is a toggle: it looks pressed while the box is open. */
+.graph-settings-button[aria-expanded="true"],
+.graph-settings-button[aria-expanded="true"]:hover {
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+}
+/* A flex column that never scrolls itself: the inspector's links scroll inside it, under its
+   header and actions. It stops below the area button, so the title is never under it. */
+.graph-float-inspector {
+  left: var(--space-12);
+  bottom: var(--space-12);
+  display: flex;
+  flex-direction: column;
+  width: min(320px, calc(100% - 2 * var(--space-12)));
+  max-height: calc(100% - 2 * var(--space-12) - var(--size-button-lg) - var(--space-8));
+  box-sizing: border-box;
+  padding: var(--space-12);
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+  background: var(--surface);
+  box-shadow: var(--shadow-overlay);
+}
+
+.graph-stage {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 320px;
+  overflow: hidden;
+  /* The canvas: a quiet dot grid tied to the camera (see dotGrid in camera.ts). */
+  background-color: var(--bg);
+  background-image: radial-gradient(circle, var(--graph-dot) 1px, transparent 1.5px);
+  background-size: var(--dot-gap, 24px) var(--dot-gap, 24px);
+  background-position: var(--dot-x, 0) var(--dot-y, 0);
+  /* The page sets grab over a note, which can be dragged, and grabbing while it is. */
+  cursor: default;
+  touch-action: none;
+  user-select: none;
+}
+.graph-stage:focus-visible {
+  outline: var(--focus-width) solid var(--focus);
+  outline-offset: calc(-1 * var(--focus-width));
+}
+.graph-live {
+  cursor: grabbing;
+}
+/* The renderer's canvas fills the stage; CSS sizes it and renderer.resize sizes its backing
+   store. Pointer events go to the stage, which picks notes through the renderer. */
+.graph-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  transition: opacity var(--duration-zoom) var(--ease-zoom);
+}
+/* The HTML overlay is in screen space; placer.ts sets each element's transform per frame. */
+.graph-html {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.graph-focus-edges {
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+.graph-stage-empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+}
+.graph-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.graph-html > * {
+  position: absolute;
+  top: 0;
+  left: 0;
+  transform-origin: 50% 50%;
+}
+
+/* Only opacity transitions: positions follow the camera frame by frame from placer.ts. */
+.graph-html > * {
+  transition: opacity var(--duration-view) var(--ease-standard);
+}
+@media (prefers-reduced-motion: reduce) {
+  .graph-canvas,
+  .graph-html > * {
+    transition: none;
+  }
+}
+
+.graph-status {
+  position: absolute;
+  z-index: 3;
+  top: var(--space-12);
+  left: 50%;
+  margin: 0;
+  padding: var(--space-4) var(--space-8);
+  border-radius: var(--radius-mark);
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 16px;
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+/* A focus from the URL that isn't in the area: under the arranging line, and readable. */
+.graph-notice {
+  top: calc(var(--space-12) + 32px);
+  max-width: min(480px, calc(100% - 2 * var(--space-16)));
+  color: var(--fg-2);
+  box-shadow: var(--shadow-overlay);
+}
+
+.graph-edge-strong {
+  stroke: var(--muted);
+  stroke-width: 1.5;
+}
+.graph-edge-suggested {
+  stroke: var(--warn-strong);
+  stroke-dasharray: 5 4;
+}
+/* Superseded notes: a neutral dash. Amber stays for reflect's findings. */
+.graph-edge-legacy {
+  stroke: var(--muted);
+  stroke-dasharray: 4 4;
+}
+/* A type hovered in the legend: the other cards' lines step back. Cards set their own
+   opacity inline, since their show and hide opacity is inline too. */
+.graph-edge-strong {
+  transition: opacity var(--duration-view) var(--ease-standard);
+}
+.graph-edge-strong.graph-dim {
+  opacity: 0.35;
+}
+@media (prefers-reduced-motion: reduce) {
+  .graph-edge-strong {
+    transition: none;
+  }
+}
+
+.graph-dot-label {
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 16px;
+  white-space: nowrap;
+}
+.graph-edge-label {
+  padding: 0 var(--space-6);
+  border-radius: var(--radius-mark);
+  background: var(--bg);
+  color: var(--fg-2);
+  font-size: 12px;
+  line-height: 16px;
+  white-space: nowrap;
+}
+.graph-edge-label-suggested {
+  color: var(--warn-ink-2);
+}
+
+.graph-card {
+  width: 200px;
+  text-decoration: none;
+}
+.graph-card-focus {
+  width: 240px;
+  z-index: 1;
+  padding: 9px 11px;
+  border: 2px solid var(--accent);
+  background: var(--accent-soft);
+}
+.graph-card-focus .k-node-kind {
+  color: var(--accent-ink);
+}
+.graph-card-group {
+  border-style: dashed;
+}
+.graph-card-legacy {
+  border-style: dashed;
+  color: var(--fg-2);
+}
+.graph-card-legacy .k-node-title {
+  color: var(--muted);
+}
+.graph-card:focus-visible {
+  outline: var(--focus-width) solid var(--focus);
+  outline-offset: var(--focus-offset);
+}
+.graph-kind-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: var(--space-6);
+  border-radius: 50%;
+  vertical-align: 0;
+}
+/* Bottom right, clear of the inspector at the bottom left. */
+.graph-hint {
+  position: absolute;
+  right: var(--space-16);
+  bottom: var(--space-12);
+  max-width: calc(100% - 2 * var(--space-16));
+  margin: 0;
+  padding: var(--space-4) var(--space-8);
+  border-radius: var(--radius-mark);
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 16px;
+  pointer-events: none;
+  transition: opacity var(--duration-overlay) var(--ease-standard);
+}
+/* After its first showing the hint is only the stage's description for screen readers. */
+.graph-hint[data-gone] {
+  opacity: 0;
+}
+/* While the settings box is open the hint sits left of it, not under it. */
+.graph-body-settings .graph-hint {
+  right: calc(min(300px, 100vw - 48px) + 2 * var(--space-12));
+  max-width: calc(100% - min(300px, 100vw - 48px) - 2 * var(--space-12) - var(--space-16));
+}
+
+.graph-link {
+  display: flex;
+  width: 100%;
+  gap: var(--space-8);
+  align-items: baseline;
+  padding: var(--space-6) var(--space-8);
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+.graph-link:hover {
+  background: var(--surface-2);
+}
+.graph-link:focus-visible {
+  outline: var(--focus-width) solid var(--focus);
+  outline-offset: calc(-1 * var(--focus-width));
+}
+.graph-links {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.graph-link {
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.graph-link-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-6);
+  color: var(--fg-2);
+  font-size: 12px;
+}
+.graph-links-suggested .graph-link-rel {
+  color: var(--warn-ink-2);
+}
+.graph-link-title {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}

@@ -1,0 +1,13 @@
+/* The viewer's motion values for CSS; keep in step with motion/index.ts. */
+:root {
+  --duration-view: 240ms;
+  --duration-zoom: 650ms;
+  --ease-standard: cubic-bezier(0, 0, 0.2, 1);
+  --ease-zoom: cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --duration-view: 0ms;
+    --duration-zoom: 0ms;
+  }
+}

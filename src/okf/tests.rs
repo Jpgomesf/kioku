@@ -662,3 +662,140 @@ fn a_locked_concepts_name_never_reaches_an_unlocked_note() {
             .contains("this (SEC-1)")
     );
 }
+
+fn plain_input(body: &str, tags: &[&str]) -> NoteInput {
+    NoteInput {
+        domain: "d".into(),
+        key: "k".into(),
+        title: "t".into(),
+        body: body.into(),
+        aliases: vec![],
+        related: vec![],
+        tags: tags.iter().map(|t| (*t).to_owned()).collect(),
+        source: None,
+        confidence: 0.8,
+        pinned: false,
+        lock: vec![],
+    }
+}
+
+#[test]
+fn type_tags_join_words_with_single_hyphens() {
+    assert_eq!(type_tag("Design Review"), "design-review");
+    assert_eq!(type_tag("  --Pull  Request!-- "), "pull-request");
+    assert_eq!(type_tag("ADR"), "adr");
+    assert_eq!(type_tag(" - "), "");
+}
+
+#[test]
+fn the_imported_type_is_read_back_from_the_facts_line() {
+    let tree = small_bundle(&[
+        (
+            "kb/review.md",
+            "---\ntype: Design Review\nid: DR-12\ntags: [api, review]\n---\nWe reviewed it.\n",
+        ),
+        (
+            "kb/tagged.md",
+            "---\ntype: Runbook\ntags: [runbook, ops]\nverified: { by: \"human:ana\", at: 2026-11-04T10:00:00Z }\n---\nSteps.\n",
+        ),
+        (
+            "kb/draft.md",
+            "---\ntype: Decision\nid: D-1\nstatus: draft\n---\nMaybe.\n",
+        ),
+        (
+            "kb/old.md",
+            "---\ntype: Decision\nstatus: deprecated\n---\nNo longer.\n",
+        ),
+        ("kb/plain.md", "---\ntitle: Plain\n---\nNo type here.\n"),
+        ("kb/architecture.md", &long_topic()),
+    ]);
+    let conversion = converted(&tree);
+    let found = |key: &str| imported_type(&note(&conversion, key).input);
+    assert_eq!(found("kb/review").as_deref(), Some("design-review"));
+    assert_eq!(found("kb/tagged").as_deref(), Some("runbook"));
+    assert_eq!(found("kb/draft").as_deref(), Some("decision"));
+    assert_eq!(found("kb/old").as_deref(), Some("decision"));
+    assert_eq!(found("kb/plain").as_deref(), Some("concept"));
+    assert_eq!(found("kb/architecture").as_deref(), Some("architecture"));
+    assert_eq!(
+        found("kb/architecture#router").as_deref(),
+        Some("architecture")
+    );
+}
+
+#[test]
+fn a_concept_keyed_by_its_own_id_still_has_its_type() {
+    // At the bundle root, a file named after its producer id gets that id as
+    // its key, and the import drops the alias that would repeat the key.
+    let tree = small_bundle(&[(
+        "DR-12.md",
+        "---\ntype: Design Review\nid: DR-12\n---\nWe reviewed it.\n",
+    )]);
+    let conversion = converted(&tree);
+    let input = &note(&conversion, "DR-12").input;
+    assert!(input.aliases.is_empty());
+    assert_eq!(imported_type(input).as_deref(), Some("design-review"));
+}
+
+#[test]
+fn producer_ids_with_a_hash_keep_their_type() {
+    let tree = small_bundle(&[
+        ("kb/issue.md", "---\ntype: Epic\nid: \"#123\"\n---\nWork.\n"),
+        ("kb/rfc.md", "---\ntype: Proposal\nid: RFC#7\n---\nIdea.\n"),
+    ]);
+    let conversion = converted(&tree);
+    let found = |key: &str| imported_type(&note(&conversion, key).input);
+    assert_eq!(found("kb/issue").as_deref(), Some("epic"));
+    assert_eq!(found("kb/rfc").as_deref(), Some("proposal"));
+}
+
+#[test]
+fn a_type_the_label_limit_cut_is_not_found() {
+    // 64 own tags, one of them a word of the type: the type tag is cut, and a
+    // shorter prefix must not stand in for it.
+    let mut tags: Vec<String> = (1..64).map(|n| format!("t{n}")).collect();
+    tags.push("design".into());
+    let text = format!(
+        "---\ntype: Design Review\nid: DR-7\ntags: [{}]\n---\nWe reviewed it.\n",
+        tags.join(", ")
+    );
+    let tree = small_bundle(&[("kb/review.md", &text)]);
+    let conversion = converted(&tree);
+    let input = &note(&conversion, "kb/review").input;
+    assert!(!input.tags.iter().any(|t| t == "design-review"));
+    assert_eq!(imported_type(input), None);
+}
+
+#[test]
+fn notes_the_import_did_not_write_have_no_imported_type() {
+    assert_eq!(
+        imported_type(&plain_input("Memory · notes\nMore.", &["memory"])),
+        None
+    );
+    assert_eq!(imported_type(&plain_input("", &["decision"])), None);
+    // A trust label alone is not enough: the type must be among the tags.
+    assert_eq!(
+        imported_type(&plain_input("Runbook · unverified", &["ops"])),
+        None
+    );
+}
+
+#[test]
+fn every_trust_label_is_recognised_in_a_facts_line() {
+    use concept::{Trust, is_trust_label};
+    for trust in [
+        Trust::Unverified,
+        Trust::MachineConfirmed,
+        Trust::HumanReviewed {
+            by: "human:ana".into(),
+            at: None,
+        },
+        Trust::HumanReviewed {
+            by: "human:ana".into(),
+            at: Some("2026-11-04T10:00:00Z".into()),
+        },
+    ] {
+        assert!(is_trust_label(&trust.label()), "{trust:?}");
+    }
+    assert!(!is_trust_label("notes"));
+}

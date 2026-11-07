@@ -1,0 +1,425 @@
+/* App-wide base styles. Tokens and components load first. */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+html,
+body,
+#root {
+  height: 100%;
+}
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 20px;
+  background: var(--bg);
+  color: var(--fg);
+  -webkit-font-smoothing: antialiased;
+}
+/* Zero specificity, so component classes (.k-btn, .k-nav-item) always win. */
+:where(a) {
+  color: var(--accent);
+}
+/* Not on links drawn as buttons: :hover weighs as much as a .k-btn variant, so this would win
+   and turn a primary button's text the colour of its own hover background. */
+:where(a:not(.k-btn)):hover {
+  color: var(--accent-ink);
+}
+:focus-visible {
+  outline: var(--focus-width) solid var(--focus);
+  outline-offset: var(--focus-offset);
+}
+.app {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+/* A bare scroll container: each page opts into one of the wrappers below. */
+.app-main {
+  flex: 1 1 auto;
+  outline: none;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  padding: 0;
+  overflow: auto;
+}
+/* Health, Reflect, Vaults and the review: padded on surface. */
+.page {
+  flex: 1 0 auto;
+  padding: var(--space-24) var(--space-32);
+  background: var(--surface);
+}
+/* Library and the graph: full-bleed panes that pad themselves. */
+.page-panes {
+  flex: 1 1 auto;
+  display: flex;
+  min-height: 0;
+  padding: 0;
+}
+/* The note reading view. */
+.page-reading {
+  flex: 1 0 auto;
+  padding: 40px 48px;
+}
+/* Back (components/shell/BackButton.tsx) sits above the page's content, in the top padding,
+   its arrow lined up with the text past the button's own padding. */
+.back-button {
+  align-self: flex-start;
+  margin: calc(-1 * var(--space-16)) 0 calc(-1 * var(--space-8)) calc(-1 * var(--space-10));
+}
+/* The sidebar keeps its width. As a flex item it would shrink to make room for a page's
+   longest unbroken line (the Library preview keeps note text unwrapped), clipping its labels. */
+.k-sidebar {
+  flex: none;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  transition:
+    width var(--duration-overlay) var(--ease-standard),
+    padding var(--duration-overlay) var(--ease-standard);
+}
+/* Between the panel and the rail the contents swap at once, hidden by a fade while the width
+   moves. Two names for one fade, so every switch restarts it; nothing fades in on launch. */
+.k-sidebar[data-switched] > * {
+  animation: sidebar-swap-a var(--duration-overlay) var(--ease-standard) both;
+}
+.k-sidebar[data-switched][data-collapsed] > * {
+  animation-name: sidebar-swap-b;
+}
+@keyframes sidebar-swap-a {
+  from {
+    opacity: 0;
+  }
+}
+@keyframes sidebar-swap-b {
+  from {
+    opacity: 0;
+  }
+}
+/* One line each, so names are cut off rather than wrapped while the width moves. */
+.k-brand,
+.k-nav-item,
+.sidebar-recent-head {
+  white-space: nowrap;
+}
+.sidebar-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-8);
+}
+/* Collapsed (app/sidebar.ts): a rail of icons, with the names as tooltips. */
+.k-sidebar[data-collapsed] {
+  width: 56px;
+  padding: var(--space-16) var(--space-8);
+}
+/* Each block takes the width it has once the move ends, so nothing inside rewraps or slides:
+   the moving edge only reveals or hides it. 216 is the 248px panel less its padding, 40 the
+   56px rail less its padding. */
+.k-sidebar > * {
+  width: 216px;
+}
+.k-sidebar[data-collapsed] > * {
+  width: 40px;
+}
+.k-sidebar[data-collapsed] .sidebar-top,
+.k-sidebar[data-collapsed] .sidebar-recent-head {
+  justify-content: center;
+  padding: 0;
+}
+/* The kanji on top, the toggle under it. */
+.k-sidebar[data-collapsed] .sidebar-top {
+  flex-direction: column;
+  gap: var(--space-8);
+}
+.k-sidebar[data-collapsed] .k-brand {
+  padding: 0;
+}
+.k-sidebar[data-collapsed] .k-brand span {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--fg);
+}
+.k-sidebar[data-collapsed] .k-nav-item,
+.k-sidebar[data-collapsed] .sidebar-services-toggle {
+  position: relative;
+  justify-content: center;
+  padding: 0;
+}
+.k-sidebar[data-collapsed] .sidebar-chevron {
+  display: none;
+}
+/* The count sits on the icon's corner. */
+.k-sidebar[data-collapsed] .k-nav-badge {
+  position: absolute;
+  top: 1px;
+  right: 1px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 var(--space-4);
+  font-size: 10px;
+  line-height: 16px;
+}
+fieldset.k-seg {
+  margin: 0;
+  min-width: 0;
+}
+/* The design system draws .k-area-row as a link; reset the button look. */
+button.k-area-row {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.k-switch:disabled {
+  background: var(--sunken);
+  cursor: not-allowed;
+}
+.k-switch:disabled .k-switch-knob {
+  background: var(--border-strong);
+}
+.app-main h1 {
+  margin: 0 0 var(--space-16);
+  font-size: 24px;
+  line-height: 32px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.sidebar-services-toggle {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+  min-height: var(--size-button-md);
+  padding: 0 var(--space-10);
+  border-radius: var(--radius-control);
+  color: var(--ok-ink);
+  font-weight: 500;
+  cursor: pointer;
+  list-style: none;
+}
+.sidebar-services-toggle:hover {
+  background: var(--sunken);
+}
+.sidebar-services[data-state="degraded"] > .sidebar-services-toggle,
+.sidebar-services[data-state="unknown"] > .sidebar-services-toggle {
+  color: var(--warn-ink);
+}
+.sidebar-services[data-state="degraded"] > .sidebar-services-toggle .k-dot,
+.sidebar-services[data-state="unknown"] > .sidebar-services-toggle .k-dot {
+  background: var(--warn-strong);
+}
+.sidebar-services[data-state="down"] > .sidebar-services-toggle {
+  color: var(--danger-ink);
+}
+.sidebar-services[data-state="down"] > .sidebar-services-toggle .k-dot {
+  background: var(--danger-strong);
+}
+.sidebar-services[data-state="loading"] > .sidebar-services-toggle {
+  color: var(--muted);
+}
+.sidebar-services[data-state="loading"] > .sidebar-services-toggle .k-dot {
+  background: var(--border-strong);
+}
+.sidebar-services {
+  margin-top: auto;
+}
+.sidebar-services-error {
+  margin: var(--space-6) var(--space-10) 0;
+  color: var(--fg-2);
+  font-size: 12px;
+  line-height: 16px;
+}
+.k-services-rows .sidebar-degraded {
+  color: var(--warn-ink);
+}
+.k-services-rows .sidebar-degraded .k-dot {
+  background: var(--warn-strong);
+}
+/* Overlays: one at a time, over a fixed scrim. */
+.app-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  justify-content: center;
+  padding: var(--space-24);
+  background: rgba(17, 18, 20, 0.32);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .app-scrim {
+    background: rgba(0, 0, 0, 0.56);
+  }
+}
+:root[data-theme="dark"] .app-scrim {
+  background: rgba(0, 0, 0, 0.56);
+}
+.app-scrim-center {
+  align-items: center;
+}
+.app-scrim-top {
+  align-items: flex-start;
+  padding-top: 12vh;
+}
+.app-scrim > [role="dialog"] {
+  max-height: 100%;
+  overflow: auto;
+}
+.app-toasts {
+  position: fixed;
+  right: var(--space-24);
+  bottom: var(--space-24);
+  z-index: 30;
+  max-width: calc(100vw - 48px);
+}
+.sidebar-services[data-open] .sidebar-chevron {
+  transform: rotate(180deg);
+}
+.sidebar-recent-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-8);
+  padding: 0 var(--space-2) 0 var(--space-10);
+}
+/* ---- Motion. Values and rules: src/motion/README.md. ---- */
+.k-nav-item,
+.k-area-row,
+.sidebar-services-toggle {
+  transition:
+    background-color var(--duration-press) var(--ease-standard),
+    border-color var(--duration-press) var(--ease-standard),
+    color var(--duration-press) var(--ease-standard);
+}
+.k-nav-item:active,
+.k-area-row:active,
+.sidebar-services-toggle:active {
+  background: var(--border);
+}
+.sidebar-chevron {
+  transition: transform var(--duration-overlay) var(--ease-standard);
+}
+/* The services panel opens by height (grid rows 0fr to 1fr) and fades in. */
+.sidebar-services-panel {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  transition:
+    grid-template-rows var(--duration-overlay) var(--ease-standard),
+    opacity var(--duration-overlay) var(--ease-standard);
+}
+.sidebar-services[data-open] .sidebar-services-panel {
+  grid-template-rows: 1fr;
+  opacity: 1;
+}
+.sidebar-services-inner {
+  min-height: 0;
+  overflow: hidden;
+}
+/* SuccessMark: the ring pops in a little past full size, then the tick draws itself. Under
+   reduced motion the rules above cut both, so it shows finished. Ends within 600 ms. */
+.k-success-mark {
+  flex: none;
+  overflow: visible;
+}
+.k-success-ring {
+  fill: var(--ok-soft);
+  stroke: var(--ok-dot);
+  stroke-width: 2;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: k-success-pop var(--duration-view) cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+.k-success-tick {
+  fill: none;
+  stroke: var(--ok-dot);
+  stroke-width: 4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-dasharray: 1;
+  stroke-dashoffset: 0;
+  animation: k-success-draw 320ms var(--ease-standard) 200ms both;
+}
+@keyframes k-success-pop {
+  from {
+    opacity: 0;
+    transform: scale(0.5);
+  }
+}
+@keyframes k-success-draw {
+  from {
+    stroke-dashoffset: 1;
+  }
+}
+/* Panels and lists entering: pair with usePresence and staggerStyle. */
+.motion-panel {
+  transition:
+    opacity var(--duration-overlay) var(--ease-standard),
+    transform var(--duration-overlay) var(--ease-standard);
+}
+.motion-panel[data-presence="entering"],
+.motion-panel[data-presence="leaving"] {
+  opacity: 0;
+  transform: translateY(4px);
+}
+.motion-list > * {
+  animation: motion-rise var(--duration-overlay) var(--ease-standard) both;
+}
+@keyframes motion-rise {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+}
+/* Route changes: a short crossfade and slide of the main pane only. */
+/* Named only during route transitions (runViewTransition with type "route"). */
+:root[data-transition="route"] .app-main {
+  view-transition-name: app-main;
+}
+::view-transition-old(app-main) {
+  animation: motion-page-out var(--duration-view) var(--ease-standard) both;
+}
+::view-transition-new(app-main) {
+  animation: motion-page-in var(--duration-view) var(--ease-standard) both;
+}
+@keyframes motion-page-out {
+  to {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+}
+@keyframes motion-page-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    animation-delay: 0s !important;
+    transition-duration: 0.01ms !important;
+    transition-delay: 0s !important;
+    scroll-behavior: auto !important;
+  }
+  ::view-transition-group(*),
+  ::view-transition-old(*),
+  ::view-transition-new(*) {
+    animation: none !important;
+  }
+}

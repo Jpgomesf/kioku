@@ -1,0 +1,158 @@
+/* The inspector, in the float at the bottom left of the graph (graph.css gives the float its
+   edge, padding and height limit). The header and the actions stay put and only the links
+   scroll, under them, so Open the note is in reach however many links a note has. */
+.ins {
+  display: flex;
+  flex: 0 1 auto;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/* The header and the actions: they never scroll, since the float holds still (graph.css). */
+.ins-top {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: var(--space-10);
+  padding-bottom: var(--space-10);
+}
+
+.ins-head {
+  display: grid;
+  grid-template-columns: 10px minmax(0, 1fr) auto;
+  column-gap: var(--space-8);
+  align-items: start;
+}
+
+.ins-swatch {
+  grid-column: 1;
+  grid-row: 1;
+  width: 10px;
+  height: 10px;
+  /* Centred on the title's first line. */
+  margin-top: 6px;
+  border-radius: 50%;
+}
+
+.ins-title {
+  display: -webkit-box;
+  grid-column: 2;
+  grid-row: 1;
+  margin: 0;
+  overflow: hidden;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 22px;
+  overflow-wrap: anywhere;
+  /* Long titles stop at three lines, so the links keep their room. */
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+}
+
+.ins-close {
+  grid-column: 3;
+  grid-row: 1 / span 2;
+  /* Into the corner, so the button's own padding does not push the title in. */
+  margin: calc(-1 * var(--space-6)) calc(-1 * var(--space-6)) 0 0;
+}
+
+.ins-meta {
+  display: flex;
+  grid-column: 2;
+  grid-row: 2;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-8);
+  margin: var(--space-2) 0 0;
+  color: var(--fg-2);
+  font-size: 12px;
+  line-height: 16px;
+}
+
+/* Keys can be long paths: one line, cut with an ellipsis, the whole key in the tooltip. */
+.ins-key {
+  max-width: 100%;
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ins-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-8);
+}
+
+/* The links: the one part that scrolls. */
+.ins-scroll {
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border-top: 1px solid var(--border-subtle);
+  /* A row reached with Tab scrolls clear of the fade. */
+  scroll-padding-bottom: 48px;
+}
+
+.ins-scroll > .k-finding {
+  margin-top: var(--space-10);
+}
+
+/* A row's first line: the relation keeps its words together and the key gives way, cut with an
+   ellipsis, so a narrow inspector never breaks "Linked from" over two lines. */
+.ins .graph-link-rel {
+  flex: none;
+  white-space: nowrap;
+}
+
+.ins .graph-link-head > :last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ins-scroll > .k-list-title {
+  margin: var(--space-12) 0 var(--space-4);
+}
+
+/* While rows are below: a fade over the last ones and the hint, stuck to the bottom of the
+   list. It overlaps the rows instead of adding height, so showing it never moves them. */
+.ins-more {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  height: 48px;
+  margin-top: -48px;
+  padding-bottom: var(--space-4);
+  box-sizing: border-box;
+  background: linear-gradient(to bottom, transparent, var(--surface) 75%);
+  /* The rows show through the fade and take its clicks; only the hint is a button. */
+  pointer-events: none;
+}
+
+.ins-more button {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-4);
+  height: 24px;
+  padding: 0 var(--space-10);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  line-height: 16px;
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.ins-more button:hover {
+  background: var(--sunken);
+  color: var(--fg);
+}

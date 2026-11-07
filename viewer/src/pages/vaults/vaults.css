@@ -1,0 +1,331 @@
+/* Vaults page pieces that the design system has no class for. */
+.vaults {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-20);
+}
+.vaults-head {
+  max-width: 720px;
+}
+.vaults-head h1 {
+  margin: 0;
+  font-size: 24px;
+  line-height: 32px;
+  font-weight: 600;
+}
+.vaults-head p,
+.vaults-foot {
+  margin: var(--space-4) 0 0;
+  color: var(--fg-2);
+  font-size: 13px;
+  line-height: 18px;
+}
+.vaults-draft {
+  position: sticky;
+  bottom: var(--space-16);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-12);
+  max-width: 640px;
+  box-sizing: border-box;
+  padding: var(--space-12) var(--space-16);
+  border: 1px solid var(--accent-border);
+  border-radius: var(--radius-panel);
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+  animation: vaults-rise var(--duration-overlay) var(--ease-standard);
+}
+.vaults-draft p {
+  flex: 1 1 auto;
+  margin: 0;
+}
+@keyframes vaults-rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .vaults-draft {
+    animation: none;
+  }
+}
+.vaults-notice {
+  margin: 0;
+}
+/* The page fills the window, and the matrix scrolls inside it with its header row and vault
+   names pinned, so 100 vaults stay one scroll away from the search and the filters. */
+.page.vaults-page {
+  flex: 1 1 0;
+  min-height: 480px;
+  display: flex;
+  flex-direction: column;
+}
+.vaults-page > .vaults {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+/* Only the matrix (.vaults-main) gives up height; the title, requests and bars keep theirs.
+   :where() keeps this weaker than any class, so .vaults-main's own flex wins. */
+:where(.vaults-page > .vaults) > * {
+  flex: none;
+}
+.vaults-banners {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-12);
+  max-width: 720px;
+  /* Many requests at once scroll here rather than push the matrix away. */
+  max-height: 30vh;
+  overflow-y: auto;
+}
+.vaults-main {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  gap: var(--space-16);
+}
+.vaults-matrix {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-12);
+}
+.vaults-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--space-12);
+}
+.vaults-toolbar > .k-field {
+  flex: 1 1 280px;
+  max-width: 480px;
+}
+.vaults-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--space-8);
+}
+.vaults-readable {
+  flex: 0 1 240px;
+}
+.vaults-chip-count {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.vaults-count {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+  min-height: var(--size-button-sm);
+  margin: 0;
+  color: var(--fg-2);
+  font-size: 13px;
+  line-height: 18px;
+}
+.vaults-table-scroll {
+  flex: 1 1 auto;
+  min-height: 160px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+  background: var(--surface);
+}
+.vaults-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 13px;
+  line-height: 18px;
+}
+.vaults-table th,
+.vaults-table td {
+  padding: var(--space-8) var(--space-10);
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--surface);
+  text-align: center;
+  vertical-align: middle;
+}
+.vaults-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  border-bottom-color: var(--border);
+  /* A soft edge under the pinned header, so rows read as passing beneath it. */
+  box-shadow: 0 6px 10px -8px rgba(29, 29, 27, 0.3);
+  font-weight: 600;
+  vertical-align: bottom;
+}
+.vaults-table .vaults-th-vault,
+.vaults-table .vaults-th-row {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  min-width: 200px;
+  max-width: 320px;
+  border-right: 1px solid var(--border-subtle);
+  text-align: left;
+}
+/* The corner sits above both the pinned row and the pinned column. */
+.vaults-table thead .vaults-th-vault {
+  z-index: 3;
+}
+.vaults-th-provider {
+  min-width: 92px;
+}
+.vaults-col-title {
+  display: block;
+}
+.vaults-col-apps {
+  display: block;
+  max-width: 128px;
+  margin: 0 auto;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 16px;
+  font-weight: 400;
+}
+.vaults-col-toggle {
+  margin-top: var(--space-4);
+}
+.vaults-name {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--fg);
+  font: inherit;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+.vaults-name:hover {
+  color: var(--accent-ink);
+  text-decoration: underline;
+}
+.vaults-row-meta {
+  display: block;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 16px;
+  font-weight: 400;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.vaults-table tbody tr:hover > * {
+  background: var(--sunken);
+}
+.vaults-table tbody tr.vaults-row-open > * {
+  background: var(--accent-soft);
+}
+/* A switch the draft changes: marked until it's saved or discarded. */
+.vaults-table td.vaults-cell-changed {
+  box-shadow: inset 0 0 0 2px var(--accent-border);
+}
+.vaults-table td.vaults-cell-asking {
+  background: var(--warn-soft);
+}
+.vaults-asks {
+  display: block;
+  margin-top: var(--space-2);
+  color: var(--warn-ink);
+  font-size: 11px;
+  line-height: 14px;
+  font-weight: 600;
+}
+.vaults-none {
+  margin: 0;
+  padding: var(--space-16);
+  color: var(--fg-2);
+}
+.vaults-details {
+  flex: 0 0 320px;
+  min-height: 0;
+  overflow-y: auto;
+  box-sizing: border-box;
+  padding: var(--space-16);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+  background: var(--surface-2);
+}
+.vaults-details-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-8);
+}
+.vaults-details-head h2 {
+  margin: 0;
+  font-size: 18px;
+  line-height: 24px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.vaults-details-readers {
+  margin: var(--space-4) 0 var(--space-12);
+  color: var(--fg-2);
+  font-size: 13px;
+  line-height: 18px;
+}
+.vaults-details-list dd {
+  overflow-wrap: anywhere;
+}
+.vaults-areas {
+  display: grid;
+  gap: var(--space-6);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.vaults-areas li {
+  display: grid;
+}
+.vaults-area-paths {
+  color: var(--muted);
+  font-size: 12px;
+}
+.vaults-details-foot {
+  margin: var(--space-12) 0 0;
+  padding-top: var(--space-10);
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 16px;
+}
+.vaults-banners:empty {
+  display: none;
+}
+.vaults-check-failed,
+.k-checklist .vaults-check-failed .k-icon {
+  color: var(--danger-ink);
+}
+/* The saved screen: the check drawing itself beside what changed, then the backup and what
+   running sessions need. The text rises in as the check starts its tick. */
+.vaults-saved-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-16);
+}
+.vaults-saved-title h1 {
+  margin: 0;
+}
+.vaults-saved-title p {
+  margin: var(--space-4) 0 0;
+  color: var(--fg-2);
+}
+.vaults-saved-facts {
+  max-width: 720px;
+}
+.vaults-saved-done {
+  align-self: flex-start;
+}
+.vaults-saved-title,
+.vaults-saved-facts,
+.vaults-saved-done {
+  animation: motion-rise var(--duration-overlay) var(--ease-standard) 160ms both;
+}

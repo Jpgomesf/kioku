@@ -3,7 +3,7 @@ CARGO ?= cargo
 ENV_FILE ?= .env
 SMOKE_ENV ?= .env.smoke
 
-.PHONY: help check fmt fmt-check lint test test-db smoke eval build install install-prebuilt start stop stop-docker-ollama doctor deny
+.PHONY: help check fmt fmt-check lint test test-db smoke eval build install install-prebuilt start stop stop-docker-ollama doctor deny viewer-deny viewer-check
 
 help: ## List targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-10s %s\n", $$1, $$2}'
@@ -59,3 +59,13 @@ doctor: ## Check the services and embeddings
 
 deny: ## Supply-chain checks (needs cargo-deny)
 	cargo deny --locked check
+
+viewer-deny: ## Supply-chain checks on the viewer's lockfiles (needs cargo-deny)
+	cargo deny --manifest-path viewer/src-tauri/Cargo.toml --locked check --config viewer/deny.toml
+	cd viewer && npm audit --audit-level=high --omit=dev
+
+viewer-check: ## Kioku Viewer: frontend typecheck, lint and tests, then Rust fmt, clippy (warnings denied) and tests
+	cd viewer && npm run check
+	cd viewer/src-tauri && $(CARGO) fmt --check
+	cd viewer/src-tauri && CARGO_BUILD_WARNINGS=deny $(CARGO) clippy --all-targets --locked
+	cd viewer/src-tauri && $(CARGO) test --locked

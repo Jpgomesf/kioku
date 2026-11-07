@@ -119,3 +119,11 @@ __pycache__/
 .vscode/
 *.swp
 *~
+
+# ---------------------------------------------------------------------------
+# Kioku Viewer (viewer/) build output
+# ---------------------------------------------------------------------------
+viewer/node_modules/
+viewer/dist/
+viewer/src-tauri/target/
+viewer/src-tauri/gen/
