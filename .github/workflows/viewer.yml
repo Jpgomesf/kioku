@@ -82,7 +82,9 @@ jobs:
         with:
           tool: cargo-deny
       - name: cargo deny check
-        run: cargo deny --manifest-path viewer/src-tauri/Cargo.toml --locked check --config viewer/deny.toml
+        # --config is a graph option in cargo-deny 0.20, so it goes before `check`, like
+        # --manifest-path and --locked.
+        run: cargo deny --manifest-path viewer/src-tauri/Cargo.toml --locked --config viewer/deny.toml check
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 26

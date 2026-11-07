@@ -1,5 +1,5 @@
 # cargo-deny configuration for the Kioku Viewer. Run from the repo root:
-#   cargo deny --manifest-path viewer/src-tauri/Cargo.toml --locked check --config viewer/deny.toml
+#   cargo deny --manifest-path viewer/src-tauri/Cargo.toml --locked --config viewer/deny.toml check
 # Kept apart from the root deny.toml so the viewer's wider graph (Tauri, WebKit glue)
 # never loosens the policy that guards the kioku crate.
 
