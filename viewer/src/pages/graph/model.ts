@@ -26,7 +26,7 @@ export const DEFAULT_FILTERS: Filters = {
   legacy: true,
 };
 
-export function isVisible(node: GraphNode, f: Filters): boolean {
+export function isVisible(node: GraphNode, f: Pick<Filters, "hidden" | "legacy">): boolean {
   if (f.hidden.has(node.kind)) return false;
   return f.legacy || node.status !== "legacy";
 }

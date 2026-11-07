@@ -7,10 +7,17 @@ import type { Area, Note, NoteKind, NoteSummary, Vault } from "../notes/types";
 export const vaults: Vault[] = [
   {
     name: "personal",
-    domains: ["personal/kioku", "local", "demo"],
+    domains: ["personal/kioku", "local", "demo", "demo-large"],
     providers: ["anthropic", "local"],
   },
 ];
+
+/** The large demo area: about 2,000 notes and 16,000 links, for the graph's performance probe. */
+export const LARGE_DOMAIN = "demo-large";
+const LARGE_NOTES = 2000;
+/** Every LEGACY_EVERY-th large note is legacy, so the count is known without building it. */
+const LEGACY_EVERY = 15;
+const LARGE_LEGACY = Math.ceil(LARGE_NOTES / LEGACY_EVERY);
 
 export const areas: Area[] = [
   {
@@ -35,6 +42,14 @@ export const areas: Area[] = [
     vault: "personal",
     noteCount: 303,
     legacyCount: 36,
+    source: "demo-kb",
+  },
+  {
+    domain: LARGE_DOMAIN,
+    label: "demo-large",
+    vault: "personal",
+    noteCount: LARGE_NOTES,
+    legacyCount: LARGE_LEGACY,
     source: "demo-kb",
   },
 ];
@@ -312,6 +327,7 @@ export function summarize(n: Note): NoteSummary {
 /** Every note summary in an area, including the synthetic demo notes. */
 export function summariesIn(domain: string): NoteSummary[] {
   const real = sampleNotes.filter((n) => n.domain === domain).map(summarize);
+  if (domain === LARGE_DOMAIN) return largeGraph().nodes.map(syntheticSummary);
   if (domain !== "demo") return real;
   const synthetic = demoGraph.nodes
     .filter((n) => n.key.startsWith("demo-"))
@@ -331,4 +347,133 @@ export function summariesIn(domain: string): NoteSummary[] {
       }),
     );
   return [...real, ...synthetic];
+}
+
+function syntheticSummary(n: GraphNode): NoteSummary {
+  return {
+    key: n.key,
+    domain: n.domain,
+    title: n.title,
+    kind: n.kind,
+    status: n.status,
+    origin: "file",
+    tags: [],
+    linkCount: n.degree,
+    findingCount: 0,
+    source: "demo-kb",
+    updatedAt: "2026-10-29",
+  };
+}
+
+// The large demo area. Clusters of notes that mostly link inside their cluster, a few hubs that
+// hundreds of notes link to, and 25 types with a long tail (weights fall off like 1/rank).
+const LARGE_CLUSTERS = [
+  "search",
+  "storage",
+  "sync",
+  "access",
+  "billing",
+  "reports",
+  "exports",
+  "alerts",
+  "schedules",
+  "forms",
+  "media",
+  "maps",
+];
+const LARGE_KINDS: NoteKind[] = [
+  "decision",
+  "document",
+  "question",
+  "issue",
+  "fix",
+  "note",
+  "convention",
+  "meeting",
+  "runbook",
+  "design-review",
+  "glossary",
+  "release-notes",
+  "architecture",
+  "gotcha",
+  "preference",
+  "ticket",
+  "pull-request",
+  "incident",
+  "experiment",
+  "checklist",
+  "data-model",
+  "benchmark",
+  "interview",
+  "roadmap",
+  "retro",
+];
+const LARGE_HUBS = 4;
+const LINKS_IN_CLUSTER = 7;
+
+function weightedKind(rand: () => number): NoteKind {
+  const weights = LARGE_KINDS.map((_, i) => 1 / (i + 1));
+  let r = rand() * weights.reduce((a, b) => a + b, 0);
+  for (let i = 0; i < LARGE_KINDS.length; i += 1) {
+    r -= weights[i] ?? 0;
+    if (r <= 0) return LARGE_KINDS[i] ?? "note";
+  }
+  return "note";
+}
+
+function buildLargeGraph(): GraphData {
+  const rand = rng(7);
+  const nodes: GraphNode[] = [];
+  for (let i = 0; i < LARGE_NOTES; i += 1) {
+    const cluster = LARGE_CLUSTERS[i % LARGE_CLUSTERS.length] ?? "misc";
+    const hub = i < LARGE_HUBS;
+    const kind = hub ? "architecture" : weightedKind(rand);
+    nodes.push({
+      key: `large-${cluster}-${String(i).padStart(4, "0")}`,
+      domain: LARGE_DOMAIN,
+      title: hub
+        ? `${capitalise(cluster)} overview`
+        : `${capitalise(cluster)} ${kind.replace("-", " ")} ${i}`,
+      kind,
+      status: i % LEGACY_EVERY === LEGACY_EVERY - 1 ? "legacy" : "active",
+      degree: 0,
+    });
+  }
+  const edges: GraphEdge[] = [];
+  const seen = new Set<string>();
+  const add = (a: number, b: number, suggested = false) => {
+    const from = nodes[a];
+    const to = nodes[b];
+    if (!from || !to || a === b) return;
+    const id = a < b ? `${a}:${b}` : `${b}:${a}`;
+    if (seen.has(id)) return;
+    seen.add(id);
+    edges.push({ source: from.key, target: to.key, relation: "related", suggested });
+    from.degree += 1;
+    to.degree += 1;
+  };
+  const clusters = LARGE_CLUSTERS.length;
+  const perCluster = Math.floor(LARGE_NOTES / clusters);
+  for (let i = LARGE_HUBS; i < LARGE_NOTES; i += 1) {
+    const cluster = i % clusters;
+    for (let k = 0; k < LINKS_IN_CLUSTER; k += 1) {
+      add(i, cluster + clusters * Math.floor(rand() * perCluster), rand() < 0.03);
+    }
+    if (rand() < 0.75) add(i, Math.floor(rand() * LARGE_NOTES));
+    // Each hub collects links from about 300 notes.
+    if (rand() < 0.6) add(i, Math.floor(rand() * LARGE_HUBS));
+  }
+  return { nodes, edges };
+}
+
+function capitalise(word: string): string {
+  return `${word[0]?.toUpperCase() ?? ""}${word.slice(1)}`;
+}
+
+let largeCache: GraphData | null = null;
+
+/** The large demo area, built on first use. */
+export function largeGraph(): GraphData {
+  largeCache ??= buildLargeGraph();
+  return largeCache;
 }

@@ -1,5 +1,14 @@
 import { commandError } from "../core";
-import { areas, demoGraph, makeNote, sampleNotes, summariesIn, vaults } from "../fixtures";
+import {
+  areas,
+  demoGraph,
+  LARGE_DOMAIN,
+  largeGraph,
+  makeNote,
+  sampleNotes,
+  summariesIn,
+  vaults,
+} from "../fixtures";
 import {
   type Area,
   MAX_NOTE_LIST,
@@ -12,7 +21,9 @@ import {
 function titleOf(domain: string, key: string): string | null {
   const found =
     sampleNotes.find((n) => n.domain === domain && n.key === key) ??
-    demoGraph.nodes.find((n) => n.domain === domain && n.key === key);
+    (domain === LARGE_DOMAIN ? largeGraph() : demoGraph).nodes.find(
+      (n) => n.domain === domain && n.key === key,
+    );
   return found?.title ?? null;
 }
 
@@ -43,9 +54,10 @@ export function getNote(domain: string, key: string): Note {
       ...found,
       links: found.links.map((l) => ({ ...l, targetTitle: titleOf(l.targetDomain, l.targetKey) })),
     };
-  const g = demoGraph.nodes.find((n) => n.domain === domain && n.key === key);
+  const graph = domain === LARGE_DOMAIN ? largeGraph() : demoGraph;
+  const g = graph.nodes.find((n) => n.domain === domain && n.key === key);
   if (!g) throw commandError("not_found", `No note ${key} in ${domain}.`);
-  const links = demoGraph.edges
+  const links = graph.edges
     .filter((e) => e.source === key || e.target === key)
     .map((e) => ({
       targetKey: e.source === key ? e.target : e.source,

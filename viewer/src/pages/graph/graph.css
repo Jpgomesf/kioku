@@ -60,22 +60,26 @@
 .graph-live {
   cursor: grabbing;
 }
-.graph-svg {
+/* The renderer's canvas fills the stage; CSS sizes it and renderer.resize sizes its backing
+   store. Pointer events go to the stage, which picks notes through the renderer. */
+.graph-canvas {
   position: absolute;
   inset: 0;
+  width: 100%;
+  height: 100%;
   pointer-events: none;
+  transition: opacity var(--duration-zoom) var(--ease-zoom);
 }
-.graph-camera {
-  transform-origin: 0 0;
-}
+/* The HTML overlay is in screen space; placer.ts sets each element's transform per frame. */
 .graph-html {
   position: absolute;
   inset: 0;
   pointer-events: none;
 }
-/* The HTML layer sits in world space under the same camera transform as the SVG. */
-.graph-world {
-  transform-origin: 0 0;
+.graph-focus-edges {
+  width: 100%;
+  height: 100%;
+  overflow: visible;
 }
 .graph-stage-empty {
   position: absolute;
@@ -100,42 +104,32 @@
   transform-origin: 50% 50%;
 }
 
-.graph-bg,
-.graph-focus-edges,
+/* Only opacity transitions: positions follow the camera frame by frame from placer.ts. */
 .graph-html > * {
   transition: opacity var(--duration-view) var(--ease-standard);
 }
-/* Animated moves: the camera and everything placed by it share one duration and easing. */
-.graph-stage.graph-animate {
-  transition:
-    background-size var(--duration-zoom) var(--ease-zoom),
-    background-position var(--duration-zoom) var(--ease-zoom);
-}
-.graph-animate .graph-camera,
-.graph-animate .graph-world,
-.graph-animate .graph-html > * {
-  transition:
-    transform var(--duration-zoom) var(--ease-zoom),
-    opacity var(--duration-zoom) var(--ease-zoom);
-}
-.graph-animate .graph-bg,
-.graph-animate .graph-focus-edges {
-  transition: opacity var(--duration-zoom) var(--ease-zoom);
-}
 @media (prefers-reduced-motion: reduce) {
-  .graph-stage,
-  .graph-stage *,
-  .graph-animate .graph-camera,
-  .graph-animate .graph-world,
-  .graph-animate .graph-html > * {
+  .graph-canvas,
+  .graph-html > * {
     transition: none;
   }
 }
 
-.graph-edge {
-  stroke: var(--border-strong);
-  stroke-width: 1;
+.graph-status {
+  position: absolute;
+  top: var(--space-12);
+  left: 50%;
+  margin: 0;
+  padding: var(--space-4) var(--space-8);
+  border-radius: var(--radius-mark);
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 16px;
+  transform: translateX(-50%);
+  pointer-events: none;
 }
+
 .graph-edge-strong {
   stroke: var(--muted);
   stroke-width: 1.5;
@@ -149,56 +143,15 @@
   stroke: var(--muted);
   stroke-dasharray: 4 4;
 }
-.graph-edge-selected {
-  stroke: var(--accent);
-  stroke-width: 1.4;
-}
-.graph-dot {
-  stroke: var(--bg);
-  stroke-width: 1;
-}
-.graph-dot-legacy {
-  opacity: 0.4;
-}
-.graph-dot-ring {
-  fill: none;
-  stroke: var(--fg);
-  stroke-width: 1.5;
-}
-/* type-2 and type-3 are under 3:1 on light grounds; a darker outline keeps their dots legible. */
-.graph-dot.graph-dot-2 {
-  stroke: color-mix(in srgb, var(--type-2) 55%, var(--fg));
-}
-.graph-dot.graph-dot-3 {
-  stroke: color-mix(in srgb, var(--type-3) 55%, var(--fg));
-}
-.graph-ring {
-  fill: none;
-  stroke: var(--type-topic);
-  stroke-width: 2;
-  opacity: 0.7;
-}
-/* A type hovered in the legend: everything else steps back. */
-.graph-dot,
-.graph-ring,
-.graph-edge,
+/* A type hovered in the legend: the other cards' lines step back. Cards set their own
+   opacity inline, since their show and hide opacity is inline too. */
 .graph-edge-strong {
   transition: opacity var(--duration-view) var(--ease-standard);
 }
-.graph-dot.graph-dim,
-.graph-ring.graph-dim,
-.graph-edge.graph-dim {
-  opacity: 0.12;
-}
-/* Cards and their lines are already full strength, so they step back less.
-   Cards set this inline, since their show and hide opacity is inline too. */
 .graph-edge-strong.graph-dim {
   opacity: 0.35;
 }
 @media (prefers-reduced-motion: reduce) {
-  .graph-dot,
-  .graph-ring,
-  .graph-edge,
   .graph-edge-strong {
     transition: none;
   }

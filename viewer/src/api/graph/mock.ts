@@ -1,4 +1,4 @@
-import { demoGraph, sampleNotes } from "../fixtures";
+import { demoGraph, LARGE_DOMAIN, largeGraph, sampleNotes } from "../fixtures";
 import type { GraphData, GraphEdge, GraphNode, GraphQuery } from "./types";
 
 /** Topic pages of the demo area; each synthetic key carries its topic (demo-<topic>-NNN). */
@@ -87,6 +87,7 @@ function richDemo(): GraphData {
 
 function graphFor(domain: string): GraphData {
   if (domain === "demo") return demoGraph;
+  if (domain === LARGE_DOMAIN) return largeGraph();
   const notes = sampleNotes.filter((n) => n.domain === domain);
   return {
     nodes: notes.map((n) => ({

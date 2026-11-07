@@ -37,6 +37,9 @@
   --type-topic: var(--fg-2);
   --type-other: #8a8b93;
   --graph-dot: #d9d9d3;
+  --graph-edge: #6f7078;
+  --graph-edge-strong: #2944b8;
+  --graph-suggested: #2944b8;
   --font-sans: Inter, system-ui, -apple-system, "Segoe UI", sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
   --font-serif: "Source Serif 4", Georgia, "Times New Roman", serif;
@@ -108,6 +111,9 @@
     --type-3: #199e70;
     --type-other: #6f7078;
     --graph-dot: #2a2c33;
+    --graph-edge: #9a9ba3;
+    --graph-edge-strong: #8fa3ff;
+    --graph-suggested: #8fa3ff;
     --shadow-overlay: 0 12px 32px rgba(0, 0, 0, 0.5), 0 0 0 1px #2c2d33;
   }
 }
@@ -148,6 +154,9 @@
   --type-3: #199e70;
   --type-other: #6f7078;
   --graph-dot: #2a2c33;
+  --graph-edge: #9a9ba3;
+  --graph-edge-strong: #8fa3ff;
+  --graph-suggested: #8fa3ff;
   --shadow-overlay: 0 12px 32px rgba(0, 0, 0, 0.5), 0 0 0 1px #2c2d33;
 }
 

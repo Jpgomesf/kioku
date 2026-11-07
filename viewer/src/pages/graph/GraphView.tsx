@@ -1,11 +1,10 @@
-// The stage: one camera over an SVG layer (dots, edges, topic rings) and an HTML layer
-// (labels and the focused neighbourhood's cards). Both layers sit in world space under the
-// same camera transform, so CSS animates them together. Buttons and clicks animate the
-// camera; the wheel, trackpad and drag move it live. Reduced motion makes it instant.
+// The stage: a canvas the GraphRenderer draws every note and link on, under an HTML overlay
+// (labels and the focused neighbourhood's cards). The renderer owns the live camera: drag and
+// wheel move it directly and React hears about it once a gesture ends, so a pan or zoom never
+// re-renders the page per event. Buttons, keys and clicks animate it with animateTo; reduced
+// motion makes those moves instant. The overlay follows the camera through renderer.subscribe.
 import {
-  type CSSProperties,
   type KeyboardEvent,
-  memo,
   type PointerEvent,
   type ReactNode,
   useCallback,
@@ -16,22 +15,13 @@ import {
   useRef,
   useState,
 } from "react";
-import {
-  type GraphData,
-  type GraphEdge,
-  type GraphNode,
-  kindLabel,
-  kindNoun,
-  type NoteKind,
-  TOPIC_KIND,
-} from "../../api";
+import { type GraphData, type GraphNode, kindLabel, type NoteKind, TOPIC_KIND } from "../../api";
 import { hasCommandKey } from "../../app/overlay";
-import { graphHref, noteHref, parseHash } from "../../app/router";
+import { graphHref, parseHash } from "../../app/router";
 import { EmptyState, IconButton, SearchField, SegmentedControl, Switch } from "../../components/ui";
-import { usePrefersReducedMotion } from "../../motion";
+import { duration, usePrefersReducedMotion } from "../../motion";
 import {
   type Camera,
-  cameraTransform,
   dotGrid,
   fitCamera,
   type Level,
@@ -45,23 +35,25 @@ import {
   wheelFactor,
   zoomAt,
 } from "./camera";
-import { type ColourSlots, colourFor, slotOf, useColourSlots } from "./colours";
+import { colourFor, useColourSlots } from "./colours";
 import { Inspector } from "./Inspector";
 import { Legend } from "./Legend";
-import { layoutFor, type Point } from "./layout";
+import { type Layout, type Point, useLayout, WORLD } from "./layout";
 import {
-  type Card,
   cardKey,
   cardSlots,
   cardsFor,
   DEFAULT_FILTERS,
-  dotRadius,
   type Filters,
   findNodes,
   formatCount,
   isVisible,
   neighboursWithin,
 } from "./model";
+import { Overlay } from "./Overlay";
+import { OverlayPlacer } from "./placer";
+import { GraphRenderer } from "./renderer";
+import { toScene } from "./toScene";
 
 export interface GraphViewProps {
   domain: string;
@@ -73,6 +65,19 @@ export interface GraphViewProps {
 
 const DEFAULT_VIEW: Viewport = { width: 1000, height: 640 };
 
+/** Shown until the layout worker sends its first positions. */
+const EMPTY_LAYOUT: Layout = {
+  positions: new Map(),
+  bounds: { minX: 0, minY: 0, maxX: WORLD.width, maxY: WORLD.height },
+};
+
+/** A gesture counts as ended this long after the last wheel event. */
+const WHEEL_IDLE_MS = 150;
+/** A press that moves less than this is a click, not a drag. */
+const DRAG_SLOP = 4;
+/** Arrow-key pans are short moves, so they take the shorter view duration. */
+const PAN_STEP = 48;
+
 function useViewport(ref: React.RefObject<HTMLDivElement | null>): Viewport {
   const [view, setView] = useState<Viewport>(DEFAULT_VIEW);
   // Measured before paint, so the first frame already uses the real size.
@@ -81,7 +86,13 @@ function useViewport(ref: React.RefObject<HTMLDivElement | null>): Viewport {
     if (!el) return;
     const measure = () => {
       const r = el.getBoundingClientRect();
-      if (r.width > 0 && r.height > 0) setView({ width: r.width, height: r.height });
+      if (r.width <= 0 || r.height <= 0) return;
+      // Keep the same object for the same size, so effects keyed on the view don't rerun.
+      setView((prev) =>
+        prev.width === r.width && prev.height === r.height
+          ? prev
+          : { width: r.width, height: r.height },
+      );
     };
     measure();
     if (typeof ResizeObserver === "undefined") return;
@@ -99,10 +110,13 @@ function shortKey(key: string | undefined): string {
   return key.slice(key.lastIndexOf("/") + 1) || key;
 }
 
-/** The canvas dot grid's size and offset, as custom properties graph.css reads. */
-function dotStyle(camera: Camera): CSSProperties {
+/** Moves the stage's dot grid with the camera, through the custom properties graph.css reads. */
+function applyDotGrid(stage: HTMLElement | null, camera: Camera): void {
+  if (!stage) return;
   const { gap, x, y } = dotGrid(camera);
-  return { "--dot-gap": `${gap}px`, "--dot-x": `${x}px`, "--dot-y": `${y}px` } as CSSProperties;
+  stage.style.setProperty("--dot-gap", `${gap}px`);
+  stage.style.setProperty("--dot-x", `${x}px`);
+  stage.style.setProperty("--dot-y", `${y}px`);
 }
 
 /** Runs `fn` after the next frame has been styled, so new elements can transition. */
@@ -121,16 +135,35 @@ function afterFrame(fn: () => void): () => void {
   };
 }
 
+/** Calls the latest `fn`, through a callback that never changes (for memoised children). */
+function useStableCallback<A extends unknown[]>(fn: (...args: A) => void): (...args: A) => void {
+  const ref = useRef(fn);
+  ref.current = fn;
+  return useCallback((...args: A) => ref.current(...args), []);
+}
+
+function wantsPerfProbe(): boolean {
+  if (!import.meta.env.DEV) return false;
+  const q = window.location.hash.indexOf("?");
+  return q >= 0 && new URLSearchParams(window.location.hash.slice(q + 1)).get("perf") === "1";
+}
+
 const LEVEL_NAMES = ["Whole area", "Closer", "Neighbourhood"] as const;
 const BG_OPACITY = [1, 1, 0.5, 0.2] as const;
 
 export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }: GraphViewProps) {
   const stageRef = useRef<HTMLDivElement>(null);
-  const cameraElRef = useRef<SVGGElement>(null);
-  const worldRef = useRef<HTMLDivElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const overlayRef = useRef<HTMLDivElement>(null);
+  const rendererRef = useRef<GraphRenderer | null>(null);
+  const placerRef = useRef<OverlayPlacer | null>(null);
   const view = useViewport(stageRef);
   const reduced = usePrefersReducedMotion();
-  const layout = useMemo(() => layoutFor(domain, data), [domain, data]);
+  const reducedRef = useRef(reduced);
+  reducedRef.current = reduced;
+  const { layout: liveLayout, settling } = useLayout(domain, data);
+  const layout = liveLayout ?? EMPTY_LAYOUT;
+  const arranging = settling || liveLayout === null;
   const byKey = useMemo(() => new Map(data.nodes.map((n) => [n.key, n])), [data]);
   const fit = useMemo(() => fitCamera(layout.bounds, view), [layout, view]);
 
@@ -148,13 +181,11 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
   const hopsLabelId = useId();
   /** Set by an explicit focus change, so the next URL update adds a history entry. */
   const pushNext = useRef(false);
-  // Opens already zoomed: the first commit carries the focus camera.
-  const [camera, setCamera] = useState<Camera>(() => {
+  // The settled camera: where the renderer is, or is animating to. Opens already zoomed.
+  const [camera, setCameraState] = useState<Camera>(() => {
     const p = startFocus ? posOf(startFocus) : null;
     return stepCamera(p ? 3 : 0, p, fit, view);
   });
-  const [animate, setAnimate] = useState(false);
-  const [live, setLive] = useState(false);
   const [filters, setFilters] = useState<Filters>(DEFAULT_FILTERS);
   const [colourSlots, assignSlot] = useColourSlots(domain);
   const [highlightKind, setHighlightKind] = useState<NoteKind | null>(null);
@@ -168,28 +199,124 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
   fitRef.current = fit;
   const viewRef = useRef(view);
   const cameraRef = useRef(camera);
-  cameraRef.current = camera;
-  const animateRef = useRef(animate);
-  animateRef.current = animate;
   const selectedRef = useRef(selected);
   selectedRef.current = selected;
+  /** True once the viewer moved the camera, so a settling layout stops refitting it. */
+  const userMoved = useRef(false);
+  const detailScaleRef = useRef(fit.s * STEPS[3]);
+  detailScaleRef.current = fit.s * STEPS[3];
+
+  /** The pending "wheel gesture ended" sync; a newer programmatic move cancels it. */
+  const wheelIdle = useRef<number | undefined>(undefined);
+
+  /** Moves the camera: animated over `ms` (instant under reduced motion), or at once. */
+  const moveCamera = useCallback((target: Camera, ms = 0) => {
+    window.clearTimeout(wheelIdle.current);
+    wheelIdle.current = undefined;
+    cameraRef.current = target;
+    setCameraState(target);
+    const r = rendererRef.current;
+    if (!r) return;
+    if (ms > 0) void r.animateTo(target, ms);
+    else r.setCamera(target);
+  }, []);
+
+  /** After a drag or wheel gesture: React learns where the renderer's camera ended up. */
+  const syncCamera = useCallback(() => {
+    const r = rendererRef.current;
+    // An animated move already told React its target; a mid-flight frame would overwrite it.
+    if (!r || r.animating) return;
+    const c = r.camera;
+    cameraRef.current = c;
+    setCameraState(c);
+  }, []);
+
+  // The renderer and the overlay placer live as long as the stage.
+  useLayoutEffect(() => {
+    const canvas = canvasRef.current;
+    const overlay = overlayRef.current;
+    if (!canvas || !overlay) return;
+    const r = new GraphRenderer(canvas, {
+      reducedMotion: () => reducedRef.current,
+      fitScale: () => fitRef.current.s,
+    });
+    const placer = new OverlayPlacer(overlay, {
+      camera: () => r.camera,
+      detailScale: () => detailScaleRef.current,
+      growMs: () => (reducedRef.current ? 0 : duration.zoom),
+    });
+    rendererRef.current = r;
+    placerRef.current = placer;
+    const unsubscribe = r.subscribe((c) => {
+      applyDotGrid(stageRef.current, c);
+      placer.place();
+    });
+    r.resize(viewRef.current.width, viewRef.current.height);
+    r.setCamera(cameraRef.current);
+    return () => {
+      unsubscribe();
+      placer.destroy();
+      r.destroy();
+      rendererRef.current = null;
+      placerRef.current = null;
+    };
+  }, []);
+
+  // Theme changes recolour the canvas, which reads its colours from CSS custom properties.
+  useEffect(() => {
+    const refresh = () => rendererRef.current?.refreshStyle();
+    const mq =
+      typeof window.matchMedia === "function"
+        ? window.matchMedia("(prefers-color-scheme: dark)")
+        : null;
+    mq?.addEventListener?.("change", refresh);
+    const mo =
+      typeof MutationObserver === "undefined" ? null : new MutationObserver(() => refresh());
+    mo?.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+    return () => {
+      mq?.removeEventListener?.("change", refresh);
+      mo?.disconnect();
+    };
+  }, []);
 
   // Keep the camera's place across resizes.
   useLayoutEffect(() => {
     const prevView = viewRef.current;
     viewRef.current = view;
+    const r = rendererRef.current;
+    r?.resize(view.width, view.height);
     if (prevView.width === view.width && prevView.height === view.height) return;
-    setAnimate(false);
-    const c = cameraRef.current;
+    const c = r?.camera ?? cameraRef.current;
     const centre = toWorld(c, { x: prevView.width / 2, y: prevView.height / 2 });
     const before = fitCamera(layout.bounds, prevView);
     const s = fit.s * (c.s / before.s);
-    setCamera({ x: view.width / 2 - centre.x * s, y: view.height / 2 - centre.y * s, s });
-  }, [view, fit, layout]);
+    moveCamera({ x: view.width / 2 - centre.x * s, y: view.height / 2 - centre.y * s, s });
+  }, [view, fit, layout, moveCamera]);
+
+  // While the layout settles, keep the opening camera on it until the viewer moves. Once they
+  // picked a note, keep that note centred at the current step as the notes move under it.
+  useLayoutEffect(() => {
+    if (userMoved.current) {
+      const sel = selectedRef.current;
+      const p = sel ? (layout.positions.get(sel) ?? null) : null;
+      if (p) {
+        const atLevel = levelFor(cameraRef.current.s, fit.s);
+        moveCamera(stepCamera(atLevel, p, fit, viewRef.current));
+      }
+      return;
+    }
+    const p = startFocus ? (layout.positions.get(startFocus) ?? null) : null;
+    moveCamera(stepCamera(p ? 3 : 0, p, fit, viewRef.current));
+  }, [layout, fit, startFocus, moveCamera]);
 
   const level = levelFor(camera.s, fit.s);
 
-  const visible = useMemo(() => data.nodes.filter((n) => isVisible(n, filters)), [data, filters]);
+  // Keyed on the fields isVisible reads, so toggling topic labels doesn't rebuild the scene.
+  const { hidden, legacy } = filters;
+  const visible = useMemo(
+    () => data.nodes.filter((n) => isVisible(n, { hidden, legacy })),
+    [data, hidden, legacy],
+  );
   const visibleKeys = useMemo(() => new Set(visible.map((n) => n.key)), [visible]);
   const visibleEdges = useMemo(
     () =>
@@ -202,7 +329,16 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
     [data, visibleKeys, filters.suggested],
   );
 
-  // The focus: the selected note, or at the close steps the note nearest the centre.
+  const scene = useMemo(
+    () => toScene(visible, visibleEdges, layout.positions, colourSlots),
+    [visible, visibleEdges, layout, colourSlots],
+  );
+  useLayoutEffect(() => {
+    rendererRef.current?.setScene(scene);
+  }, [scene]);
+
+  // The focus: the selected note, or at the close steps the note nearest the centre of the
+  // settled camera (not the mid-animation picture, so it names where the move is going).
   const nearest = useMemo(() => {
     const centre = toWorld(camera, { x: view.width / 2, y: view.height / 2 });
     let best: GraphNode | null = null;
@@ -225,6 +361,28 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
   const focusNode = focusKey ? (byKey.get(focusKey) ?? null) : null;
   const focusPos = focusKey ? posOf(focusKey) : null;
 
+  // Emphasis: the focus ring, the hovered note (kept in a ref, set per frame by the pointer)
+  // and the legend's highlighted type.
+  const hoverRef = useRef<string | null>(null);
+  const emphasisRef = useRef<{ focusKey: string | null; lit: ReadonlySet<string> | null }>({
+    focusKey: null,
+    lit: null,
+  });
+  const pushEmphasis = useCallback(() => {
+    rendererRef.current?.setEmphasis({ ...emphasisRef.current, hoverKey: hoverRef.current });
+  }, []);
+  const litKeys = useMemo(
+    () =>
+      litKind === null
+        ? null
+        : new Set(visible.filter((n) => n.kind === litKind).map((n) => n.key)),
+    [visible, litKind],
+  );
+  useLayoutEffect(() => {
+    emphasisRef.current = { focusKey, lit: litKeys };
+    pushEmphasis();
+  }, [focusKey, litKeys, pushEmphasis]);
+
   const neighbours = useMemo(
     () =>
       focusKey
@@ -241,11 +399,20 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
   const cards = useMemo(() => cardsFor(neighbours, expanded), [neighbours, expanded]);
   const detailScale = fit.s * STEPS[3];
   const slots = useMemo(() => cardSlots(cards.length, view), [cards.length, view]);
-  const slotWorld = (i: number): Point | null => {
-    const slot = slots[i];
-    if (!focusPos || !slot) return null;
-    return { x: focusPos.x + slot.x / detailScale, y: focusPos.y + slot.y / detailScale };
-  };
+  const places = useMemo(
+    () =>
+      cards.map((card, i) => {
+        const slot = slots[i];
+        if (!focusPos || !slot) return null;
+        const dotKey =
+          card.type === "note" ? card.neighbour.node.key : (card.members[0]?.node.key ?? "");
+        return {
+          slot: { x: focusPos.x + slot.x / detailScale, y: focusPos.y + slot.y / detailScale },
+          from: layout.positions.get(dotKey) ?? focusPos,
+        };
+      }),
+    [cards, slots, focusPos, detailScale, layout],
+  );
 
   // Cards mount hidden at their dot, then one styled frame later move to their slots, so
   // every new card grows out of its dot while the camera moves.
@@ -263,7 +430,11 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
   }, [renderSig, ready, reduced]);
 
   const shown = level >= 2 && focusPos !== null;
-  const isShown = (key: string) => shown && ready.has(key);
+
+  // After every commit the overlay's points may have changed: place it for the live camera.
+  useLayoutEffect(() => {
+    placerRef.current?.place();
+  });
 
   const focusStage = useCallback(() => {
     stageRef.current?.focus({ preventScroll: true });
@@ -273,7 +444,7 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
   useEffect(() => {
     if (shown) return;
     const active = document.activeElement;
-    if (active && worldRef.current?.contains(active)) focusStage();
+    if (active && overlayRef.current?.contains(active)) focusStage();
   }, [shown, focusStage]);
 
   // Keep the URL on the selected note, without a hash change that would reload the page.
@@ -300,18 +471,17 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
       if (route.name !== "graph" || (route.domain && route.domain !== domain)) return;
       const f = route.focus ?? null;
       if (f === selectedRef.current) return;
-      setAnimate(true);
-      setLive(false);
+      userMoved.current = true;
       setExpanded(new Set());
       if (f && byKey.has(f)) {
         setMissing(null);
         setSelected(f);
-        setCamera(stepCamera(3, posOf(f), fitRef.current, viewRef.current));
+        moveCamera(stepCamera(3, posOf(f), fitRef.current, viewRef.current), duration.zoom);
         return;
       }
       setMissing(f);
       setSelected(null);
-      setCamera(fitRef.current);
+      moveCamera(fitRef.current, duration.zoom);
     };
     window.addEventListener("hashchange", onHash);
     // Back and Forward between graph entries made with pushState fire popstate.
@@ -320,21 +490,23 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
       window.removeEventListener("hashchange", onHash);
       window.removeEventListener("popstate", onHash);
     };
-  }, [domain, byKey, posOf]);
+  }, [domain, byKey, posOf, moveCamera]);
 
   const goTo = useCallback(
     (target: Level, key: string | null = null) => {
       const k = key ?? focusKey ?? nearest?.key ?? null;
-      setAnimate(true);
-      setLive(false);
+      userMoved.current = true;
       if (target === 0) {
-        setCamera(fitRef.current);
+        moveCamera(fitRef.current, duration.zoom);
         return;
       }
       if (key) setSelected(key);
-      setCamera(stepCamera(target, k ? posOf(k) : null, fitRef.current, viewRef.current));
+      moveCamera(
+        stepCamera(target, k ? posOf(k) : null, fitRef.current, viewRef.current),
+        duration.zoom,
+      );
     },
-    [focusKey, nearest, posOf],
+    [focusKey, nearest, posOf, moveCamera],
   );
 
   /** Moves to a note. From a control that is about to unmount, focus goes to the stage. */
@@ -359,157 +531,173 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
     goTo(nextLevel(level, -1));
   }, [goTo, level]);
 
-  /** The camera as drawn right now, mid-animation included. */
-  const liveCamera = useCallback((): Camera => {
-    const c = cameraRef.current;
-    const el = cameraElRef.current;
-    if (!animateRef.current || !el || typeof DOMMatrix === "undefined") return c;
-    try {
-      const t = window.getComputedStyle(el).transform;
-      if (!t || t === "none") return c;
-      const m = new DOMMatrix(t);
-      return m.a > 0 ? { x: m.e, y: m.f, s: m.a } : c;
-    } catch {
-      return c;
-    }
-  }, []);
+  // Drag to move; a press that doesn't move is a click on the note under it.
+  const drag = useRef<{
+    x: number;
+    y: number;
+    moved: boolean;
+    id: number;
+    hit: string | null;
+  } | null>(null);
+  const localPoint = (e: PointerEvent<HTMLDivElement>): Point => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+  };
 
-  /** Stops an animated move where it is, so a live move continues from the picture. */
-  const interrupt = useCallback(() => {
-    if (!animateRef.current) return;
-    const c = liveCamera();
-    cameraRef.current = c;
-    animateRef.current = false;
-    setCamera(c);
-    setAnimate(false);
-  }, [liveCamera]);
+  // Hover: at most one pick per frame, however fast the pointer moves.
+  const hoverAt = useRef<Point | null>(null);
+  const hoverFrame = useRef(0);
+  const setHover = useCallback(
+    (key: string | null) => {
+      if (key === hoverRef.current) return;
+      hoverRef.current = key;
+      if (stageRef.current) stageRef.current.style.cursor = key ? "pointer" : "";
+      pushEmphasis();
+    },
+    [pushEmphasis],
+  );
+  useEffect(
+    () => () => {
+      if (hoverFrame.current) cancelAnimationFrame(hoverFrame.current);
+    },
+    [],
+  );
+  const scheduleHover = (p: Point) => {
+    hoverAt.current = p;
+    if (hoverFrame.current || typeof requestAnimationFrame !== "function") return;
+    hoverFrame.current = requestAnimationFrame(() => {
+      hoverFrame.current = 0;
+      const at = hoverAt.current;
+      if (!at) return;
+      setHover(rendererRef.current?.pick(at.x, at.y) ?? null);
+    });
+  };
 
-  // Wheel and trackpad: live zoom about the pointer, merged into one update per frame.
-  // React's onWheel is passive, so this listens directly.
-  const idle = useRef<number | undefined>(undefined);
+  // Wheel and trackpad: zoom about the pointer (or pan sideways) on the renderer's camera,
+  // with no React update until the gesture ends. React's onWheel is passive, so this
+  // listens directly.
   useEffect(() => {
     const el = stageRef.current;
     if (!el) return;
-    let pending: { factor: number; anchor: Point; dx: number } | null = null;
-    let frame = 0;
-    const flush = () => {
-      frame = 0;
-      const p = pending;
-      pending = null;
-      if (!p) return;
-      setCamera((c) => {
-        const panned = p.dx ? pan(c, p.dx, 0) : c;
-        return p.factor === 1 ? panned : zoomAt(panned, p.factor, p.anchor, fitRef.current.s);
-      });
-    };
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
-      interrupt();
+      const r = rendererRef.current;
+      if (!r) return;
+      userMoved.current = true;
       const rect = el.getBoundingClientRect();
       const anchor = { x: e.clientX - rect.left, y: e.clientY - rect.top };
-      setAnimate(false);
-      setLive(true);
-      const p = pending ?? { factor: 1, anchor, dx: 0 };
-      p.anchor = anchor;
-      if (e.ctrlKey || !e.deltaX || Math.abs(e.deltaY) >= Math.abs(e.deltaX)) {
-        p.factor *= wheelFactor(e.deltaY, e.deltaMode);
-      } else {
-        p.dx -= e.deltaX;
-      }
-      pending = p;
-      if (typeof window.requestAnimationFrame === "function") {
-        if (!frame) frame = window.requestAnimationFrame(flush);
-      } else {
-        flush();
-      }
-      window.clearTimeout(idle.current);
-      idle.current = window.setTimeout(() => setLive(false), 160);
+      const c = r.camera;
+      const zoom = e.ctrlKey || !e.deltaX || Math.abs(e.deltaY) >= Math.abs(e.deltaX);
+      r.setCamera(
+        zoom
+          ? zoomAt(c, wheelFactor(e.deltaY, e.deltaMode), anchor, fitRef.current.s)
+          : pan(c, -e.deltaX, 0),
+      );
+      window.clearTimeout(wheelIdle.current);
+      wheelIdle.current = window.setTimeout(() => {
+        wheelIdle.current = undefined;
+        syncCamera();
+        // The notes moved under a still pointer, so re-pick what it is over.
+        const at = hoverAt.current;
+        if (at) setHover(rendererRef.current?.pick(at.x, at.y) ?? null);
+      }, WHEEL_IDLE_MS);
     };
     el.addEventListener("wheel", onWheel, { passive: false });
     return () => {
       el.removeEventListener("wheel", onWheel);
-      if (frame) window.cancelAnimationFrame(frame);
-      window.clearTimeout(idle.current);
+      window.clearTimeout(wheelIdle.current);
     };
-  }, [interrupt]);
+  }, [syncCamera, setHover]);
 
-  const hitTest = (screen: Point): GraphNode | null => {
-    const c = liveCamera();
-    const w = toWorld(c, screen);
-    let best: GraphNode | null = null;
-    let bestD = Number.POSITIVE_INFINITY;
-    for (const n of visible) {
-      const p = layout.positions.get(n.key);
-      if (!p) continue;
-      const d = Math.hypot(p.x - w.x, p.y - w.y);
-      const reach = Math.max(dotRadius(n), 10 / c.s);
-      if (d <= reach && d < bestD) {
-        bestD = d;
-        best = n;
-      }
-    }
-    return best;
+  /** Drops the hover, including a pick still queued for the next frame. */
+  const clearHover = () => {
+    if (hoverFrame.current) cancelAnimationFrame(hoverFrame.current);
+    hoverFrame.current = 0;
+    hoverAt.current = null;
+    setHover(null);
   };
 
-  // Drag to move; a press that doesn't move is a click on the nearest dot.
-  const drag = useRef<{ x: number; y: number; moved: boolean; id: number; hit: Point } | null>(
-    null,
-  );
   const onPointerDown = (e: PointerEvent<HTMLDivElement>) => {
     if (e.button !== 0 || e.target !== e.currentTarget) return;
-    const rect = e.currentTarget.getBoundingClientRect();
-    const hit = { x: e.clientX - rect.left, y: e.clientY - rect.top };
-    // Hit-test against the picture on screen before stopping the move.
-    const found = animateRef.current ? hitTest(hit) : null;
-    interrupt();
+    const r = rendererRef.current;
+    const p = localPoint(e);
+    // Pick against the picture on screen, then stop any animated move where it is.
+    const hit = r?.pick(p.x, p.y) ?? null;
+    r?.setCamera(r.camera);
     drag.current = { x: e.clientX, y: e.clientY, moved: false, id: e.pointerId, hit };
-    pressHit.current = found;
     e.currentTarget.setPointerCapture?.(e.pointerId);
   };
-  const pressHit = useRef<GraphNode | null>(null);
   const onPointerMove = (e: PointerEvent<HTMLDivElement>) => {
     const d = drag.current;
-    if (!d || d.id !== e.pointerId) return;
+    if (!d) {
+      if (e.target === e.currentTarget) scheduleHover(localPoint(e));
+      else clearHover(); // over a card, no dot is under the pointer
+      return;
+    }
+    if (d.id !== e.pointerId) return;
     const dx = e.clientX - d.x;
     const dy = e.clientY - d.y;
-    if (!d.moved && Math.hypot(dx, dy) < 4) return;
+    if (!d.moved && Math.hypot(dx, dy) < DRAG_SLOP) return;
+    const r = rendererRef.current;
+    if (!r) return;
+    if (!d.moved) e.currentTarget.classList.add("graph-live");
     d.moved = true;
     d.x = e.clientX;
     d.y = e.clientY;
-    setAnimate(false);
-    setLive(true);
-    setCamera((c) => pan(c, dx, dy));
+    userMoved.current = true;
+    r.setCamera(pan(r.camera, dx, dy));
   };
-  const onPointerUp = (e: PointerEvent<HTMLDivElement>) => {
+  const endDrag = (e: PointerEvent<HTMLDivElement>) => {
     const d = drag.current;
     drag.current = null;
-    if (!d || d.id !== e.pointerId) return;
-    setLive(false);
-    if (d.moved) return;
-    const hit = pressHit.current ?? hitTest(d.hit);
-    pressHit.current = null;
-    if (hit) focusNote(hit.key);
+    e.currentTarget.classList.remove("graph-live");
+    return d && d.id === e.pointerId ? d : null;
+  };
+  const onPointerUp = (e: PointerEvent<HTMLDivElement>) => {
+    const d = endDrag(e);
+    if (!d) return;
+    if (!d.moved && d.hit) {
+      focusNote(d.hit);
+      return;
+    }
+    syncCamera();
+  };
+  const onPointerCancel = (e: PointerEvent<HTMLDivElement>) => {
+    if (endDrag(e)) syncCamera();
   };
 
-  const keyMove = (key: string, step: number, centre: Point): (() => void) | null => {
+  const keyMove = (key: string): (() => void) | null => {
+    const centre = { x: view.width / 2, y: view.height / 2 };
+    // Start from where the camera is going: an animation's target (cameraRef), else the
+    // renderer's camera, which is ahead of React's copy during a wheel gesture.
+    const from = () => {
+      const r = rendererRef.current;
+      return !r || r.animating ? cameraRef.current : r.camera;
+    };
+    const panBy = (dx: number, dy: number) => () => moveCamera(pan(from(), dx, dy), duration.view);
+    const zoomBy = (factor: number) => () =>
+      moveCamera(zoomAt(from(), factor, centre, fit.s), duration.zoom);
     switch (key) {
       case "ArrowLeft":
-        return () => setCamera((c) => pan(c, step, 0));
+        return panBy(PAN_STEP, 0);
       case "ArrowRight":
-        return () => setCamera((c) => pan(c, -step, 0));
+        return panBy(-PAN_STEP, 0);
       case "ArrowUp":
-        return () => setCamera((c) => pan(c, 0, step));
+        return panBy(0, PAN_STEP);
       case "ArrowDown":
-        return () => setCamera((c) => pan(c, 0, -step));
+        return panBy(0, -PAN_STEP);
       case "+":
       case "=":
-        return () => setCamera((c) => zoomAt(c, 1.25, centre, fit.s));
+        return zoomBy(1.25);
       case "-":
-        return () => setCamera((c) => zoomAt(c, 0.8, centre, fit.s));
+        return zoomBy(0.8);
       case "0":
         return () => goTo(0);
-      case "Enter":
-        return nearest ? () => focusNote(nearest.key) : null;
+      case "Enter": {
+        // The note the focus and its cards show; nearest skips topic rings.
+        const near = focusKey ?? nearest?.key ?? null;
+        return near ? () => focusNote(near) : null;
+      }
       default:
         return null;
     }
@@ -517,11 +705,10 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
 
   const onStageKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
     if (e.target !== stageRef.current || e.key === "Escape") return;
-    const centre = { x: view.width / 2, y: view.height / 2 };
-    const move = keyMove(e.key, 48, centre);
+    const move = keyMove(e.key);
     if (!move) return;
     e.preventDefault();
-    if (e.key !== "0" && e.key !== "Enter") setAnimate(!reduced);
+    userMoved.current = true;
     move();
   };
 
@@ -545,7 +732,37 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
     zoomOut();
   };
 
-  const transition = animate && !live && !reduced ? "graph-animate" : "";
+  // Development only: ?perf=1 runs the performance probe once the layout settles.
+  const [perf] = useState(wantsPerfProbe);
+  const mountedAt = useRef(performance.now());
+  // biome-ignore lint/correctness/useExhaustiveDependencies: runs once per settle, not per scene change
+  useEffect(() => {
+    if (!import.meta.env.DEV || !perf || arranging) return;
+    const layoutMs = performance.now() - mountedAt.current;
+    const r = rendererRef.current;
+    if (!r) return;
+    let cancelled = false;
+    const centre = {
+      x: (layout.bounds.minX + layout.bounds.maxX) / 2,
+      y: (layout.bounds.minY + layout.bounds.maxY) / 2,
+    };
+    void import("./perfProbe").then(async ({ runPerfProbe }) => {
+      if (cancelled) return;
+      await runPerfProbe({
+        renderer: r,
+        nodes: scene.nodes.length,
+        edges: scene.edges.length,
+        layoutMs,
+        whole: fitRef.current,
+        close: stepCamera(3, centre, fitRef.current, viewRef.current),
+        durationMs: duration.zoom,
+      });
+      if (!cancelled) syncCamera();
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [perf, arranging]);
 
   const linkCount = data.edges.length;
   const focusLabel = focusNode?.key ?? "a note";
@@ -558,13 +775,13 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
     `Around ${focusLabel}: ${formatCount(recorded)} recorded links${suggested ? ` and ${formatCount(suggested)} suggested by reflect` : ""}`,
   ][level];
 
-  // Screen readers hear only settled states, not every frame of a live move.
+  // Screen readers hear only settled states. Camera state only changes once a gesture ends,
+  // so a short delay is enough to skip the steps of a quick series of moves.
   const [announced, setAnnounced] = useState(caption);
   useEffect(() => {
-    if (live) return;
     const t = window.setTimeout(() => setAnnounced(caption), 300);
     return () => window.clearTimeout(t);
-  }, [caption, live]);
+  }, [caption]);
 
   const stepOptions = [
     ...LEVEL_NAMES.map((label, i) => ({ value: String(i), label })),
@@ -572,14 +789,22 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
   ];
   const matches = useMemo(() => findNodes(visible, query), [visible, query]);
   const inspected = shownSelected ? (byKey.get(shownSelected) ?? null) : null;
-  const highlight = level < 2 ? shownSelected : null;
 
-  // World-space placement for the HTML layer; `k` keeps a constant on-screen size.
-  const at = (p: Point, k: number, anchor = "-50%, -50%"): CSSProperties => ({
-    transform: `translate(${p.x}px, ${p.y}px) translate(${anchor}) scale(${k})`,
+  const topics = useMemo(
+    () =>
+      filters.topicLabels
+        ? visible.flatMap((n) => {
+            const at = n.kind === TOPIC_KIND ? layout.positions.get(n.key) : undefined;
+            return at ? [{ key: n.key, title: n.title, at }] : [];
+          })
+        : [],
+    [filters.topicLabels, visible, layout],
+  );
+  const onOpenCard = useStableCallback((key: string) => focusNote(key, true));
+  const onExpandGroup = useStableCallback((kind: NoteKind) => {
+    setExpanded((prev) => new Set([...prev, kind]));
+    focusStage();
   });
-  const label = 1 / camera.s;
-  const cardK = 1 / detailScale;
 
   const stageEmpty =
     data.nodes.length === 0 ? (
@@ -644,8 +869,7 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
         </header>
         <div
           ref={stageRef}
-          className={`graph-stage ${transition}${live ? " graph-live" : ""}`}
-          style={dotStyle(camera)}
+          className="graph-stage"
           role="application"
           aria-label={`Graph of ${areaLabel}. Arrow keys move, plus and minus zoom, Enter opens the note nearest the centre, Escape zooms out.`}
           aria-describedby="graph-stage-hint"
@@ -654,175 +878,39 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
           onPointerDown={onPointerDown}
           onPointerMove={onPointerMove}
           onPointerUp={onPointerUp}
-          onPointerCancel={() => {
-            drag.current = null;
-            setLive(false);
-          }}
+          onPointerCancel={onPointerCancel}
+          onPointerLeave={clearHover}
           onKeyDown={onStageKeyDown}
         >
-          <svg className="graph-svg" width={view.width} height={view.height} aria-hidden="true">
-            <g
-              ref={cameraElRef}
-              className="graph-camera"
-              style={{ transform: cameraTransform(camera) }}
-            >
-              <Background
-                edges={visibleEdges}
-                nodes={visible}
-                positions={layout.positions}
-                focusKey={focusKey}
-                highlight={highlight}
-                highlightKind={litKind}
-                slots={colourSlots}
-                opacity={BG_OPACITY[level]}
-              />
-              {focusPos && (
-                <g className="graph-focus-edges" style={{ opacity: shown ? 1 : 0 }}>
-                  {cards.map((card, i) => {
-                    const p = slotWorld(i);
-                    if (!p) return null;
-                    const edgeClass =
-                      card.type !== "note"
-                        ? ""
-                        : card.neighbour.edge.suggested
-                          ? " graph-edge-suggested"
-                          : card.neighbour.node.status === "legacy"
-                            ? " graph-edge-legacy"
-                            : "";
-                    const fade = litKind !== null && cardKind(card) !== litKind ? " graph-dim" : "";
-                    return (
-                      <line
-                        key={cardKey(card)}
-                        className={`graph-edge-strong${edgeClass}${fade}`}
-                        x1={focusPos.x}
-                        y1={focusPos.y}
-                        x2={p.x}
-                        y2={p.y}
-                        vectorEffect="non-scaling-stroke"
-                      />
-                    );
-                  })}
-                </g>
-              )}
-            </g>
-          </svg>
-
-          <div
-            ref={worldRef}
-            className="graph-html graph-world"
-            style={{ transform: cameraTransform(camera) }}
-          >
-            {filters.topicLabels &&
-              visible
-                .filter((n) => n.kind === TOPIC_KIND)
-                .map((n) => {
-                  const p = layout.positions.get(n.key);
-                  if (!p) return null;
-                  return (
-                    <span
-                      key={n.key}
-                      className="graph-topic-label"
-                      aria-hidden="true"
-                      style={{
-                        ...at({ x: p.x, y: p.y + dotRadius(n) + 6 * label }, label, "-50%, 0"),
-                        opacity: level < 2 ? 1 : 0,
-                      }}
-                    >
-                      {n.title}
-                    </span>
-                  );
-                })}
-            {focusNode && focusPos && (
-              <span
-                className="graph-dot-label"
-                aria-hidden="true"
-                style={{
-                  ...at({ x: focusPos.x, y: focusPos.y + 10 * label }, label, "-50%, 0"),
-                  opacity: shown ? 0 : 1,
-                }}
-              >
-                {focusNode.key}
-              </span>
-            )}
-            {focusPos &&
-              cards.map((card, i) => {
-                const p = slotWorld(i);
-                if (!p || card.type !== "note") return null;
-                const mid = { x: (focusPos.x + p.x) / 2, y: (focusPos.y + p.y) / 2 };
-                const e = card.neighbour.edge;
-                const on = isShown(cardKey(card)) && level === 3;
-                return (
-                  <span
-                    key={`label:${cardKey(card)}`}
-                    className={`graph-edge-label${e.suggested ? " graph-edge-label-suggested" : ""}`}
-                    aria-hidden={!on}
-                    style={{ ...at(mid, cardK), opacity: on ? 1 : 0 }}
-                  >
-                    {e.relation}
-                    {e.suggested ? " · not recorded" : ""}
-                  </span>
-                );
-              })}
-            {focusNode &&
-              focusPos &&
-              (() => {
-                const on = isShown(`focus:${focusNode.key}`);
-                return (
-                  <a
-                    key={focusNode.key}
-                    className="k-node graph-card graph-card-focus"
-                    href={noteHref(focusNode.domain, focusNode.key)}
-                    tabIndex={on ? 0 : -1}
-                    inert={!on}
-                    style={{
-                      ...at(focusPos, on ? cardK : cardK * 0.05),
-                      opacity: on ? 1 : 0,
-                      pointerEvents: on ? "auto" : "none",
-                    }}
-                  >
-                    <span className="k-node-kind">
-                      <span>
-                        <span className="k-mono">{focusNode.key}</span> ·{" "}
-                        {kindLabel(focusNode.kind)}
-                      </span>
-                    </span>
-                    <span className="k-node-title">{focusNode.title}</span>
-                  </a>
-                );
-              })()}
-            {focusPos &&
-              cards.map((card, i) => {
-                const slot = slotWorld(i);
-                if (!slot) return null;
-                const from =
-                  card.type === "note"
-                    ? posOf(card.neighbour.node.key)
-                    : posOf(card.members[0]?.node.key ?? "");
-                const on = isShown(cardKey(card));
-                const dim = litKind !== null && cardKind(card) !== litKind;
-                const style: CSSProperties = {
-                  ...at(on ? slot : (from ?? focusPos), on ? cardK : cardK * 0.05),
-                  opacity: on ? (dim ? CARD_DIM : 1) : 0,
-                  pointerEvents: on ? "auto" : "none",
-                };
-                return (
-                  <CardButton
-                    key={cardKey(card)}
-                    card={card}
-                    slots={colourSlots}
-                    dim={dim}
-                    style={style}
-                    shown={on}
-                    onOpen={(key) => focusNote(key, true)}
-                    onExpand={(kind) => {
-                      setExpanded((prev) => new Set([...prev, kind]));
-                      focusStage();
-                    }}
-                  />
-                );
-              })}
-          </div>
+          {/* biome-ignore lint/a11y/noAriaHiddenOnFocusable: the canvas has no tabindex; the stage and the overlay carry its meaning */}
+          <canvas
+            ref={canvasRef}
+            className="graph-canvas"
+            aria-hidden="true"
+            style={{ opacity: BG_OPACITY[level] }}
+          />
+          <Overlay
+            rootRef={overlayRef}
+            topics={topics}
+            topicsOn={level < 2}
+            focusNode={focusNode}
+            focusPos={focusPos}
+            cards={cards}
+            places={places}
+            ready={ready}
+            shown={shown}
+            labelsOn={level === 3}
+            litKind={litKind}
+            slots={colourSlots}
+            onOpen={onOpenCard}
+            onExpand={onExpandGroup}
+          />
           {stageEmpty && <div className="graph-stage-empty">{stageEmpty}</div>}
+          {arranging && data.nodes.length > 0 && (
+            <p className="graph-status" role="status">
+              Arranging notes
+            </p>
+          )}
           <p id="graph-stage-hint" className="graph-hint">
             {level < 2
               ? "Scroll to zoom and drag to move. Click a note to see it with its links."
@@ -889,197 +977,5 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
         )}
       </aside>
     </>
-  );
-}
-
-interface BackgroundProps {
-  edges: GraphEdge[];
-  nodes: GraphNode[];
-  positions: ReadonlyMap<string, Point>;
-  focusKey: string | null;
-  /** The selected note whose links stand out at the far steps. */
-  highlight: string | null;
-  /** The type hovered or focused in the legend: its notes stay bright, the rest dim. */
-  highlightKind: NoteKind | null;
-  slots: ColourSlots;
-  opacity: number;
-}
-
-/** Every edge and dot. Memoised so a camera move only changes the camera transform. */
-const Background = memo(function Background({
-  edges,
-  nodes,
-  positions,
-  focusKey,
-  highlight,
-  highlightKind,
-  slots,
-  opacity,
-}: BackgroundProps) {
-  const kindOf = useMemo(() => new Map(nodes.map((n) => [n.key, n.kind])), [nodes]);
-  const dimmed = (key: string) => highlightKind !== null && kindOf.get(key) !== highlightKind;
-  const focusAt = focusKey ? positions.get(focusKey) : undefined;
-  const focusNode = focusKey ? nodes.find((n) => n.key === focusKey) : undefined;
-  return (
-    <g className="graph-bg" style={{ opacity }}>
-      {edges.map((e) => {
-        const a = positions.get(e.source);
-        const b = positions.get(e.target);
-        if (!a || !b) return null;
-        const touches = highlight !== null && (e.source === highlight || e.target === highlight);
-        const base = e.suggested
-          ? "graph-edge graph-edge-suggested"
-          : touches
-            ? "graph-edge graph-edge-selected"
-            : "graph-edge";
-        const cls = dimmed(e.source) && dimmed(e.target) ? `${base} graph-dim` : base;
-        return (
-          <line
-            key={`${e.source}>${e.target}>${e.relation}`}
-            className={cls}
-            x1={a.x}
-            y1={a.y}
-            x2={b.x}
-            y2={b.y}
-            vectorEffect="non-scaling-stroke"
-          />
-        );
-      })}
-      {nodes.map((n) => (
-        <Dot
-          key={n.key}
-          node={n}
-          at={positions.get(n.key)}
-          colour={colourFor(slots, n.kind)}
-          slot={slotOf(slots, n.kind)}
-          dim={dimmed(n.key)}
-        />
-      ))}
-      {focusAt && focusNode && (
-        <circle
-          className="graph-dot-ring"
-          cx={focusAt.x}
-          cy={focusAt.y}
-          r={dotRadius(focusNode) + 2.5}
-          vectorEffect="non-scaling-stroke"
-        />
-      )}
-    </g>
-  );
-});
-
-function Dot({
-  node,
-  at,
-  colour,
-  slot,
-  dim,
-}: {
-  node: GraphNode;
-  at: Point | undefined;
-  colour: string;
-  /** The colour slot index, or -1 for grey. */
-  slot: number;
-  dim: boolean;
-}) {
-  if (!at) return null;
-  const r = dotRadius(node);
-  const fade = dim ? " graph-dim" : "";
-  if (node.kind === TOPIC_KIND) {
-    return (
-      <circle
-        className={`graph-ring${fade}`}
-        cx={at.x}
-        cy={at.y}
-        r={r}
-        vectorEffect="non-scaling-stroke"
-      />
-    );
-  }
-  return (
-    <circle
-      className={`graph-dot${node.status === "legacy" ? " graph-dot-legacy" : ""}${
-        slot === 1 ? " graph-dot-2" : slot === 2 ? " graph-dot-3" : ""
-      }${fade}`}
-      cx={at.x}
-      cy={at.y}
-      r={r}
-      style={{ fill: colour }}
-      vectorEffect="non-scaling-stroke"
-    />
-  );
-}
-
-interface CardButtonProps {
-  card: Card;
-  slots: ColourSlots;
-  style: CSSProperties;
-  shown: boolean;
-  /** Another type is highlighted in the legend. */
-  dim: boolean;
-  onOpen: (key: string) => void;
-  onExpand: (kind: NoteKind) => void;
-}
-
-/** A card of another type than the one highlighted in the legend. */
-const CARD_DIM = 0.35;
-
-/** The type a card stands for: its note's, or its group's. */
-function cardKind(card: Card): NoteKind {
-  return card.type === "group" ? card.kind : card.neighbour.node.kind;
-}
-
-function CardButton({ card, slots, style, shown, dim, onOpen, onExpand }: CardButtonProps) {
-  const hidden = { tabIndex: shown ? 0 : -1, "aria-hidden": !shown, inert: !shown };
-  const fade = dim ? " graph-dim" : "";
-  if (card.type === "group") {
-    const n = card.members.length;
-    return (
-      <button
-        type="button"
-        className={`k-node graph-card graph-card-group${fade}`}
-        style={style}
-        {...hidden}
-        onClick={() => onExpand(card.kind)}
-      >
-        <span className="k-node-kind">
-          <span>
-            <span className="graph-kind-dot" style={{ background: colourFor(slots, card.kind) }} />
-            {formatCount(n)} more {kindNoun(card.kind, n)}
-          </span>
-        </span>
-        <span className="k-node-title">Open the group</span>
-      </button>
-    );
-  }
-  const { node, edge } = card.neighbour;
-  const legacy = node.status === "legacy";
-  const cls = [
-    "k-node",
-    "graph-card",
-    edge.suggested ? "k-node-flagged" : "",
-    legacy ? "graph-card-legacy" : "",
-    dim ? "graph-dim" : "",
-  ]
-    .filter(Boolean)
-    .join(" ");
-  return (
-    <button
-      type="button"
-      className={cls}
-      style={style}
-      {...hidden}
-      onClick={() => onOpen(node.key)}
-    >
-      <span className="k-node-kind">
-        <span>
-          <span className="graph-kind-dot" style={{ background: colourFor(slots, node.kind) }} />
-          <span className="k-mono">{node.key}</span> · {kindLabel(node.kind)}
-        </span>
-        {legacy && <span>superseded</span>}
-        {edge.suggested && <span className="k-node-flag">suggested</span>}
-      </span>
-      <span className="k-node-title">{node.title}</span>
-    </button>
   );
 }

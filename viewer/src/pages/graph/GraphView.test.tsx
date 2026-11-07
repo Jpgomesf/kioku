@@ -4,9 +4,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { GraphData, GraphNode } from "../../api";
 import { getGraph } from "../../api/graph/mock";
 import { graphHref } from "../../app/router";
-import { fitCamera, toScreen } from "./camera";
+import { type Camera, fitCamera, STEPS, toScreen } from "./camera";
 import { GraphView } from "./GraphView";
 import { layoutFor } from "./layout";
+import { GraphRenderer } from "./renderer";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -18,10 +19,23 @@ afterEach(() => {
     host.remove();
   }
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
   window.history.replaceState(null, "", "#/");
 });
 
+/** The page's renderer, caught as it receives its first scene. */
+let renderer: GraphRenderer | null = null;
+
 function render(focus: string | undefined, data: GraphData = getGraph({ domain: "demo" })) {
+  renderer = null;
+  const real = GraphRenderer.prototype.setScene;
+  vi.spyOn(GraphRenderer.prototype, "setScene").mockImplementation(function (
+    this: GraphRenderer,
+    scene,
+  ) {
+    renderer = this;
+    real.call(this, scene);
+  });
   const host = document.createElement("div");
   document.body.append(host);
   const root = createRoot(host);
@@ -54,23 +68,35 @@ function key(target: Element | null, k: string) {
   });
 }
 
-/** Clicks the stage at a note's dot, as the whole-area camera draws it. */
-function clickDot(host: HTMLElement, noteKey: string, data = getGraph({ domain: "demo" })) {
+const VIEW = { width: 1000, height: 640 };
+
+/** Where the whole-area camera draws a note's dot. */
+function dotAt(noteKey: string, data = getGraph({ domain: "demo" })) {
   const layout = layoutFor("demo", data);
-  const cam = fitCamera(layout.bounds, { width: 1000, height: 640 });
   const p = layout.positions.get(noteKey);
   if (!p) throw new Error("no position");
-  const s = toScreen(cam, p);
-  const stage = stageOf(host);
+  return toScreen(fitCamera(layout.bounds, VIEW), p);
+}
+
+function pointer(host: HTMLElement, type: string, x: number, y: number, buttons = 1) {
   act(() => {
-    stage?.dispatchEvent(
-      new MouseEvent("pointerdown", { bubbles: true, button: 0, clientX: s.x, clientY: s.y }),
-    );
-    stage?.dispatchEvent(
-      new MouseEvent("pointerup", { bubbles: true, button: 0, clientX: s.x, clientY: s.y }),
+    stageOf(host)?.dispatchEvent(
+      new MouseEvent(type, { bubbles: true, button: 0, buttons, clientX: x, clientY: y }),
     );
   });
 }
+
+/** Clicks the stage at a note's dot, as the whole-area camera draws it. */
+function clickDot(host: HTMLElement, noteKey: string) {
+  const s = dotAt(noteKey);
+  pointer(host, "pointerdown", s.x, s.y);
+  pointer(host, "pointerup", s.x, s.y);
+}
+
+const cameraOf = (): Camera => {
+  if (!renderer) throw new Error("no renderer");
+  return renderer.camera;
+};
 
 const node = (key: string, kind: GraphNode["kind"] = "decision"): GraphNode => ({
   key,
@@ -128,10 +154,22 @@ describe("GraphView", () => {
     expect(after?.hasAttribute("inert")).toBe(false);
   });
 
+  it("draws on one hidden canvas, not SVG elements per note", () => {
+    const host = render(undefined);
+    const canvas = stageOf(host)?.querySelectorAll("canvas");
+    expect(canvas).toHaveLength(1);
+    expect(canvas?.[0]?.getAttribute("aria-hidden")).toBe("true");
+    expect(stageOf(host)?.querySelectorAll("circle")).toHaveLength(0);
+    expect(stageOf(host)?.getAttribute("role")).toBe("application");
+    expect(renderer?.pick(dotAt("jobs-worker").x, dotAt("jobs-worker").y)).toBe("jobs-worker");
+  });
+
   it("animates step moves", () => {
+    const animate = vi.spyOn(GraphRenderer.prototype, "animateTo");
     const host = render(undefined);
     clickDot(host, "jobs-worker");
-    expect(stageOf(host)?.className).toContain("graph-animate");
+    expect(animate).toHaveBeenCalled();
+    expect(animate.mock.calls.at(-1)?.[1]).toBeGreaterThan(0);
   });
 
   it("makes moves instant under reduced motion", () => {
@@ -142,8 +180,10 @@ describe("GraphView", () => {
       removeEventListener: () => undefined,
     }));
     const host = render(undefined);
+    const fitS = cameraOf().s;
     clickDot(host, "jobs-worker");
-    expect(stageOf(host)?.className).not.toContain("graph-animate");
+    // The renderer is already at the neighbourhood step, with no frames in between.
+    expect(cameraOf().s).toBeCloseTo(fitS * STEPS[2]);
     const card = host.querySelector<HTMLElement>(".graph-card:not(.graph-card-focus)");
     expect(card?.style.opacity).toBe("1");
   });
@@ -157,8 +197,67 @@ describe("GraphView", () => {
         );
       }
     });
-    await frames();
+    // The renderer moves at once; React hears about it once the wheel goes quiet.
+    expect(cameraOf().s).toBeGreaterThan(1);
+    expect(caption(host)).toContain("Whole area:");
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 200));
+    });
     expect(caption(host)).not.toContain("Whole area:");
+  });
+
+  it("drags the camera on the renderer, and a drag is not a click", () => {
+    const host = render(undefined);
+    const before = cameraOf();
+    pointer(host, "pointerdown", 500, 300);
+    pointer(host, "pointermove", 560, 330);
+    pointer(host, "pointermove", 620, 360);
+    expect(cameraOf().x).toBeCloseTo(before.x + 120);
+    expect(stageOf(host)?.classList.contains("graph-live")).toBe(true);
+    pointer(host, "pointerup", 620, 360, 0);
+    expect(stageOf(host)?.classList.contains("graph-live")).toBe(false);
+    expect(caption(host)).toContain("Whole area:");
+    // A drag is not a click: nothing got focused.
+    expect(host.querySelector("#graph-inspector-title")).toBeNull();
+  });
+
+  it("moves the dot grid and the overlay with the renderer's camera", () => {
+    const host = render("jobs-worker");
+    const card = host.querySelector<HTMLElement>(".graph-card-focus");
+    const before = card?.style.transform;
+    const gridBefore = stageOf(host)?.style.getPropertyValue("--dot-x");
+    act(() => renderer?.setCamera({ ...cameraOf(), x: cameraOf().x + 40 }));
+    expect(card?.style.transform).not.toBe(before);
+    expect(stageOf(host)?.style.getPropertyValue("--dot-x")).not.toBe(gridBefore);
+  });
+
+  it("points over notes on hover", async () => {
+    const host = render(undefined);
+    const s = dotAt("jobs-worker");
+    pointer(host, "pointermove", s.x, s.y, 0);
+    await frames();
+    expect(stageOf(host)?.style.cursor).toBe("pointer");
+    pointer(host, "pointermove", 2, 2, 0);
+    await frames();
+    expect(stageOf(host)?.style.cursor).toBe("");
+  });
+
+  it("opens the note nearest the centre on Enter", () => {
+    const host = render(undefined);
+    const expected = renderer?.nearest(VIEW.width / 2, VIEW.height / 2);
+    expect(expected).toBeTruthy();
+    key(stageOf(host), "Enter");
+    expect(caption(host)).toContain(`Neighbourhood: ${expected}`);
+  });
+
+  it("zooms with plus and minus, animated", () => {
+    const animate = vi.spyOn(GraphRenderer.prototype, "animateTo");
+    const host = render(undefined);
+    for (let i = 0; i < 3; i += 1) key(stageOf(host), "+");
+    expect(caption(host)).not.toContain("Whole area:");
+    expect(animate).toHaveBeenCalledTimes(3);
+    for (let i = 0; i < 3; i += 1) key(stageOf(host), "-");
+    expect(caption(host)).toContain("Whole area:");
   });
 
   it("keeps the URL on the selection", () => {

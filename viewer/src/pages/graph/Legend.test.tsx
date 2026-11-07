@@ -4,6 +4,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { GraphData, GraphNode } from "../../api";
 import { GraphView } from "./GraphView";
 import { DEFAULT_FILTERS, isVisible, toggleHidden } from "./model";
+import { GraphRenderer } from "./renderer";
+import type { Emphasis, Scene } from "./scene";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -51,7 +53,21 @@ function manyTypes(): GraphData {
   };
 }
 
+// jsdom has no 2D context, so these read what the page hands the renderer.
+function lastScene(): Scene {
+  const calls = vi.mocked(GraphRenderer.prototype.setScene).mock.calls;
+  const scene = calls.at(-1)?.[0];
+  if (!scene) throw new Error("no scene");
+  return scene;
+}
+function lastEmphasis(): Emphasis | undefined {
+  return vi.mocked(GraphRenderer.prototype.setEmphasis).mock.calls.at(-1)?.[0];
+}
+const litCount = () => lastEmphasis()?.lit?.size ?? 0;
+
 function render(data: GraphData = manyTypes()) {
+  vi.spyOn(GraphRenderer.prototype, "setScene");
+  vi.spyOn(GraphRenderer.prototype, "setEmphasis");
   const host = document.createElement("div");
   document.body.append(host);
   const root = createRoot(host);
@@ -114,8 +130,14 @@ describe("Legend", () => {
     const host = render();
     pick(selects(host)[2], "decision");
     expect(selects(host).map((s) => s.value)).toEqual(["", "question", "decision"]);
-    const dot = host.querySelector<SVGCircleElement>(".graph-dot");
-    expect(dot?.style.fill).toBe("var(--type-3)");
+    const tones = new Set(
+      lastScene()
+        .nodes.filter((n) => n.key.startsWith("decision-"))
+        .map((n) => n.tone),
+    );
+    expect([...tones]).toEqual(["slot3"]);
+    expect(lastScene().nodes.find((n) => n.key === "runbook-0")?.tone).toBe("other");
+    expect(lastScene().nodes.find((n) => n.key === "topic-0")?.tone).toBe("topic");
   });
 
   it("shows the first 8 types, then all of them on request", () => {
@@ -130,12 +152,15 @@ describe("Legend", () => {
 
   it("keeps a hidden type listed and turns its notes off", () => {
     const host = render();
-    const before = host.querySelectorAll(".graph-dot").length;
+    const before = lastScene().nodes.length;
     const runbooks = rows(host).find((r) => r.textContent?.startsWith("Runbooks"));
     act(() => runbooks?.click());
     expect(runbooks?.getAttribute("aria-pressed")).toBe("false");
     expect(rows(host)).toContain(runbooks);
-    expect(host.querySelectorAll(".graph-dot").length).toBe(before - 9);
+    expect(lastScene().nodes.length).toBe(before - 9);
+    expect(lastScene().nodes.some((n) => n.key.startsWith("runbook-"))).toBe(false);
+    // The one link touched a runbook, so it is left out too.
+    expect(lastScene().edges).toHaveLength(0);
   });
 
   it("highlights a type on hover and on keyboard focus", () => {
@@ -145,18 +170,17 @@ describe("Legend", () => {
     act(() => {
       runbooks.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
     });
-    const dim = () => host.querySelectorAll(".graph-dim");
-    const total = host.querySelectorAll(".graph-dot, .graph-ring, .graph-edge").length;
-    // Every dot but the 9 runbooks dims; the one edge touches a runbook and stays.
-    expect(dim().length).toBe(total - 9 - 1);
+    // Only the 9 runbooks stay lit; the renderer dims the rest.
+    expect(litCount()).toBe(9);
+    expect([...(lastEmphasis()?.lit ?? [])].every((k) => k.startsWith("runbook-"))).toBe(true);
     act(() => {
       runbooks.dispatchEvent(new MouseEvent("mouseout", { bubbles: true }));
     });
-    expect(dim().length).toBe(0);
+    expect(lastEmphasis()?.lit).toBeNull();
     act(() => runbooks.focus());
-    expect(dim().length).toBe(total - 9 - 1);
+    expect(litCount()).toBe(9);
     act(() => runbooks.blur());
-    expect(dim().length).toBe(0);
+    expect(lastEmphasis()?.lit).toBeNull();
   });
 
   it("ignores the highlight once its type is hidden", () => {
@@ -164,9 +188,9 @@ describe("Legend", () => {
     const runbooks = rows(host).find((r) => r.textContent?.startsWith("Runbooks"));
     if (!runbooks) throw new Error("no row");
     act(() => runbooks.focus());
-    expect(host.querySelectorAll(".graph-dim").length).toBeGreaterThan(0);
+    expect(litCount()).toBeGreaterThan(0);
     act(() => runbooks.click());
-    expect(host.querySelectorAll(".graph-dim")).toHaveLength(0);
+    expect(lastEmphasis()?.lit).toBeNull();
   });
 
   it("keeps a hidden type listed after collapsing the list", () => {

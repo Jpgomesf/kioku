@@ -7,7 +7,6 @@ import { openOverlay, useOverlay } from "../../app/overlay";
 import { graphHref, navigate } from "../../app/router";
 import { AreaButton, EmptyState } from "../../components/ui";
 import { GraphView } from "./GraphView";
-import { hasLayout, layoutFor } from "./layout";
 import "./graph.css";
 
 export interface GraphPageProps {
@@ -17,7 +16,6 @@ export interface GraphPageProps {
 
 type Load =
   | { state: "loading"; domain: string }
-  | { state: "layout"; domain: string; data: GraphData }
   | { state: "ready"; domain: string; data: GraphData }
   | { state: "error"; domain: string; message: string };
 
@@ -41,18 +39,8 @@ export function GraphPage({ domain, focus }: GraphPageProps) {
     setLoad({ state: "loading", domain: area });
     getGraph({ domain: area }).then(
       (data) => {
-        if (!live) return;
-        if (hasLayout(area, data)) {
-          setLoad({ state: "ready", domain: area, data });
-          return;
-        }
-        // Lay out after a frame that says so, so a big area doesn't freeze on a blank page.
-        setLoad({ state: "layout", domain: area, data });
-        window.setTimeout(() => {
-          if (!live) return;
-          layoutFor(area, data);
-          setLoad({ state: "ready", domain: area, data });
-        }, 0);
+        // GraphView lays out in a worker and says so while it arranges the notes.
+        if (live) setLoad({ state: "ready", domain: area, data });
       },
       (err: unknown) =>
         live &&
@@ -106,11 +94,7 @@ export function GraphPage({ domain, focus }: GraphPageProps) {
             <div className="graph-head-text">
               <h1 id="graph-title">Graph</h1>
               <p className="k-count" aria-live="polite">
-                {load.state === "error"
-                  ? "The graph didn't load."
-                  : load.state === "layout"
-                    ? `Laying out ${label}…`
-                    : `Loading ${label}…`}
+                {load.state === "error" ? "The graph didn't load." : `Loading ${label}…`}
               </p>
             </div>
             {areaButton}
