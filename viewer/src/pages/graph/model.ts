@@ -83,6 +83,32 @@ export function neighboursWithin(
   return [...first, ...second];
 }
 
+/**
+ * How many links away each note is from `source`, out to `maxDepth` links: 0 for the source,
+ * 1 for its own links, and so on. A breadth-first walk over `adjacency` (each key's linked
+ * keys), so every note gets its shortest distance and notes further out are left out.
+ */
+export function linkDepths(
+  adjacency: ReadonlyMap<string, ReadonlySet<string>>,
+  source: string,
+  maxDepth: number,
+): Map<string, number> {
+  const depths = new Map([[source, 0]]);
+  let frontier = [source];
+  for (let depth = 1; depth <= maxDepth && frontier.length > 0; depth += 1) {
+    const next: string[] = [];
+    for (const key of frontier) {
+      for (const other of adjacency.get(key) ?? []) {
+        if (depths.has(other)) continue;
+        depths.set(other, depth);
+        next.push(other);
+      }
+    }
+    frontier = next;
+  }
+  return depths;
+}
+
 export type Card =
   | { type: "note"; neighbour: Neighbour }
   | { type: "group"; kind: NoteKind; members: Neighbour[] };

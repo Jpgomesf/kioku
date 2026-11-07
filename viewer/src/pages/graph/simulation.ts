@@ -1,10 +1,14 @@
-// A d3-force-style simulation with Obsidian's four forces: center, repel, link force and link
-// distance. Pure and deterministic for a seed, so an area always opens with the same picture.
+// A d3-force-style simulation with Obsidian's four forces (center, repel, link force and link
+// distance) and a separation force of our own that pulls each cluster (a colour group or a
+// region of the graph) towards its own place. Pure and deterministic for a seed, so an area
+// always opens with the same picture.
 //
 // Why d3's model: Obsidian's graph view is built on it, and its "alpha" cooling lets the
 // layout be reheated from the current positions when a slider moves, so notes glide to the
-// new balance instead of jumping to a fresh layout. Repulsion uses a Barnes-Hut quadtree,
-// so one tick costs O(n log n).
+// new balance instead of jumping to a fresh layout. Dragging works as in d3 too: the dragged
+// note is pinned, alpha is held at a target so the rest keeps moving around it, and the target
+// drops to 0 on release so everything settles. Repulsion uses a Barnes-Hut quadtree, so one
+// tick costs O(n log n).
 import type { Forces } from "./forces";
 
 /** A 32-bit string hash (FNV-1a). */
@@ -34,8 +38,14 @@ export interface SimulationInput {
   n: number;
   edges: ReadonlyArray<readonly [number, number]>;
   seed: number;
-  /** Start positions; known[i] = 1 where they apply. */
-  initial?: { xs: Float64Array; ys: Float64Array; known: Uint8Array };
+  /**
+   * Start positions; known[i] = 1 where they apply. `anchors` are the separation anchors those
+   * positions settled under (Simulation.anchors), for a restart of the same graph and clusters:
+   * it carries on from the same balance instead of finding anchors anew, so nothing drifts.
+   */
+  initial?: { xs: Float64Array; ys: Float64Array; known: Uint8Array; anchors?: Float64Array };
+  /** Each note's cluster (any number from 0 up), -1 for none: see the separation force. */
+  clusters?: Int32Array;
 }
 
 /** d3's cooling: alpha decays from 1 to ALPHA_MIN in about 300 ticks. */
@@ -49,8 +59,9 @@ const THETA2 = 0.9 * 0.9;
  * Scales from Obsidian's slider values to d3 strengths, calibrated on 2,000 notes and 16,000
  * links: at the defaults the area spreads with no dense core (the inner quarter of the radius
  * holds about the share of notes an even disc would), and each slider moves the spread
- * visibly across its range (with repelDamping below). repel 10 is a d3 charge of -1000 before damping (d3's -30 is far too weak for
- * a big area); center 0.52 is a forceX strength of about 0.2.
+ * visibly across its range (with repelDamping below). repel 10 is a d3 charge of -1000 before
+ * damping (d3's -30 is far too weak for a big area); center 0.52 is a forceX strength of
+ * about 0.2.
  */
 const REPEL_SCALE = 100;
 const CENTER_SCALE = 0.4;
@@ -65,12 +76,44 @@ const CENTER_SCALE = 0.4;
 function repelDamping(notes: number, links: number): number {
   return Math.max(1, Math.sqrt((notes + links) / 300));
 }
+/**
+ * The separation force per unit of its slider, calibrated on 2,000 notes and 16,000 links in
+ * a dozen clusters. With regions (clusters the links already favour), 0.5 sorts nearly every
+ * note into its cluster with clear gaps between them, and 1 widens the gaps while each
+ * cluster keeps more than half its unseparated breadth. Colour groups that the links ignore
+ * are the hard case: 0.5 sorts most notes (their nearest note is in their group about 70% of
+ * the time, against 10% unseparated) and 1 nearly all. 1 is a pull about three times the
+ * default center force's. The gaps come from how tightly each cluster gathers, because the
+ * anchors follow the notes' spread.
+ */
+const SEPARATION_SCALE = 0.6;
 /** d3's distanceMin: closer notes repel as if they were this far apart. */
 const DISTANCE_MIN2 = 1;
 const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
 /** Stops the quadtree from splitting forever when notes sit on the same spot. */
 const MAX_DEPTH = 24;
 const TINY = 1e-9;
+/** Passes that push overlapping cluster circles apart (anchorsFromNotes); a dozen clusters
+ * stop overlapping in far fewer. */
+const PUSH_PASSES = 40;
+
+/** The clusters the separation force sorts notes into, and where each one goes. */
+interface Clusters {
+  /** Each note's cluster, renumbered from 0; -1 for none. */
+  of: Int32Array;
+  /** Notes per cluster. */
+  sizes: Float64Array;
+  /** Each cluster's anchor as x, y pairs about the clustered notes' centre, in units where a
+   * cluster's circle has a radius of the square root of its size. */
+  unit: Float64Array;
+  /** How far the notes would spread (root mean square) if each cluster filled its circle. */
+  unitSpread: number;
+  /** How far the packed anchors sit from the centre (root mean square, by size): the scale
+   * anchors taken from the notes are given, so their gaps come out as on a cold start. */
+  packedRadius: number;
+  /** This tick's anchors in world units, as x, y pairs. */
+  anchor: Float64Array;
+}
 
 export class Simulation {
   readonly xs: Float64Array;
@@ -83,8 +126,14 @@ export class Simulation {
   private readonly linkBias: Float64Array;
   private readonly tree: QuadTree;
   private readonly rand: () => number;
+  /** d3's fx and fy: a pinned note (pinned[i] = 1) is held at fx[i], fy[i] with no velocity. */
+  private readonly pinned: Uint8Array;
+  private readonly fx: Float64Array;
+  private readonly fy: Float64Array;
   private forces: Forces;
+  private clusters: Clusters | null;
   private alphaValue: number;
+  private alphaTargetValue = 0;
 
   constructor(input: SimulationInput, forces: Forces) {
     const n = Math.max(0, Math.floor(input.n) || 0);
@@ -92,9 +141,13 @@ export class Simulation {
     this.ys = new Float64Array(n);
     this.vx = new Float64Array(n);
     this.vy = new Float64Array(n);
+    this.pinned = new Uint8Array(n);
+    this.fx = new Float64Array(n);
+    this.fy = new Float64Array(n);
     this.links = cleanLinks(n, input.edges);
     this.rand = seededRandom(input.seed);
     this.forces = { ...forces };
+    this.clusters = input.clusters ? clusterLayout(input.clusters, n) : null;
     this.tree = new QuadTree(n);
 
     // d3's link defaults: strength 1/min(degree) so hubs do not drag everything in, and a
@@ -112,6 +165,12 @@ export class Simulation {
     }
 
     const warm = this.place(input);
+    // Clusters meeting a laid-out graph keep their places: a restart takes back the anchors
+    // its layout settled under, other warm starts take them from the notes (anchorsFromNotes).
+    // A cold start, every note on the spiral, keeps the packing.
+    if (warm && this.clusters && !takeAnchors(this.clusters, input.initial?.anchors)) {
+      anchorsFromNotes(this.clusters, this.xs, this.ys);
+    }
     this.alphaValue = warm ? WARM_ALPHA : 1;
   }
 
@@ -119,18 +178,73 @@ export class Simulation {
     return this.alphaValue;
   }
 
+  get alphaTarget(): number {
+    return this.alphaTargetValue;
+  }
+
+  /** At rest: cooled down, and not held warm by a drag. */
   get settled(): boolean {
-    return this.alphaValue < ALPHA_MIN;
+    return this.alphaValue < ALPHA_MIN && this.alphaTargetValue < ALPHA_MIN;
+  }
+
+  /** The separation anchors in use, for a later restart of the same graph and clusters
+   * (SimulationInput.initial.anchors); null while the force is off. */
+  anchors(): Float64Array | null {
+    return this.clusters && this.forces.separation > 0 ? this.clusters.unit.slice() : null;
   }
 
   /** New forces; the simulation reheats so the notes move to the new balance. */
   setForces(forces: Forces): void {
+    const separating = this.forces.separation <= 0 && forces.separation > 0;
     this.forces = { ...forces };
+    // Clusters that had no pull until now start from where the layout already put them.
+    if (separating && this.clusters) anchorsFromNotes(this.clusters, this.xs, this.ys);
     this.reheat(Math.max(this.alphaValue, WARM_ALPHA));
+  }
+
+  /** New clusters, or null for none; the notes move to their new places, each cluster
+   * starting from where its notes already are. */
+  setClusters(clusters: Int32Array | null): void {
+    const before = this.clusters;
+    this.clusters = clusters ? clusterLayout(clusters, this.xs.length) : null;
+    if (this.clusters) anchorsFromNotes(this.clusters, this.xs, this.ys);
+    // Without separation clusters change nothing, so the picture stays still, as it does
+    // going from nothing to separate to nothing again.
+    if (this.forces.separation > 0 && (before || this.clusters)) {
+      this.reheat(Math.max(this.alphaValue, WARM_ALPHA));
+    }
   }
 
   reheat(alpha: number): void {
     this.alphaValue = Number.isFinite(alpha) ? Math.min(1, Math.max(0, alpha)) : WARM_ALPHA;
+  }
+
+  /** d3's alphaTarget: each tick moves alpha towards it. A drag holds it at 0.3 so the whole
+   * graph stays live around the dragged note; 0 lets it cool and settle. */
+  setAlphaTarget(target: number): void {
+    this.alphaTargetValue = Number.isFinite(target) ? Math.min(1, Math.max(0, target)) : 0;
+  }
+
+  /**
+   * Holds a note at x, y, as d3's fx and fy: the forces still feel it, so its neighbours are
+   * pulled after it, but it does not move until unpinned. False for a bad index or point.
+   */
+  pin(index: number, x: number, y: number): boolean {
+    if (!this.has(index) || !Number.isFinite(x) || !Number.isFinite(y)) return false;
+    this.pinned[index] = 1;
+    this.fx[index] = x;
+    this.fy[index] = y;
+    // In place at once, so a post before the next tick already shows the note there.
+    this.xs[index] = x;
+    this.ys[index] = y;
+    this.vx[index] = 0;
+    this.vy[index] = 0;
+    return true;
+  }
+
+  /** Lets a pinned note go; it starts still, then the forces move it again. */
+  unpin(index: number): void {
+    if (this.has(index)) this.pinned[index] = 0;
   }
 
   tick(): void {
@@ -139,13 +253,21 @@ export class Simulation {
       this.alphaValue = 0;
       return;
     }
-    this.alphaValue += (0 - this.alphaValue) * ALPHA_DECAY;
+    this.alphaValue += (this.alphaTargetValue - this.alphaValue) * ALPHA_DECAY;
     const alpha = this.alphaValue;
     this.applyLinks(alpha);
     this.applyRepel(alpha);
     this.applyCenter(alpha);
-    const { xs, ys, vx, vy } = this;
+    this.applySeparation(alpha);
+    const { xs, ys, vx, vy, pinned } = this;
     for (let i = 0; i < n; i += 1) {
+      if (pinned[i] === 1) {
+        xs[i] = this.fx[i] as number;
+        ys[i] = this.fy[i] as number;
+        vx[i] = 0;
+        vy[i] = 0;
+        continue;
+      }
       const nvx = (vx[i] as number) * (1 - VELOCITY_DECAY);
       const nvy = (vy[i] as number) * (1 - VELOCITY_DECAY);
       // A broken force must never poison a position: drop that note's move instead.
@@ -159,6 +281,10 @@ export class Simulation {
       xs[i] = (xs[i] as number) + nvx;
       ys[i] = (ys[i] as number) + nvy;
     }
+  }
+
+  private has(index: number): boolean {
+    return Number.isInteger(index) && index >= 0 && index < this.xs.length;
   }
 
   /**
@@ -259,17 +385,386 @@ export class Simulation {
       vy[i] = (vy[i] as number) - (ys[i] as number) * k;
     }
   }
+
+  /**
+   * The separation force: d3's forceX and forceY towards each cluster's anchor. The anchors
+   * are one circle per cluster, sized by its notes and placed without overlaps (packed on a
+   * cold start, taken from the notes on a warm one), centred on the clustered notes and scaled
+   * each tick to how far they spread. So the force sorts notes into their places without
+   * growing or shrinking the whole picture, whatever the other sliders say; the gaps between
+   * clusters come from how tightly each one gathers.
+   */
+  private applySeparation(alpha: number): void {
+    const k = this.forces.separation * SEPARATION_SCALE * alpha;
+    const c = this.clusters;
+    if (!c || k <= 0) return;
+    const { xs, ys, vx, vy } = this;
+    const { of, unit, anchor } = c;
+    let cx = 0;
+    let cy = 0;
+    let count = 0;
+    for (let i = 0; i < of.length; i += 1) {
+      if ((of[i] as number) < 0) continue;
+      cx += xs[i] as number;
+      cy += ys[i] as number;
+      count += 1;
+    }
+    if (count === 0) return;
+    cx /= count;
+    cy /= count;
+    let spread = 0;
+    for (let i = 0; i < of.length; i += 1) {
+      if ((of[i] as number) < 0) continue;
+      spread += ((xs[i] as number) - cx) ** 2 + ((ys[i] as number) - cy) ** 2;
+    }
+    const scale = Math.sqrt(spread / count) / c.unitSpread;
+    if (!Number.isFinite(scale)) return;
+    for (let g = 0; g < c.sizes.length; g += 1) {
+      anchor[2 * g] = cx + (unit[2 * g] as number) * scale;
+      anchor[2 * g + 1] = cy + (unit[2 * g + 1] as number) * scale;
+    }
+    for (let i = 0; i < of.length; i += 1) {
+      const g = of[i] as number;
+      if (g < 0) continue;
+      vx[i] = (vx[i] as number) + ((anchor[2 * g] as number) - (xs[i] as number)) * k;
+      vy[i] = (vy[i] as number) + ((anchor[2 * g + 1] as number) - (ys[i] as number)) * k;
+    }
+  }
 }
 
-/** Run a simulation until it rests (or maxTicks) and return the positions. */
+/** Run a simulation until it rests (or maxTicks) and return the positions, with the anchors
+ * they settled under for a later restart (Simulation.anchors). */
 export function settle(
   input: SimulationInput,
   forces: Forces,
   maxTicks = 400,
-): { xs: Float64Array; ys: Float64Array } {
+): { xs: Float64Array; ys: Float64Array; anchors: Float64Array | null } {
   const sim = new Simulation(input, forces);
   for (let t = 0; t < maxTicks && !sim.settled; t += 1) sim.tick();
-  return { xs: sim.xs, ys: sim.ys };
+  return { xs: sim.xs, ys: sim.ys, anchors: sim.anchors() };
+}
+
+/**
+ * The clusters of `input` (-1 or anything not a cluster number is none), renumbered, with
+ * their anchors packed. Null when there is nothing to separate: no note in a cluster, or one
+ * cluster holding every note, whose pull would only shrink the whole graph. One cluster
+ * beside notes in none still gathers, so a single colour group can be pulled together.
+ */
+function clusterLayout(input: Int32Array, n: number): Clusters | null {
+  const ids = new Map<number, number>();
+  const of = new Int32Array(n).fill(-1);
+  const counts: number[] = [];
+  for (let i = 0; i < n; i += 1) {
+    const id = input[i];
+    if (id === undefined || id < 0) continue;
+    let g = ids.get(id);
+    if (g === undefined) {
+      g = counts.length;
+      ids.set(id, g);
+      counts.push(0);
+    }
+    counts[g] = (counts[g] as number) + 1;
+    of[i] = g;
+  }
+  if (counts.length === 0 || (counts.length === 1 && counts[0] === n)) return null;
+  const sizes = Float64Array.from(counts);
+  const unit = packClusters(counts);
+  return {
+    of,
+    sizes,
+    unit,
+    unitSpread: anchorSpread(sizes, unit, true),
+    packedRadius: anchorSpread(sizes, unit, false),
+    anchor: new Float64Array(unit.length),
+  };
+}
+
+/**
+ * How far anchors spread about the origin (root mean square, by cluster size). With `filled`,
+ * the spread they stand for: each cluster's anchor plus the spread of notes filling its circle
+ * evenly (radius squared over 2, and a radius squared is its size).
+ */
+function anchorSpread(sizes: Float64Array, unit: Float64Array, filled: boolean): number {
+  let total = 0;
+  let sum = 0;
+  sizes.forEach((s, g) => {
+    total += s;
+    sum += s * ((unit[2 * g] as number) ** 2 + (unit[2 * g + 1] as number) ** 2);
+    if (filled) sum += (s * s) / 2;
+  });
+  return Math.sqrt(sum / total);
+}
+
+/** Takes anchors from an earlier run of the same clusters (Simulation.anchors) when they fit:
+ * one finite pair per cluster. */
+function takeAnchors(c: Clusters, anchors: Float64Array | undefined): boolean {
+  if (!anchors || anchors.length !== c.unit.length || !anchors.every(Number.isFinite)) {
+    return false;
+  }
+  const unit = anchors.slice();
+  const unitSpread = anchorSpread(c.sizes, unit, true);
+  if (!(unitSpread > 0) || !Number.isFinite(unitSpread)) return false;
+  c.unit = unit;
+  c.unitSpread = unitSpread;
+  return true;
+}
+
+/**
+ * Anchors from where each cluster already is, for clusters that meet a laid-out graph: a warm
+ * start, new clusters, or separation turned up from 0. The packing places clusters by size
+ * rank, so regions found afresh after a filter, or separation switched on over a settled
+ * layout, would send clusters across the picture to slots that have nothing to do with where
+ * they are. Instead each anchor starts at its cluster's centroid, scaled so the anchors sit as
+ * far out as the packing's would, so the gaps come out as on a cold start; overlapping circles
+ * are then pushed apart. When the centroids all coincide, the anchors stay as they were.
+ */
+function anchorsFromNotes(c: Clusters, xs: Float64Array, ys: Float64Array): void {
+  const { of, sizes } = c;
+  const k = sizes.length;
+  const unit = new Float64Array(2 * k);
+  let cx = 0;
+  let cy = 0;
+  let total = 0;
+  for (let i = 0; i < of.length; i += 1) {
+    const g = of[i] as number;
+    if (g < 0) continue;
+    unit[2 * g] = (unit[2 * g] as number) + (xs[i] as number);
+    unit[2 * g + 1] = (unit[2 * g + 1] as number) + (ys[i] as number);
+    cx += xs[i] as number;
+    cy += ys[i] as number;
+    total += 1;
+  }
+  cx /= total;
+  cy /= total;
+  // Centroids about the clustered notes' centre, which is also their mean by size.
+  for (let g = 0; g < k; g += 1) {
+    const s = sizes[g] as number;
+    unit[2 * g] = (unit[2 * g] as number) / s - cx;
+    unit[2 * g + 1] = (unit[2 * g + 1] as number) / s - cy;
+  }
+  const radius = anchorSpread(sizes, unit, false);
+  if (!(radius > 1e-6)) return;
+  const scale = c.packedRadius / radius;
+  for (let j = 0; j < unit.length; j += 1) unit[j] = (unit[j] as number) * scale;
+  pushApart(unit, sizes);
+  // Pushing moves the size-weighted centre a little: put it back on the notes' centre.
+  let mx = 0;
+  let my = 0;
+  for (let g = 0; g < k; g += 1) {
+    mx += (sizes[g] as number) * (unit[2 * g] as number);
+    my += (sizes[g] as number) * (unit[2 * g + 1] as number);
+  }
+  for (let g = 0; g < k; g += 1) {
+    unit[2 * g] = (unit[2 * g] as number) - mx / total;
+    unit[2 * g + 1] = (unit[2 * g + 1] as number) - my / total;
+  }
+  const unitSpread = anchorSpread(sizes, unit, true);
+  if (!Number.isFinite(unitSpread) || !unit.every(Number.isFinite)) return;
+  c.unit = unit;
+  c.unitSpread = unitSpread;
+}
+
+/**
+ * Pushes overlapping cluster circles (each at its anchor, with a radius of the square root of
+ * its size) apart along the line between them, the smaller one moving more, until none
+ * overlap or the passes run out. Each pass sorts the circles by their left edge and compares
+ * each only with those starting before its right edge, so thousands of small clusters stay
+ * cheap.
+ */
+function pushApart(unit: Float64Array, sizes: Float64Array): void {
+  const k = sizes.length;
+  const r = sizes.map(Math.sqrt);
+  const left = (g: number) => (unit[2 * g] as number) - (r[g] as number);
+  const order = Array.from({ length: k }, (_, g) => g);
+  for (let pass = 0; pass < PUSH_PASSES; pass += 1) {
+    order.sort((p, q) => left(p) - left(q) || p - q);
+    let moved = false;
+    for (let i = 0; i < k; i += 1) {
+      const a = order[i] as number;
+      const ra = r[a] as number;
+      for (let j = i + 1; j < k; j += 1) {
+        const b = order[j] as number;
+        // This one, and every later one, starts past a's right edge.
+        if (left(b) >= (unit[2 * a] as number) + ra) break;
+        const dx = (unit[2 * b] as number) - (unit[2 * a] as number);
+        const dy = (unit[2 * b + 1] as number) - (unit[2 * a + 1] as number);
+        const min = ra + (r[b] as number);
+        const d2 = dx * dx + dy * dy;
+        if (d2 >= min * min) continue;
+        // Apart along the line between them, or along an angle fixed by the pair when they
+        // sit on the same spot.
+        const same = d2 < TINY;
+        const d = same ? 0 : Math.sqrt(d2);
+        const angle = (a * GOLDEN_ANGLE + b) % (2 * Math.PI);
+        const ux = same ? Math.cos(angle) : dx / d;
+        const uy = same ? Math.sin(angle) : dy / d;
+        const push = min - d;
+        const sa = sizes[a] as number;
+        const sb = sizes[b] as number;
+        const shareA = sb / (sa + sb);
+        unit[2 * a] = (unit[2 * a] as number) - ux * push * shareA;
+        unit[2 * a + 1] = (unit[2 * a + 1] as number) - uy * push * shareA;
+        unit[2 * b] = (unit[2 * b] as number) + ux * push * (1 - shareA);
+        unit[2 * b + 1] = (unit[2 * b + 1] as number) + uy * push * (1 - shareA);
+        moved = true;
+      }
+    }
+    if (!moved) return;
+  }
+}
+
+/**
+ * Anchors for clusters of the given sizes: one circle per cluster with an area in proportion
+ * to its notes, packed tightly with the largest first (so the big ones sit in the middle and
+ * small ones around them), then centred on the notes' centre of mass. As x, y pairs, in input
+ * order.
+ */
+export function packClusters(sizes: readonly number[]): Float64Array {
+  const order = sizes
+    .map((_, g) => g)
+    .sort((p, q) => (sizes[q] as number) - (sizes[p] as number) || p - q);
+  const r = Float64Array.from(order, (g) => Math.sqrt(Math.max(0, sizes[g] as number)));
+  const { x, y } = packCircles(r);
+  let total = 0;
+  let cx = 0;
+  let cy = 0;
+  order.forEach((g, k) => {
+    const s = sizes[g] as number;
+    total += s;
+    cx += s * (x[k] as number);
+    cy += s * (y[k] as number);
+  });
+  if (total > 0) {
+    cx /= total;
+    cy /= total;
+  }
+  const out = new Float64Array(sizes.length * 2);
+  order.forEach((g, k) => {
+    out[2 * g] = (x[k] as number) - cx;
+    out[2 * g + 1] = (y[k] as number) - cy;
+  });
+  return out;
+}
+
+/**
+ * Packs circles so none overlap, each placed against the front chain of those already placed
+ * where it lands closest to the middle: the front-chain method of Wang et al. (2006), as d3's
+ * packSiblings does it.
+ */
+function packCircles(r: Float64Array): { x: Float64Array; y: Float64Array } {
+  const n = r.length;
+  const x = new Float64Array(n);
+  const y = new Float64Array(n);
+  if (n < 2) return { x, y };
+  x[0] = -(r[1] as number);
+  x[1] = r[0] as number;
+  if (n === 2) return { x, y };
+
+  /** Places circle c against circles a and b (outside the chain, as seen from a to b). */
+  const place = (b: number, a: number, c: number) => {
+    const dx = (x[b] as number) - (x[a] as number);
+    const dy = (y[b] as number) - (y[a] as number);
+    const d2 = dx * dx + dy * dy;
+    if (d2 === 0) {
+      x[c] = (x[a] as number) + (r[c] as number);
+      y[c] = y[a] as number;
+      return;
+    }
+    const a2 = ((r[a] as number) + (r[c] as number)) ** 2;
+    const b2 = ((r[b] as number) + (r[c] as number)) ** 2;
+    if (a2 > b2) {
+      const u = (d2 + b2 - a2) / (2 * d2);
+      const v = Math.sqrt(Math.max(0, b2 / d2 - u * u));
+      x[c] = (x[b] as number) - u * dx - v * dy;
+      y[c] = (y[b] as number) - u * dy + v * dx;
+    } else {
+      const u = (d2 + a2 - b2) / (2 * d2);
+      const v = Math.sqrt(Math.max(0, a2 / d2 - u * u));
+      x[c] = (x[a] as number) + u * dx - v * dy;
+      y[c] = (y[a] as number) + u * dy + v * dx;
+    }
+  };
+  const intersects = (a: number, b: number) => {
+    const dr = (r[a] as number) + (r[b] as number) - 1e-6;
+    const dx = (x[b] as number) - (x[a] as number);
+    const dy = (y[b] as number) - (y[a] as number);
+    return dr > 0 && dr * dr > dx * dx + dy * dy;
+  };
+  // How far from the middle the gap between a chain circle and the next one is.
+  const next = new Int32Array(n);
+  const prev = new Int32Array(n);
+  const score = (a: number) => {
+    const b = next[a] as number;
+    const ab = (r[a] as number) + (r[b] as number);
+    const dx = ((x[a] as number) * (r[b] as number) + (x[b] as number) * (r[a] as number)) / ab;
+    const dy = ((y[a] as number) * (r[b] as number) + (y[b] as number) * (r[a] as number)) / ab;
+    return dx * dx + dy * dy;
+  };
+
+  place(1, 0, 2);
+  // The front chain starts as the first three circles, a to b to c and round.
+  let a = 0;
+  let b = 1;
+  next[0] = 1;
+  next[1] = 2;
+  next[2] = 0;
+  prev[1] = 0;
+  prev[2] = 1;
+  prev[0] = 2;
+  for (let i = 3; i < n; i += 1) {
+    place(a, b, i);
+    // The nearest chain circle (along the chain) that the new one overlaps, if any: the
+    // chain is cut back to it and the new circle tried again.
+    let j = next[b] as number;
+    let k = prev[a] as number;
+    let sj = r[b] as number;
+    let sk = r[a] as number;
+    let blocked = false;
+    do {
+      if (sj <= sk) {
+        if (intersects(j, i)) {
+          b = j;
+          blocked = true;
+          break;
+        }
+        sj += r[j] as number;
+        j = next[j] as number;
+      } else {
+        if (intersects(k, i)) {
+          a = k;
+          blocked = true;
+          break;
+        }
+        sk += r[k] as number;
+        k = prev[k] as number;
+      }
+    } while (j !== next[k]);
+    if (blocked) {
+      next[a] = b;
+      prev[b] = a;
+      i -= 1;
+      continue;
+    }
+    // It fits: insert it between a and b, then start the next one at the chain's gap
+    // closest to the middle.
+    prev[i] = a;
+    next[i] = b;
+    next[a] = i;
+    prev[b] = i;
+    b = i;
+    let best = a;
+    let bestScore = score(a);
+    for (let c = next[i] as number; c !== i; c = next[c] as number) {
+      const sc = score(c);
+      if (sc < bestScore) {
+        best = c;
+        bestScore = sc;
+      }
+    }
+    a = best;
+    b = next[a] as number;
+  }
+  return { x, y };
 }
 
 /** Links as a flat array of index pairs: no self links, no duplicates, nothing out of range. */

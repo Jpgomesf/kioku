@@ -1,4 +1,6 @@
-// The graph's settings, after Obsidian's graph view: filters, colour groups, display and forces.
+// The graph's settings, after Obsidian's graph view: filters, colour groups, display and forces,
+// plus our own clusters: whether notes gather by colour group or by brain region (the clusters
+// their links form), and which of the two colours them.
 // They are saved per area in this browser; the panel's open state is saved once per viewer.
 import { useCallback, useMemo, useRef, useState } from "react";
 import type { KindCount } from "../../api";
@@ -21,12 +23,29 @@ export interface GraphFilters {
   orphans: boolean;
 }
 
+/** How many links away a hovered or selected note lights up: 1 is its direct links. */
+export type HighlightDepth = 1 | 2 | 3;
+
 export interface GraphDisplay {
   arrows: boolean;
   textFade: number;
   nodeSize: number;
   linkThickness: number;
   topicLabels: boolean;
+  highlightDepth: HighlightDepth;
+  /** Name each brain region on the canvas. */
+  regionLabels: boolean;
+}
+
+/** What gathers notes in places of their own: nothing (as in Obsidian), their colour group, or
+ * their brain region. */
+export type SeparateBy = "none" | "groups" | "regions";
+/** Where a note's colour comes from: its colour group, or its brain region. */
+export type ColourBy = "groups" | "regions";
+
+export interface GraphClusters {
+  separateBy: SeparateBy;
+  colourBy: ColourBy;
 }
 
 export interface GraphSettings {
@@ -34,6 +53,7 @@ export interface GraphSettings {
   groups: GraphGroup[];
   display: GraphDisplay;
   forces: Forces;
+  clusters: GraphClusters;
 }
 
 export interface PanelState {
@@ -47,12 +67,19 @@ export interface Range {
   step: number;
 }
 
-/** Obsidian's display slider ranges. */
-export const DISPLAY_RANGES: Readonly<Record<"textFade" | "nodeSize" | "linkThickness", Range>> = {
+/** Obsidian's display slider ranges, and the highlight depth's in whole links. */
+export const DISPLAY_RANGES: Readonly<
+  Record<"textFade" | "nodeSize" | "linkThickness" | "highlightDepth", Range>
+> = {
   textFade: { min: -3, max: 3, step: 0.1 },
   nodeSize: { min: 0.1, max: 5, step: 0.1 },
   linkThickness: { min: 0.1, max: 5, step: 0.1 },
+  // Three links away already reaches most of a large, well-linked area.
+  highlightDepth: { min: 1, max: 3, step: 1 },
 };
+
+const SEPARATE_BY: readonly SeparateBy[] = ["none", "groups", "regions"];
+const COLOUR_BY: readonly ColourBy[] = ["groups", "regions"];
 
 export const MAX_GROUPS = 100;
 /** Long enough for any real query; stops a corrupt entry from bloating every render. */
@@ -67,6 +94,12 @@ export function clampNumber(value: unknown, range: Range, fallback: number): num
   return Math.min(range.max, Math.max(range.min, value));
 }
 
+/** A highlight depth from untrusted input (storage, a slider): a whole number of links, 1 to 3. */
+export function toHighlightDepth(value: unknown, fallback: HighlightDepth): HighlightDepth {
+  const links = Math.round(clampNumber(value, DISPLAY_RANGES.highlightDepth, fallback));
+  return links === 3 ? 3 : links === 2 ? 2 : 1;
+}
+
 export function defaultSettings(types: readonly KindCount[]): GraphSettings {
   // Most common first, so the strongest colours go to the types seen most.
   const sorted = [...types].sort((a, b) => b.count - a.count);
@@ -77,8 +110,19 @@ export function defaultSettings(types: readonly KindCount[]): GraphSettings {
       query: `type:${t.kind}`,
       color: paletteColour(i),
     })),
-    display: { arrows: false, textFade: 0, nodeSize: 1, linkThickness: 1, topicLabels: true },
+    display: {
+      arrows: false,
+      textFade: 0,
+      nodeSize: 1,
+      linkThickness: 1,
+      topicLabels: true,
+      // Direct links only, so a hover never lights more than the note's own neighbours.
+      highlightDepth: 1,
+      regionLabels: true,
+    },
     forces: { ...DEFAULT_FORCES },
+    // Regions show how the area is organised; colours stay with the types people know.
+    clusters: { separateBy: "regions", colourBy: "groups" },
   };
 }
 
@@ -96,6 +140,10 @@ function text(value: unknown, fallback: string): string {
   return typeof value === "string" ? value.slice(0, MAX_QUERY_LENGTH) : fallback;
 }
 
+function oneOf<T extends string>(value: unknown, allowed: readonly T[], fallback: T): T {
+  return allowed.find((option) => option === value) ?? fallback;
+}
+
 function validGroups(value: unknown): GraphGroup[] | null {
   if (!Array.isArray(value)) return null;
   const groups: GraphGroup[] = [];
@@ -110,16 +158,19 @@ function validGroups(value: unknown): GraphGroup[] | null {
   return groups;
 }
 
-/** Settings from untrusted input: every field checked, broken ones taken from the fallback. */
+/**
+ * Settings from untrusted input: every field checked, broken ones taken from the fallback.
+ * Settings saved before a field existed have no value for it, so they take the fallback's.
+ */
 export function validateSettings(input: unknown, fallback: GraphSettings): GraphSettings {
   const source = record(input);
   const f = record(source.filters);
   const d = record(source.display);
+  const c = record(source.clusters);
   const base = fallback;
   return {
     filters: {
       query: text(f.query, base.filters.query),
-      // Settings saved before tags existed have no field, so they fall back to the default.
       tags: bool(f.tags, base.filters.tags),
       legacy: bool(f.legacy, base.filters.legacy),
       suggested: bool(f.suggested, base.filters.suggested),
@@ -136,8 +187,14 @@ export function validateSettings(input: unknown, fallback: GraphSettings): Graph
         base.display.linkThickness,
       ),
       topicLabels: bool(d.topicLabels, base.display.topicLabels),
+      highlightDepth: toHighlightDepth(d.highlightDepth, base.display.highlightDepth),
+      regionLabels: bool(d.regionLabels, base.display.regionLabels),
     },
     forces: clampForces(source.forces),
+    clusters: {
+      separateBy: oneOf(c.separateBy, SEPARATE_BY, base.clusters.separateBy),
+      colourBy: oneOf(c.colourBy, COLOUR_BY, base.clusters.colourBy),
+    },
   };
 }
 
@@ -211,10 +268,10 @@ export function useGraphSettings(
   const update = useCallback(
     (next: GraphSettings) => {
       const valid = validateSettings(next, defaults);
-      // Untouched default groups are left out, so types that load or appear later still get a group.
-      const saved: Partial<GraphSettings> = sameGroups(valid.groups, defaults.groups)
-        ? { filters: valid.filters, display: valid.display, forces: valid.forces }
-        : valid;
+      // Untouched default groups are left out, so types that load or appear later still get a
+      // group. Everything else is kept, so a field added later is saved without a change here.
+      const { groups, ...rest } = valid;
+      const saved: Partial<GraphSettings> = sameGroups(groups, defaults.groups) ? rest : valid;
       writeJson(SETTINGS_PREFIX + domain, saved);
       setEdited({ domain, saved });
     },
@@ -230,13 +287,28 @@ export function useGraphSettings(
   return { settings, update, reset };
 }
 
+/**
+ * The panel opens by default, so people find the settings without looking for the gear. Only
+ * Forces starts open, with the separation, so the box fits the app's smallest window and leaves
+ * most of the graph in view; Display and Forces together already run past the default 1440x900
+ * window.
+ */
 const DEFAULT_PANEL: PanelState = {
-  open: false,
-  sections: { filters: true, groups: true, display: true, forces: true },
+  open: true,
+  sections: { filters: false, groups: false, display: false, forces: true },
 };
 
+/**
+ * Saved with the panel state. The first version kept the panel closed and every section open by
+ * default, so what it saved says little about the layout wanted now: its saves start from the
+ * defaults once, and only a save from this version keeps the panel closed or a section changed.
+ */
+const PANEL_VERSION = 2;
+
 function readPanel(): PanelState {
-  const source = record(readJson(PANEL_KEY));
+  const stored = record(readJson(PANEL_KEY));
+  // An older save counts as none (see PANEL_VERSION).
+  const source: Record<string, unknown> = stored.version === PANEL_VERSION ? stored : {};
   const s = record(source.sections);
   const d = DEFAULT_PANEL.sections;
   return {
@@ -254,7 +326,7 @@ function readPanel(): PanelState {
 export function usePanelState(): [PanelState, (next: PanelState) => void] {
   const [panel, setPanel] = useState<PanelState>(readPanel);
   const update = useCallback((next: PanelState) => {
-    writeJson(PANEL_KEY, next);
+    writeJson(PANEL_KEY, { ...next, version: PANEL_VERSION });
     setPanel(next);
   }, []);
   return [panel, update];

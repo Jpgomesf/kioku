@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { groupColour, matchesQuery, parseQuery, type QueryTarget } from "./query";
+import {
+  groupColour,
+  groupIndex,
+  matchesQuery,
+  parseQuery,
+  type QueryTarget,
+  soleTerm,
+} from "./query";
 
 const note: QueryTarget = {
   key: "projects/alpha-plan",
@@ -61,6 +68,18 @@ describe("query", () => {
     expect(groupColour(groups, { ...note, kind: "x", title: "y", key: "z" })).toBeNull();
   });
 
+  it("gives the first matching group's position, skipping empty queries", () => {
+    const groups = [
+      { query: parseQuery("") },
+      { query: parseQuery("type:design-review") },
+      { query: parseQuery("launch") },
+    ];
+    expect(groupIndex(groups, note)).toBe(1);
+    expect(groupIndex(groups.slice(2), note)).toBe(0);
+    expect(groupIndex(groups, { ...note, kind: "x", title: "y", key: "z" })).toBe(-1);
+    expect(groupIndex([], note)).toBe(-1);
+  });
+
   it("matches tag: against a whole tag, ignoring case and a leading #", () => {
     expect(m("tag:idea")).toBe(true);
     expect(m("tag:#IDEA")).toBe(true);
@@ -74,5 +93,18 @@ describe("query", () => {
   it("ignores an empty tag: still being typed", () => {
     expect(m("tag:")).toBe(true);
     expect(m("tag:#")).toBe(true);
+  });
+
+  it("gives a query's only term, normalised, and nothing for several or a negated one", () => {
+    // Unquoted, the second word is a term of its own.
+    expect(soleTerm(parseQuery("type:Design review"))).toBeNull();
+    expect(soleTerm(parseQuery('type:"Design review"'))).toEqual({
+      field: "type",
+      value: "design-review",
+    });
+    expect(soleTerm(parseQuery("tag:#Idea"))).toEqual({ field: "tag", value: "idea" });
+    expect(soleTerm(parseQuery("type:decision tag:idea"))).toBeNull();
+    expect(soleTerm(parseQuery("-tag:idea"))).toBeNull();
+    expect(soleTerm(parseQuery(""))).toBeNull();
   });
 });

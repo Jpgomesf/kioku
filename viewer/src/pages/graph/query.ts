@@ -8,10 +8,11 @@ export interface QueryTarget {
   tags: readonly string[];
 }
 
-type Field = "type" | "path" | "tag" | "text";
+/** What a query term looks at: a type, a path prefix, a tag, or words in the title or key. */
+export type QueryField = "type" | "path" | "tag" | "text";
 
 interface Term {
-  field: Field;
+  field: QueryField;
   value: string;
   negate: boolean;
 }
@@ -66,7 +67,7 @@ function toTerm(token: string): Term | null {
   }
   const match = /^(type|path|tag):(.*)$/i.exec(rest);
   if (match) {
-    const field = (match[1] ?? "").toLowerCase() as Field;
+    const field = (match[1] ?? "").toLowerCase() as QueryField;
     const raw = match[2] ?? "";
     const value =
       field === "type" ? normaliseType(raw) : field === "tag" ? normaliseTag(raw) : raw.trim();
@@ -106,13 +107,30 @@ export function matchesQuery(query: Query, note: QueryTarget): boolean {
   return query.terms.every((term) => termMatches(term, note) !== term.negate);
 }
 
-/** The colour of the first group whose query matches, as in Obsidian; empty group queries match nothing. */
+/** The query's only term when it has one and it is not negated, as a group made for one type
+ * or one tag is written ("type:decision"), so the group can be named after it; else null. */
+export function soleTerm(query: Query): { field: QueryField; value: string } | null {
+  const [term, ...rest] = query.terms;
+  return term && rest.length === 0 && !term.negate
+    ? { field: term.field, value: term.value }
+    : null;
+}
+
+/**
+ * The position of the first group whose query matches, as in Obsidian, or -1 when none does.
+ * Empty group queries match nothing. A note's colour and the cluster it is separated into
+ * both come from this one group, so they always agree.
+ */
+export function groupIndex(groups: ReadonlyArray<{ query: Query }>, note: QueryTarget): number {
+  return groups.findIndex(
+    (group) => group.query.terms.length > 0 && matchesQuery(group.query, note),
+  );
+}
+
+/** The colour of the note's group (see groupIndex), or null when no group matches. */
 export function groupColour(
   groups: ReadonlyArray<{ query: Query; color: string }>,
   note: QueryTarget,
 ): string | null {
-  for (const group of groups) {
-    if (group.query.terms.length > 0 && matchesQuery(group.query, note)) return group.color;
-  }
-  return null;
+  return groups[groupIndex(groups, note)]?.color ?? null;
 }

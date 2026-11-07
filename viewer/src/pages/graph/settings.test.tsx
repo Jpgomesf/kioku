@@ -8,6 +8,7 @@ import {
   defaultSettings,
   type GraphSettings,
   type PanelState,
+  toHighlightDepth,
   useGraphSettings,
   usePanelState,
   validateSettings,
@@ -77,8 +78,25 @@ describe("defaultSettings", () => {
       nodeSize: 1,
       linkThickness: 1,
       topicLabels: true,
+      highlightDepth: 1,
+      regionLabels: true,
     });
     expect(s.forces).toEqual(DEFAULT_FORCES);
+  });
+
+  it("separates by brain region and colours by group", () => {
+    expect(defaultSettings(types).clusters).toEqual({ separateBy: "regions", colourBy: "groups" });
+  });
+});
+
+describe("toHighlightDepth", () => {
+  it("keeps a whole number of links from 1 to 3", () => {
+    expect(toHighlightDepth(2, 1)).toBe(2);
+    expect(toHighlightDepth(2.6, 1)).toBe(3);
+    expect(toHighlightDepth(0, 2)).toBe(1);
+    expect(toHighlightDepth(99, 1)).toBe(3);
+    expect(toHighlightDepth("2", 3)).toBe(3);
+    expect(toHighlightDepth(Number.NaN, 2)).toBe(2);
   });
 });
 
@@ -116,6 +134,57 @@ describe("validateSettings", () => {
       color: "#000000",
     }));
     expect(validateSettings({ groups }, base).groups).toHaveLength(100);
+  });
+
+  it("checks the clusters, the highlight depth and the region labels", () => {
+    const v = validateSettings(
+      {
+        clusters: { separateBy: "groups", colourBy: "regions" },
+        display: { highlightDepth: 3, regionLabels: false },
+      },
+      base,
+    );
+    expect(v.clusters).toEqual({ separateBy: "groups", colourBy: "regions" });
+    expect(v.display.highlightDepth).toBe(3);
+    expect(v.display.regionLabels).toBe(false);
+
+    const junk = validateSettings(
+      {
+        clusters: { separateBy: "everything", colourBy: 7 },
+        display: { highlightDepth: 2.4, regionLabels: "yes" },
+      },
+      base,
+    );
+    expect(junk.clusters).toEqual(base.clusters);
+    expect(junk.display.highlightDepth).toBe(2);
+    expect(junk.display.regionLabels).toBe(true);
+    expect(validateSettings({ clusters: "none" }, base).clusters).toEqual(base.clusters);
+  });
+
+  it("loads settings saved before the clusters, depth and region labels existed", () => {
+    const earlier = {
+      filters: {
+        query: "type:decision",
+        tags: true,
+        legacy: false,
+        suggested: true,
+        orphans: false,
+      },
+      groups: [{ id: "g", query: "type:decision", color: "#123456" }],
+      display: { arrows: true, textFade: 1, nodeSize: 2, linkThickness: 0.5, topicLabels: false },
+      forces: { center: 0.3, repel: 12, link: 0.8, distance: 120 },
+    };
+    const v = validateSettings(earlier, base);
+    // What was saved is kept...
+    expect(v.filters).toEqual(earlier.filters);
+    expect(v.groups).toEqual(earlier.groups);
+    expect(v.display).toMatchObject(earlier.display);
+    expect(v.forces).toMatchObject(earlier.forces);
+    // ...and what is new takes its default.
+    expect(v.display.highlightDepth).toBe(1);
+    expect(v.display.regionLabels).toBe(true);
+    expect(v.forces.separation).toBe(DEFAULT_FORCES.separation);
+    expect(v.clusters).toEqual(base.clusters);
   });
 });
 
@@ -173,6 +242,30 @@ describe("useGraphSettings", () => {
     expect(h.current().settings.groups).toBe(groups);
   });
 
+  it("saves the clusters and the new display settings with the default groups left out", () => {
+    const h = renderHook(() => useGraphSettings("one", types));
+    const s = h.current().settings;
+    act(() =>
+      h.current().update({
+        ...s,
+        clusters: { separateBy: "groups", colourBy: "regions" },
+        display: { ...s.display, highlightDepth: 2, regionLabels: false },
+      }),
+    );
+    const stored = JSON.parse(localStorage.getItem("kioku.viewer.graph.settings.one") ?? "{}");
+    expect(stored.groups).toBeUndefined();
+    expect(stored.clusters).toEqual({ separateBy: "groups", colourBy: "regions" });
+    expect(stored.display.highlightDepth).toBe(2);
+
+    // A fresh page reads them back.
+    const again = renderHook(() => useGraphSettings("one", types));
+    expect(again.current().settings.clusters).toEqual({
+      separateBy: "groups",
+      colourBy: "regions",
+    });
+    expect(again.current().settings.display.regionLabels).toBe(false);
+  });
+
   it("survives junk storage", () => {
     localStorage.setItem("kioku.viewer.graph.settings.one", "{not json");
     const h = renderHook(() => useGraphSettings("one", types));
@@ -191,18 +284,48 @@ describe("useGraphSettings", () => {
 });
 
 describe("usePanelState", () => {
-  it("starts closed with every section open, and remembers changes", () => {
+  // Only Forces open, so the box fits the window and the forces are the first thing in it.
+  const defaultPanel: PanelState = {
+    open: true,
+    sections: { filters: false, groups: false, display: false, forces: true },
+  };
+
+  it("starts open with only Forces open, and remembers changes", () => {
     const h = renderHook(() => usePanelState());
-    expect(h.current()[0]).toEqual({
-      open: false,
-      sections: { filters: true, groups: true, display: true, forces: true },
-    });
+    expect(h.current()[0]).toEqual(defaultPanel);
     const next: PanelState = {
-      open: true,
-      sections: { ...h.current()[0].sections, forces: false },
+      open: false,
+      sections: { ...h.current()[0].sections, display: true, forces: false },
     };
     act(() => h.current()[1](next));
     const again = renderHook(() => usePanelState());
     expect(again.current()[0]).toEqual(next);
+  });
+
+  it("starts a first-version save from the defaults once, then keeps what is saved", () => {
+    // Saved by the first version, which had no version field, started closed and opened every section.
+    localStorage.setItem(
+      "kioku.viewer.graph.panel",
+      JSON.stringify({
+        open: false,
+        sections: { filters: true, groups: true, display: true, forces: false },
+      }),
+    );
+    const h = renderHook(() => usePanelState());
+    expect(h.current()[0]).toEqual(defaultPanel);
+    // Any change saves this version, so later loads keep the viewer's own layout.
+    const next: PanelState = {
+      ...defaultPanel,
+      sections: { ...defaultPanel.sections, groups: true },
+    };
+    act(() => h.current()[1](next));
+    expect(JSON.parse(localStorage.getItem("kioku.viewer.graph.panel") ?? "{}").version).toBe(2);
+    expect(renderHook(() => usePanelState()).current()[0]).toEqual(next);
+  });
+
+  it("survives junk storage", () => {
+    localStorage.setItem("kioku.viewer.graph.panel", "[1, 2");
+    const h = renderHook(() => usePanelState());
+    expect(h.current()[0].open).toBe(true);
   });
 });

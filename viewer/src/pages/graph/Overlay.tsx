@@ -1,5 +1,6 @@
-// The HTML layer over the canvas: topic labels, the focus label, the focus card, the cards
-// around it and their link lines and labels. It renders only when its content changes; the
+// The HTML layer over the canvas: the focus label, the focus card, the cards around it and
+// their link lines and labels (topics are named on the canvas, with the other labels, so none
+// piles on another). It renders only when its content changes; the
 // camera places it through OverlayPlacer (placer.ts), which reads the data-* points set here.
 // Points name notes by key (data-k), so the placer follows the live layout without React.
 import { memo, type Ref } from "react";
@@ -24,9 +25,6 @@ export interface CardPlace {
 
 export interface OverlayProps {
   rootRef: Ref<HTMLDivElement>;
-  /** Topic notes, labelled at the far steps. */
-  topics: ReadonlyArray<{ key: string; title: string }>;
-  topicsOn: boolean;
   /** The focus note, when it has a position. */
   focusNode: GraphNode | null;
   cards: Card[];
@@ -52,7 +50,7 @@ const at = (key: string, offset?: Point) => ({
 const growsFrom = (key: string) => ({ "data-fk": key, "data-fx": 0, "data-fy": 0 });
 
 export const Overlay = memo(function Overlay(props: OverlayProps) {
-  const { topics, topicsOn, focusNode, cards, places, ready, shown, labelsOn } = props;
+  const { focusNode, cards, places, ready, shown, labelsOn } = props;
   const { lit, colourOf, onOpen, onExpand, rootRef } = props;
   const isOn = (key: string) => shown && ready.has(key);
   const isDim = (card: Card) => lit !== null && !cardKeys(card).some((k) => lit.has(k));
@@ -85,19 +83,6 @@ export const Overlay = memo(function Overlay(props: OverlayProps) {
             );
           })}
       </svg>
-      {topics.map((t) => (
-        <span
-          key={t.key}
-          className="graph-topic-label"
-          aria-hidden="true"
-          {...at(t.key)}
-          data-anchor="top"
-          data-dy={16}
-          style={{ opacity: topicsOn ? 1 : 0 }}
-        >
-          {t.title}
-        </span>
-      ))}
       {focusNode && (
         <span
           className="graph-dot-label"

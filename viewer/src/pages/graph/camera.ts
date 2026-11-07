@@ -43,18 +43,45 @@ export function fitCamera(bounds: Bounds, view: Viewport, margin = 32): Camera {
   return { x: view.width / 2 - cx * s, y: view.height / 2 - cy * s, s };
 }
 
+/**
+ * The camera that frames part of the area, such as a region, with a margin. Unlike fitCamera
+ * it has no minimum box, so a small part fills the view, but its scale stays within the zoom
+ * limits around the whole-area scale `fitScale`.
+ */
+export function frameCamera(bounds: Bounds, view: Viewport, fitScale: number, margin = 64): Camera {
+  const w = Math.max(bounds.maxX - bounds.minX, 1);
+  const h = Math.max(bounds.maxY - bounds.minY, 1);
+  const s = Math.min((view.width - 2 * margin) / w, (view.height - 2 * margin) / h);
+  const centre = { x: (bounds.minX + bounds.maxX) / 2, y: (bounds.minY + bounds.maxY) / 2 };
+  return centreOn(centre, clampScale(s > 0 ? s : fitScale, fitScale), view);
+}
+
 /** The camera that centres `p` at scale `s`. */
 export function centreOn(p: Point, s: number, view: Viewport): Camera {
   return { x: view.width / 2 - p.x * s, y: view.height / 2 - p.y * s, s };
 }
 
-export function clampScale(s: number, fitScale: number): number {
-  return Math.min(Math.max(s, fitScale * MIN_RATIO), fitScale * MAX_RATIO);
+/**
+ * A scale within the zoom limits around the whole-area scale `fitScale`. `liveFitScale` is the
+ * scale that fits the notes where they are now: once forces have spread them past the box the
+ * area was fitted to, zooming out may go that much further, so the whole graph can still be
+ * seen. It never lowers the zoom-in limit.
+ */
+export function clampScale(s: number, fitScale: number, liveFitScale = fitScale): number {
+  const floor = Math.min(fitScale, liveFitScale) * MIN_RATIO;
+  return Math.min(Math.max(s, floor), fitScale * MAX_RATIO);
 }
 
-/** Zoom by `factor` keeping the screen point `anchor` over the same world point. */
-export function zoomAt(c: Camera, factor: number, anchor: Point, fitScale: number): Camera {
-  const s = clampScale(c.s * factor, fitScale);
+/** Zoom by `factor` keeping the screen point `anchor` over the same world point, within the
+ * limits clampScale sets. */
+export function zoomAt(
+  c: Camera,
+  factor: number,
+  anchor: Point,
+  fitScale: number,
+  liveFitScale = fitScale,
+): Camera {
+  const s = clampScale(c.s * factor, fitScale, liveFitScale);
   const k = s / c.s;
   return { x: anchor.x - (anchor.x - c.x) * k, y: anchor.y - (anchor.y - c.y) * k, s };
 }

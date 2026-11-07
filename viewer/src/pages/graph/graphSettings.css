@@ -1,4 +1,5 @@
-/* The graph settings panel floats over the canvas at the top right, like Obsidian's. */
+/* The graph settings panel floats over the canvas at the top right, like Obsidian's, and is open
+   until the viewer closes it. */
 /* It flows below the gear in .graph-float-settings (a flex column): an absolute panel would
    size its percentages against the gear-sized wrapper and collapse to a sliver. */
 .gs-panel {
@@ -84,6 +85,68 @@
   align-items: center;
   justify-content: space-between;
   gap: var(--space-8);
+}
+
+/* A switch with a hint under it, spaced like a slider and its hint. */
+.gs-switch {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+/* What the canvas names, as small buttons that wrap, so two dozen fit in a few lines. */
+.gs-parts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.gs-parts li {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.gs-part {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-6);
+  max-width: 100%;
+  min-height: 24px;
+  padding: 0 var(--space-8);
+  background: var(--surface);
+  color: var(--fg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.gs-part:hover {
+  background: var(--sunken);
+  color: var(--fg);
+}
+
+.gs-part:focus-visible {
+  outline: var(--focus-width) solid var(--focus);
+  outline-offset: var(--focus-offset);
+}
+
+/* The colour the part's notes are drawn in, so the list is also the key to the colours. */
+.gs-part-swatch {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.gs-part-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .gs-input {
@@ -195,4 +258,33 @@
   flex: 1;
   min-width: 0;
   accent-color: var(--accent);
+}
+
+/* The shared segmented control, sized for the box: labelled like the sliders, as tall as the
+   fields and as wide as the box, so three answers fit on one line. */
+.gs-choice .k-seg-field {
+  gap: var(--space-4);
+}
+
+.gs-choice .k-seg-label {
+  color: inherit;
+  font-size: inherit;
+  font-weight: inherit;
+  line-height: inherit;
+}
+
+.gs-choice .k-seg {
+  align-self: stretch;
+  /* A fieldset's own minimum is its content's width; the box decides instead. */
+  min-width: 0;
+  height: var(--size-button-sm);
+  margin: 0;
+  padding: var(--space-2);
+}
+
+.gs-choice .k-seg button {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 0 var(--space-6);
+  font-size: 12px;
 }

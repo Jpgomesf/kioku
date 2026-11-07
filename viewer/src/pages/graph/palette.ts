@@ -5,6 +5,9 @@
 // least 3:1 contrast against both the light canvas (#f6f6f3) and the dark one (#111214).
 
 const SLOTS = 12;
+/** The palette's first this many colours are all clearly apart; later rounds come back within
+ * a few degrees of them, so a colour meant to stand for one thing alone stays among these. */
+export const DISTINCT_COLOURS = SLOTS;
 const SLOT_DEGREES = 360 / SLOTS;
 const STRIDE = 5; // 5 * 30 = 150 degrees; coprime with 12, so the first round visits every slot.
 const START_HUE = 255; // Starts near the app's blue accent.

@@ -1,24 +1,38 @@
 // The graph's 2D canvas renderer. It draws only what is on screen, only when something
 // changed (one requestAnimationFrame per change), and animates the camera itself so React
-// never re-renders per frame. It knows nothing of React or the API: the page hands it a Scene.
+// never re-renders per frame. It knows nothing of React or the API: the page hands it a Scene,
+// what to emphasise (the hovered or selected note and the depths around it), the note being
+// dragged and, optionally, regions of the graph to name.
 import { type Camera, fitCamera } from "./camera";
 import type { Bounds } from "./layout";
 import {
   ARROW_MIN_LENGTH,
+  CALM,
   cameraEase,
-  DIM_ALPHA,
-  dimmedEdgeAlpha,
-  edgeAlpha,
-  LEGACY_ALPHA,
+  type EmphasisMode,
+  FADED,
+  LabelBoxes,
   labelAlpha,
   labelOpacity,
+  labelRank,
+  labelSortIndex,
+  labelSortKey,
+  linkAlphas,
+  linkDensity,
+  NOTE_ALPHAS,
   nodeLabel,
+  noteStrength,
+  RANK_REGION,
+  regionLabelAlpha,
   SpatialGrid,
   screenRadius,
+  shortLabel,
   TAG_SCALE,
+  topicLabelOpacity,
+  topicLabelRank,
   visibleWorld,
 } from "./renderer-math";
-import type { DisplayOptions, Emphasis, Scene, SceneNode } from "./scene";
+import type { DisplayOptions, Emphasis, Scene, SceneEdge, SceneNode, SceneRegions } from "./scene";
 
 export interface RendererOptions {
   reducedMotion: () => boolean;
@@ -37,7 +51,30 @@ interface Palette {
   /** The canvas background, used as the label halo. */
   background: string;
   label: string;
-  font: string;
+  /** Canvas fonts for note labels and region names. */
+  labelFont: string;
+  regionFont: string;
+}
+
+/** Note labels: 12 px text set 3 px under the dot, in a box this tall. */
+const LABEL_PX = 12;
+const LABEL_OFFSET = 3;
+const LABEL_LINE = 14;
+/** Region names: larger and semibold, but softer than note labels. */
+const REGION_PX = 16;
+const REGION_LINE = 20;
+const REGION_TEXT_ALPHA = 0.6;
+/** Region names soften further while a note or a legend group is emphasised, so it reads first. */
+const REGION_EMPHASIS_ALPHA = 0.5;
+/** A region needs this many notes on the canvas to be named. */
+const REGION_MIN_NOTES = 3;
+/** A region name takes clicks only while at least this visible. */
+const REGION_PICK_ALPHA = 0.3;
+/** Space kept clear around every label, in pixels. */
+const LABEL_GAP = 2;
+
+function fonts(family: string): Pick<Palette, "labelFont" | "regionFont"> {
+  return { labelFont: `${LABEL_PX}px ${family}`, regionFont: `600 ${REGION_PX}px ${family}` };
 }
 
 /** Colours used when a custom property is missing (tests, a stylesheet not loaded yet). */
@@ -47,7 +84,7 @@ const FALLBACK: Palette = {
   suggested: "#2944b8",
   background: "#ffffff",
   label: "#55565e",
-  font: "system-ui, sans-serif",
+  ...fonts("system-ui, sans-serif"),
 };
 
 const DEFAULT_DISPLAY: DisplayOptions = {
@@ -56,28 +93,44 @@ const DEFAULT_DISPLAY: DisplayOptions = {
   arrows: false,
   textFade: 0,
 };
-/** Labels drawn per frame at most, biggest notes first, so a dense view stays fast and legible. */
+/** Note labels drawn per frame at most, so a dense view stays fast and legible. */
 const LABEL_CAP = 300;
 /** The pick grid is rebuilt at most this often while positions stream in. */
 const GRID_REFRESH_MS = 200;
 
-/** One colour's batches for each strength; topics (rings) and dots kept apart. */
+/** One colour's batches for each strength (NOTE_ALPHAS); topics (rings) and dots kept apart. */
 interface ColourBatches {
   color: string;
   topic: boolean;
-  paths: [PathBatch, PathBatch, PathBatch];
+  paths: PathBatch[];
 }
 
 /** Screen margin around the viewport inside which notes and links still draw. */
 const CULL_MARGIN = 24;
-/** Links inside a hover's lit set draw at least this strong, so the neighbourhood stands out. */
-const LIT_EDGE_ALPHA = 0.5;
-/** Note strengths, as indices into STRENGTH_ALPHA and the node batches. */
-const FULL = 0;
-const LEGACY = 1;
-const DIMMED = 2;
-const STRENGTH_ALPHA = [1, LEGACY_ALPHA, DIM_ALPHA] as const;
-const EMPTY_EMPHASIS: Emphasis = { focusKey: null, hoverKey: null, lit: null };
+
+/** Link styles, in stroke order: faded first, the source's own links last, on top. Suggested
+ * links are dashed: faded, a deeper step in the path's neutral, or in the accent. */
+const DIM = 0;
+const REST = 1;
+const PATH = 2;
+const DIM_SUGGESTED = 3;
+const PATH_SUGGESTED = 4;
+const SUGGESTED = 5;
+const NEAR = 6;
+const STYLES = 7;
+const DASH = [4, 3];
+const SOLID: number[] = [];
+/** The source's own links draw this much thicker, so they stand out without thickening the rest. */
+const NEAR_WIDTH = 1.5;
+/** Hover and selection rings; the dragged note gets a bolder one, further out. */
+const RING_GAP = 3;
+const RING_WIDTH = 1.5;
+const DRAG_RING_GAP = 4;
+const DRAG_RING_WIDTH = 2.5;
+/** Depths are stored per note in an Int8Array; deeper ones all draw as the deepest anyway. */
+const MAX_DEPTH = 100;
+
+const EMPTY_EMPHASIS: Emphasis = { focusKey: null, hoverKey: null, lit: null, depths: null };
 
 interface Animation {
   from: Camera;
@@ -94,6 +147,8 @@ export class GraphRenderer {
   private dpr = 1;
   private cam: Camera = { x: 0, y: 0, s: 1 };
   private scene: Scene = { nodes: [], edges: [] };
+  /** Each note's index in scene.nodes, by key. */
+  private indexOf = new Map<string, number>();
   private grid = new SpatialGrid([]);
   private bounds: Bounds | null = null;
   /** Positions moved since the grid and bounds were built. */
@@ -101,41 +156,46 @@ export class GraphRenderer {
   private gridBuiltAt = 0;
   private display: DisplayOptions = DEFAULT_DISPLAY;
   private emphasis: Emphasis = EMPTY_EMPHASIS;
+  private dragKey: string | null = null;
+  // The emphasis resolved against the scene once per change (resolveEmphasis), so a frame
+  // compares indices and reads a typed array instead of looking up keys for every link.
+  private emphasisStale = true;
+  private mode: EmphasisMode = "calm";
+  /** Per note: CALM, FADED or its depth from the source, as renderer-math defines them. */
+  private standing = new Int8Array(0);
+  private hoverIndex = -1;
+  private focusIndex = -1;
+  private dragIndex = -1;
   private palette: Palette = FALLBACK;
   private listeners = new Set<Listener>();
   private frame: number | null = null;
   private animation: Animation | null = null;
   private drawMs = 0;
-  // Path batches kept across frames so steady-state frames allocate nothing.
-  private readonly edgeBatches = {
-    rest: new PathBatch(),
-    strong: new PathBatch(),
-    lit: new PathBatch(),
-    suggested: new PathBatch(),
-    dimmed: new PathBatch(),
-    dimmedSuggested: new PathBatch(),
-  };
-  // Arrowheads, one batch per link style, filled in the link's colour.
-  private readonly arrowBatches = {
-    rest: new PathBatch(),
-    strong: new PathBatch(),
-    lit: new PathBatch(),
-    suggested: new PathBatch(),
-    dimmed: new PathBatch(),
-    dimmedSuggested: new PathBatch(),
-  };
+  // Path batches kept across frames so steady-state frames allocate nothing: one per link
+  // style, and one per style for the arrowheads, filled in the link's colour.
+  private readonly linkBatches = pathBatches(STYLES);
+  private readonly arrowBatches = pathBatches(STYLES);
+  /** The on-screen length drawn in each link style this frame, for the densities. */
+  private readonly styleLength = new Float64Array(STYLES);
   // One entry per distinct colour (and ring or dot), built with the scene; batchOf maps each
   // note to its entry, so a frame does no string work per note and paths grow with colours.
   private colourBatches: ColourBatches[] = [];
   private batchOf = new Int32Array(0);
   private readonly ringBatch = new PathBatch();
-  private labelOrder: number[] = [];
-  // Per-frame label opacity, aligned with scene.nodes; only entries in labelOrder are read.
-  private labelAlphas = new Float32Array(0);
-  // Per-frame cap priority: 2 hovered or focused, 1 lit, 0 the rest.
-  private labelRanks = new Uint8Array(0);
   // Shortened titles, aligned with scene.nodes, so long titles never form a wall of text.
   private labels: string[] = [];
+  /** Label widths in the label font, aligned with scene.nodes; NaN until first measured. */
+  private labelWidths = new Float32Array(0);
+  // Per frame, aligned with scene.nodes: each candidate label's opacity and priority.
+  private labelAlphas = new Float32Array(0);
+  private labelRanks = new Uint8Array(0);
+  /** This frame's candidate labels as labelSortKey keys; the first labelCount are in use. */
+  private labelKeys = new Float64Array(0);
+  private labelCount = 0;
+  private readonly boxes = new LabelBoxes();
+  /** The note labels placed this frame, in priority order. */
+  private readonly placedLabels = new Int32Array(LABEL_CAP);
+  private regions: RegionLabels | null = null;
   private destroyed = false;
 
   constructor(
@@ -150,6 +210,8 @@ export class GraphRenderer {
     }
     this.ctx = ctx;
     this.refreshStyle();
+    // Widths measured before the web font loads would misplace labels: measure again after.
+    fontSet()?.addEventListener("loadingdone", this.onFontsLoaded);
   }
 
   /** True while an animated camera move runs. */
@@ -181,11 +243,20 @@ export class GraphRenderer {
 
   setScene(scene: Scene): void {
     // Copy the notes: setPositions moves them in place, and the page's objects stay untouched.
-    this.scene = { nodes: scene.nodes.map((n) => ({ ...n })), edges: scene.edges };
-    this.labels = this.scene.nodes.map((n) => nodeLabel(n.label, n.tag));
-    this.labelAlphas = new Float32Array(this.scene.nodes.length);
-    this.labelRanks = new Uint8Array(this.scene.nodes.length);
+    const nodes = scene.nodes.map((n) => ({ ...n }));
+    const count = nodes.length;
+    this.scene = { nodes, edges: scene.edges };
+    this.indexOf = new Map(nodes.map((n, i): [string, number] => [n.key, i]));
+    this.labels = nodes.map((n) => nodeLabel(n.label, n.tag));
+    this.labelWidths = new Float32Array(count).fill(Number.NaN);
+    this.labelAlphas = new Float32Array(count);
+    this.labelRanks = new Uint8Array(count);
+    this.labelKeys = new Float64Array(count);
+    this.standing = new Int8Array(count);
+    this.emphasisStale = true;
     this.indexColours();
+    // Each note keeps its region by key until the page passes regions for this scene.
+    this.regions?.align(nodes);
     this.rebuildGrid();
     this.schedule();
   }
@@ -211,6 +282,27 @@ export class GraphRenderer {
 
   setEmphasis(emphasis: Emphasis): void {
     this.emphasis = emphasis;
+    this.emphasisStale = true;
+    this.schedule();
+  }
+
+  /** The note the viewer is dragging, ringed boldly; null when none is. */
+  setDragging(key: string | null): void {
+    if (key === this.dragKey) return;
+    this.dragKey = key;
+    this.emphasisStale = true;
+    this.schedule();
+  }
+
+  /** Regions to name on the canvas, or null for none. `assign` is aligned with the scene last
+   * passed to setScene, so the page maps its regions onto that scene by key and passes them
+   * right after setScene; then the order scenes and regions arrive in never matters. Regions
+   * of another length are ignored, leaving what is drawn as it was, since the renderer cannot
+   * tell which scene they were for. Later scenes (filters, Animate) keep each note's region by
+   * key until the next call. */
+  setRegions(regions: SceneRegions | null): void {
+    if (regions && regions.assign.length !== this.scene.nodes.length) return;
+    this.regions = regions ? RegionLabels.from(regions, this.scene.nodes) : null;
     this.schedule();
   }
 
@@ -275,16 +367,52 @@ export class GraphRenderer {
   nearest(x: number, y: number): string | null {
     this.freshGrid();
     const view = visibleWorld(this.cam, this.width, this.height, 0);
-    const onScreen = (i: number) => {
-      const n = this.scene.nodes[i] as SceneNode;
-      return n.x >= view.minX && n.x <= view.maxX && n.y >= view.minY && n.y <= view.maxY;
-    };
+    const onScreen = (i: number) => inBox(this.scene.nodes[i] as SceneNode, view);
     const i = this.grid.nearest(
       (x - this.cam.x) / this.cam.s,
       (y - this.cam.y) / this.cam.s,
       onScreen,
     );
     return i < 0 ? null : (this.scene.nodes[i] as SceneNode).key;
+  }
+
+  /** The region whose name the last frame drew under a screen point, or null. Names that have
+   * mostly faded out with the zoom take no clicks. */
+  pickRegion(x: number, y: number): number | null {
+    const regions = this.regions;
+    if (!regions) return null;
+    const h = regions.hits;
+    for (let k = 0; k < regions.hitCount; k += 1) {
+      const o = 4 * k;
+      const inside =
+        x >= (h[o] as number) &&
+        y >= (h[o + 1] as number) &&
+        x <= (h[o + 2] as number) &&
+        y <= (h[o + 3] as number);
+      if (inside) return regions.hitIds[k] as number;
+    }
+    return null;
+  }
+
+  /** The world box of a region's notes where they are now, or null when it has none. */
+  regionBounds(region: number): Bounds | null {
+    const regions = this.regions;
+    if (!regions) return null;
+    const nodes = this.scene.nodes;
+    let box: Bounds | null = null;
+    for (let i = 0; i < regions.of.length; i += 1) {
+      if (regions.of[i] !== region) continue;
+      const n = nodes[i] as SceneNode;
+      if (!box) {
+        box = { minX: n.x, minY: n.y, maxX: n.x, maxY: n.y };
+        continue;
+      }
+      box.minX = Math.min(box.minX, n.x);
+      box.minY = Math.min(box.minY, n.y);
+      box.maxX = Math.max(box.maxX, n.x);
+      box.maxY = Math.max(box.maxY, n.y);
+    }
+    return box;
   }
 
   get lastDrawMs(): number {
@@ -306,8 +434,9 @@ export class GraphRenderer {
       suggested: read("--graph-suggested", FALLBACK.suggested),
       background: read("--bg", FALLBACK.background),
       label: read("--fg-2", FALLBACK.label),
-      font: read("--font-sans", FALLBACK.font),
+      ...fonts(read("--font-sans", "system-ui, sans-serif")),
     };
+    this.forgetWidths();
     this.schedule();
   }
 
@@ -317,9 +446,20 @@ export class GraphRenderer {
     this.frame = null;
     this.finishAnimation();
     this.listeners.clear();
+    fontSet()?.removeEventListener("loadingdone", this.onFontsLoaded);
   }
 
   // --- internals ---
+
+  private readonly onFontsLoaded = (): void => {
+    this.forgetWidths();
+    this.schedule();
+  };
+
+  private forgetWidths(): void {
+    this.labelWidths.fill(Number.NaN);
+    this.regions?.widths.fill(Number.NaN);
+  }
 
   private indexColours(): void {
     const index = new Map<string, number>();
@@ -336,7 +476,7 @@ export class GraphRenderer {
         batches.push({
           color: n.color,
           topic: n.topic,
-          paths: old ? old.paths : [new PathBatch(), new PathBatch(), new PathBatch()],
+          paths: old ? old.paths : pathBatches(NOTE_ALPHAS.length),
         });
       }
       batchOf[i] = b;
@@ -408,146 +548,189 @@ export class GraphRenderer {
     return this.cam.s / fit.s;
   }
 
+  /** Resolves the emphasis against the scene: the mode, each note's standing and the indices
+   * of the hovered, selected and dragged notes. */
+  private resolveEmphasis(): void {
+    const { focusKey, hoverKey, lit, depths } = this.emphasis;
+    const standing = this.standing;
+    const at = this.indexOf;
+    if (depths) {
+      this.mode = "depth";
+      standing.fill(FADED);
+      depths.forEach((depth, key) => {
+        const i = at.get(key);
+        if (i !== undefined && depth >= 0) standing[i] = Math.min(MAX_DEPTH, Math.floor(depth));
+      });
+    } else if (lit) {
+      this.mode = "lit";
+      standing.fill(FADED);
+      lit.forEach((key) => {
+        const i = at.get(key);
+        if (i !== undefined) standing[i] = 1;
+      });
+    } else {
+      this.mode = "calm";
+      standing.fill(CALM);
+    }
+    this.hoverIndex = indexIn(at, hoverKey);
+    this.focusIndex = indexIn(at, focusKey);
+    this.dragIndex = indexIn(at, this.dragKey);
+    this.emphasisStale = false;
+  }
+
   private draw(): void {
     const ctx = this.ctx;
     if (!ctx) return;
     const started = now();
-    const { nodes, edges } = this.scene;
-    const { focusKey, hoverKey, lit } = this.emphasis;
-    const c = this.cam;
     if (this.gridStale && started - this.gridBuiltAt >= GRID_REFRESH_MS) this.rebuildGrid();
-    const display = this.display;
+    if (this.emphasisStale) this.resolveEmphasis();
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     ctx.clearRect(0, 0, this.width, this.height);
-
-    const view = visibleWorld(c, this.width, this.height, CULL_MARGIN);
-    const inView = (n: SceneNode) =>
-      n.x >= view.minX && n.x <= view.maxX && n.y >= view.minY && n.y <= view.maxY;
-    const isLit = (n: SceneNode) => !lit || lit.has(n.key);
+    const view = visibleWorld(this.cam, this.width, this.height, CULL_MARGIN);
     const zoom = this.zoomRatio();
+    this.drawLinks(ctx, view, zoom);
+    this.drawNotes(ctx, view, zoom);
+    this.drawRings(ctx, view, zoom);
+    this.drawLabels(ctx, zoom);
+    ctx.globalAlpha = 1;
+    this.drawMs = now() - started;
+  }
 
-    // Links: sorted into one path per style, so the whole set costs a few strokes.
-    const edgeBatches = this.edgeBatches;
-    for (const batch of Object.values(edgeBatches)) batch.reset();
-    const arrows = this.arrowBatches;
-    for (const batch of Object.values(arrows)) batch.reset();
+  /** Links, sorted into one path per style so the whole set costs a few strokes. Each style's
+   * alpha follows how much of the screen its links cover (linkAlphas). */
+  private drawLinks(ctx: CanvasRenderingContext2D, view: Bounds, zoom: number): void {
+    const { nodes, edges } = this.scene;
+    const c = this.cam;
+    const display = this.display;
+    const lines = this.linkBatches;
+    const heads = this.arrowBatches;
+    const lengths = this.styleLength;
+    for (let s = 0; s < STYLES; s += 1) {
+      (lines[s] as PathBatch).reset();
+      (heads[s] as PathBatch).reset();
+      lengths[s] = 0;
+    }
+    const depthMode = this.mode === "depth";
+    const litMode = this.mode === "lit";
+    const standing = this.standing;
+    const hover = this.hoverIndex;
+    const focus = this.focusIndex;
     const arrowLength = 6 * Math.max(0.6, Math.sqrt(display.linkThickness));
-    let visibleEdges = 0;
+    // For the densities, a link counts at most once across the screen, however long it is.
+    const longest = Math.hypot(this.width, this.height);
     for (const edge of edges) {
       const a = nodes[edge.a];
       const b = nodes[edge.b];
       if (!a || !b || !segmentInBox(a, b, view)) continue;
-      visibleEdges += 1;
-      const touchesActive =
-        a.key === focusKey || b.key === focusKey || a.key === hoverKey || b.key === hoverKey;
-      // Dimming wins over style: a dimmed suggested link stays dashed but fades with the rest.
-      const dim = !touchesActive && lit !== null && !(isLit(a) || isLit(b));
-      const style = dim
-        ? edge.suggested
-          ? "dimmedSuggested"
-          : "dimmed"
-        : edge.suggested
-          ? "suggested"
-          : touchesActive
-            ? "strong"
-            : lit !== null
-              ? "lit"
-              : "rest";
+      const style = depthMode
+        ? depthStyle(edge, standing)
+        : calmStyle(edge, standing, litMode, hover, focus);
       const ax = c.x + c.s * a.x;
       const ay = c.y + c.s * a.y;
       const bx = c.x + c.s * b.x;
       const by = c.y + c.s * b.y;
-      this.edgeBatches[style].segment(ax, ay, bx, by);
+      const dx = bx - ax;
+      const dy = by - ay;
+      const len = Math.sqrt(dx * dx + dy * dy);
+      lengths[style] = (lengths[style] as number) + Math.min(len, longest);
+      (lines[style] as PathBatch).segment(ax, ay, bx, by);
       if (display.arrows) {
         // The tip sits on the target dot's edge; skip links too short to carry a readable head.
-        const len = Math.hypot(bx - ax, by - ay);
         const back = this.radius(b, zoom);
         if (len - back >= ARROW_MIN_LENGTH) {
-          const ux = (bx - ax) / len;
-          const uy = (by - ay) / len;
-          arrows[style].arrow(bx - ux * back, by - uy * back, ux * arrowLength, uy * arrowLength);
+          const ux = dx / len;
+          const uy = dy / len;
+          const tipX = bx - ux * back;
+          const tipY = by - uy * back;
+          (heads[style] as PathBatch).arrow(tipX, tipY, ux * arrowLength, uy * arrowLength);
         }
       }
     }
-    // The rest alpha depends on the count, but only the stroke needs it, so tracing goes first.
-    const restAlpha = edgeAlpha(visibleEdges);
-    const thick = display.linkThickness;
+    let total = 0;
+    for (let s = 0; s < STYLES; s += 1) total += lengths[s] as number;
+    const density = (length: number) => linkDensity(length, this.width, this.height);
+    const alpha = linkAlphas(this.mode, {
+      all: density(total),
+      near: density(lengths[NEAR] as number),
+      // Dashed deeper steps draw at the path's alpha, so they count towards its density.
+      path: density((lengths[PATH] as number) + (lengths[PATH_SUGGESTED] as number)),
+      suggested: density(lengths[SUGGESTED] as number),
+    });
     const p = this.palette;
+    const line = (s: number) => lines[s] as PathBatch;
+    const head = (s: number) => heads[s] as PathBatch;
+    const thick = display.linkThickness;
     ctx.lineWidth = thick;
-    const litAlpha = Math.max(restAlpha, LIT_EDGE_ALPHA);
-    edgeBatches.dimmed.stroke(ctx, p.edge, dimmedEdgeAlpha(restAlpha));
-    edgeBatches.rest.stroke(ctx, p.edge, restAlpha);
-    edgeBatches.lit.stroke(ctx, p.edge, litAlpha);
-    ctx.setLineDash([4, 3]);
-    edgeBatches.suggested.stroke(ctx, p.suggested, 0.8);
-    edgeBatches.dimmedSuggested.stroke(ctx, p.suggested, 0.8 * DIM_ALPHA);
-    ctx.setLineDash([]);
-    ctx.lineWidth = 1.5 * thick;
-    edgeBatches.strong.stroke(ctx, p.edgeStrong, 0.75);
+    line(DIM).stroke(ctx, p.edge, alpha.dim);
+    line(REST).stroke(ctx, p.edge, alpha.rest);
+    line(PATH).stroke(ctx, p.edge, alpha.path);
+    ctx.setLineDash(DASH);
+    line(DIM_SUGGESTED).stroke(ctx, p.suggested, alpha.dimSuggested);
+    line(PATH_SUGGESTED).stroke(ctx, p.edge, alpha.path);
+    line(SUGGESTED).stroke(ctx, p.suggested, alpha.suggested);
+    ctx.setLineDash(SOLID);
+    ctx.lineWidth = NEAR_WIDTH * thick;
+    line(NEAR).stroke(ctx, p.edgeStrong, alpha.near);
     // Heads read better a little stronger than their faint lines.
-    arrows.dimmed.fill(ctx, p.edge, Math.min(1, dimmedEdgeAlpha(restAlpha) * 2));
-    arrows.rest.fill(ctx, p.edge, Math.min(1, restAlpha * 2));
-    arrows.lit.fill(ctx, p.edge, Math.min(1, litAlpha * 2));
-    arrows.suggested.fill(ctx, p.suggested, 0.8);
-    arrows.dimmedSuggested.fill(ctx, p.suggested, 0.8 * DIM_ALPHA);
-    arrows.strong.fill(ctx, p.edgeStrong, 0.75);
+    head(DIM).fill(ctx, p.edge, Math.min(1, alpha.dim * 2));
+    head(REST).fill(ctx, p.edge, Math.min(1, alpha.rest * 2));
+    head(PATH).fill(ctx, p.edge, Math.min(1, alpha.path * 2));
+    head(DIM_SUGGESTED).fill(ctx, p.suggested, alpha.dimSuggested);
+    head(PATH_SUGGESTED).fill(ctx, p.edge, Math.min(1, alpha.path * 2));
+    head(SUGGESTED).fill(ctx, p.suggested, alpha.suggested);
+    head(NEAR).fill(ctx, p.edgeStrong, alpha.near);
+  }
 
-    // Notes: one path per colour and strength (full, legacy, dimmed); topics are rings.
+  /** Notes: one path per colour and strength, drawn dimmest first so emphasised notes sit on
+   * top; topics are rings. Collects this frame's label candidates on the way. */
+  private drawNotes(ctx: CanvasRenderingContext2D, view: Bounds, zoom: number): void {
+    const nodes = this.scene.nodes;
+    const c = this.cam;
     const groups = this.colourBatches;
     for (const group of groups) for (const path of group.paths) path.reset();
+    const standing = this.standing;
     const batchOf = this.batchOf;
-    const zoomAlpha = labelAlpha(zoom, display.textFade);
-    const labelAlphas = this.labelAlphas;
-    const labelRanks = this.labelRanks;
-    const labelOrder = this.labelOrder;
-    labelOrder.length = 0;
-    const ring = this.ringBatch;
-    ring.reset();
-    let hoverRing = false;
-    let focusRing = false;
-    let focusX = 0;
-    let focusY = 0;
-    let focusR = 0;
+    const zoomAlpha = labelAlpha(zoom, this.display.textFade);
+    // Topic labels on: every topic is named at any zoom, in the same placement as the other
+    // labels, so none piles on a region name or a note label. Off: only an active topic is.
+    const topicLabels = this.display.topicLabels !== false;
+    let candidates = 0;
     for (let i = 0; i < nodes.length; i += 1) {
       const n = nodes[i] as SceneNode;
-      if (!inView(n)) continue;
-      const strength = !isLit(n) ? DIMMED : n.legacy ? LEGACY : FULL;
+      if (!inBox(n, view)) continue;
+      const s = standing[i] as number;
+      const source = i === this.hoverIndex || i === this.dragIndex;
+      const selected = i === this.focusIndex;
+      const active = source || selected;
+      // The selection keeps full strength while the depths around another note fade the rest.
+      const strength = noteStrength(active && s === FADED ? CALM : s, n.legacy);
       const group = groups[batchOf[i] as number] as ColourBatches;
-      const x = c.x + c.s * n.x;
-      const y = c.y + c.s * n.y;
       const r = this.radius(n, zoom);
-      group.paths[strength].circle(x, y, r);
-      const active = n.key === hoverKey || n.key === focusKey;
-      // Topics are named by the page's labels; without them, only an active topic gets a name.
-      const labelled = !n.topic || (active && this.display.topicLabels === false);
-      if (labelled && n.label) {
-        const isLitLabel = lit === null ? null : lit.has(n.key);
-        // Below the fade threshold with nothing hovered, no label shows: skip the work.
-        const a =
-          zoomAlpha === 0 && lit === null && !active
-            ? 0
-            : labelOpacity(zoomAlpha, active, isLitLabel, n.legacy);
-        if (a > 0) {
-          labelAlphas[i] = a;
-          labelRanks[i] = active ? 2 : isLitLabel ? 1 : 0;
-          labelOrder.push(i);
-        }
+      (group.paths[strength] as PathBatch).circle(c.x + c.s * n.x, c.y + c.s * n.y, r);
+      if (!n.label) continue;
+      let a: number;
+      let rank: number;
+      if (n.topic && topicLabels) {
+        a = topicLabelOpacity(active, s, n.legacy);
+        rank = topicLabelRank(s, source, selected);
+      } else {
+        if (n.topic && !active) continue;
+        // Below the fade threshold only emphasised notes are named, so skip the rest early.
+        if (zoomAlpha === 0 && !active && s < 0) continue;
+        a = labelOpacity(zoomAlpha, active, s, n.legacy);
+        rank = labelRank(s, source, selected);
       }
-      // Hover and focus each get a ring, whatever their order in the scene.
-      if (n.key === hoverKey) {
-        ring.circle(x, y, r + 3);
-        hoverRing = true;
-      } else if (n.key === focusKey) {
-        focusRing = true;
-        focusX = x;
-        focusY = y;
-        focusR = r;
-      }
+      if (a <= 0) continue;
+      this.labelAlphas[i] = a;
+      this.labelRanks[i] = rank;
+      this.labelKeys[candidates] = labelSortKey(rank, n.size, i);
+      candidates += 1;
     }
-    for (const group of groups) {
-      for (let s = 0; s < 3; s += 1) {
+    this.labelCount = candidates;
+    for (let s = 0; s < NOTE_ALPHAS.length; s += 1) {
+      const alpha = NOTE_ALPHAS[s] as number;
+      for (const group of groups) {
         const path = group.paths[s] as PathBatch;
-        const alpha = STRENGTH_ALPHA[s] as number;
         if (group.topic) {
           ctx.lineWidth = 1.5;
           path.stroke(ctx, group.color, alpha);
@@ -556,31 +739,142 @@ export class GraphRenderer {
         }
       }
     }
-    if (focusRing) ring.circle(focusX, focusY, focusR + 3);
-    if (hoverRing || focusRing) {
-      ctx.lineWidth = 1.5;
-      ring.stroke(ctx, this.palette.edgeStrong, 1);
-    }
-    if (labelOrder.length > 0) this.drawLabels(ctx, labelOrder, zoom);
-    ctx.globalAlpha = 1;
-    this.drawMs = now() - started;
   }
 
-  /** Titles centred under their dots, capped, with a halo so links don't cut them. Hovered
-   * and focused labels win the cap, then lit ones, then the biggest notes. */
-  private drawLabels(ctx: CanvasRenderingContext2D, order: number[], zoom: number): void {
-    const { nodes } = this.scene;
-    const alphas = this.labelAlphas;
-    const ranks = this.labelRanks;
+  /** Hover and selection each get a ring, whatever their order in the scene; the dragged note
+   * gets a bolder one in place of its hover ring. */
+  private drawRings(ctx: CanvasRenderingContext2D, view: Bounds, zoom: number): void {
+    const ring = this.ringBatch;
+    const hover = this.hoverIndex;
+    const focus = this.focusIndex;
+    const drag = this.dragIndex;
+    ring.reset();
+    if (hover !== drag) this.addRing(hover, RING_GAP, view, zoom);
+    if (focus !== hover && focus !== drag) this.addRing(focus, RING_GAP, view, zoom);
+    ctx.lineWidth = RING_WIDTH;
+    ring.stroke(ctx, this.palette.edgeStrong, 1);
+    if (drag < 0) return;
+    ring.reset();
+    this.addRing(drag, DRAG_RING_GAP, view, zoom);
+    ctx.lineWidth = DRAG_RING_WIDTH;
+    ring.stroke(ctx, this.palette.edgeStrong, 1);
+  }
+
+  private addRing(index: number, gap: number, view: Bounds, zoom: number): void {
+    const n = this.scene.nodes[index];
+    if (!n || !inBox(n, view)) return;
+    const c = this.cam;
+    this.ringBatch.circle(c.x + c.s * n.x, c.y + c.s * n.y, this.radius(n, zoom) + gap);
+  }
+
+  /** Note titles under their dots and region names on their centroids, placed greedily by
+   * priority (labelRank) so no label overlaps another, then drawn with a halo so links don't
+   * cut them. At most LABEL_CAP note labels. */
+  private drawLabels(ctx: CanvasRenderingContext2D, zoom: number): void {
+    const regions = this.regions;
+    if (regions) {
+      regions.placedCount = 0;
+      regions.hitCount = 0;
+    }
+    const fade = regions ? regionLabelAlpha(zoom) : 0;
+    const named = fade > 0 ? regions : null;
+    if (this.labelCount === 0 && !named) return;
+    const p = this.palette;
+    if (named) {
+      ctx.font = p.regionFont;
+      measureRegions(ctx, named);
+      named.sum(this.scene.nodes);
+    }
+    // Ascending keys run from the highest priority down; sorting a typed array in place
+    // without a comparator allocates nothing.
+    const keys = this.labelKeys.subarray(0, this.labelCount).sort();
+    const nodes = this.scene.nodes;
+    const c = this.cam;
+    const boxes = this.boxes;
+    boxes.reset();
+    ctx.font = p.labelFont;
+    let placed = 0;
+    let regionsPlaced = !named;
+    for (let k = 0; k < keys.length && placed < LABEL_CAP; k += 1) {
+      const i = labelSortIndex(keys[k] as number);
+      if (named && !regionsPlaced && (this.labelRanks[i] as number) < RANK_REGION) {
+        this.placeRegions(named, fade);
+        regionsPlaced = true;
+      }
+      const n = nodes[i] as SceneNode;
+      const half = this.labelWidth(ctx, i) / 2 + LABEL_GAP;
+      const x = c.x + c.s * n.x;
+      const y = c.y + c.s * n.y + this.radius(n, zoom) + LABEL_OFFSET;
+      if (!boxes.place(x - half, y - LABEL_GAP, x + half, y + LABEL_LINE + LABEL_GAP)) continue;
+      this.placedLabels[placed] = i;
+      placed += 1;
+    }
+    if (named && !regionsPlaced) this.placeRegions(named, fade);
+    if (named && named.placedCount > 0) this.drawRegionNames(ctx, named, fade);
+    if (placed > 0) this.drawNoteLabels(ctx, placed, zoom);
+  }
+
+  /** Offers each named region's name, biggest region first, centred on its notes' centroid. */
+  private placeRegions(regions: RegionLabels, fade: number): void {
+    const c = this.cam;
+    const pickable = fade >= REGION_PICK_ALPHA;
+    for (const r of regions.order) {
+      const count = regions.total[r] as number;
+      const x = c.x + (c.s * (regions.sumX[r] as number)) / count;
+      const y = c.y + (c.s * (regions.sumY[r] as number)) / count;
+      const half = (regions.widths[r] as number) / 2 + LABEL_GAP;
+      const x0 = x - half;
+      const y0 = y - REGION_LINE / 2 - LABEL_GAP;
+      const x1 = x + half;
+      const y1 = y + REGION_LINE / 2 + LABEL_GAP;
+      // Off screen there is nothing to draw or click.
+      if (x1 < 0 || y1 < 0 || x0 > this.width || y0 > this.height) continue;
+      if (!this.boxes.place(x0, y0, x1, y1)) continue;
+      const m = regions.placedCount;
+      regions.placed[m] = r;
+      regions.placedX[m] = x;
+      regions.placedY[m] = y;
+      regions.placedCount = m + 1;
+      if (!pickable) continue;
+      const h = 4 * regions.hitCount;
+      regions.hits[h] = x0;
+      regions.hits[h + 1] = y0;
+      regions.hits[h + 2] = x1;
+      regions.hits[h + 3] = y1;
+      regions.hitIds[regions.hitCount] = r;
+      regions.hitCount += 1;
+    }
+  }
+
+  private drawRegionNames(
+    ctx: CanvasRenderingContext2D,
+    regions: RegionLabels,
+    fade: number,
+  ): void {
+    const p = this.palette;
+    ctx.font = p.regionFont;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.lineJoin = "round";
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = p.background;
+    ctx.fillStyle = p.label;
+    const soften = this.mode === "calm" ? 1 : REGION_EMPHASIS_ALPHA;
+    ctx.globalAlpha = fade * REGION_TEXT_ALPHA * soften;
+    for (let k = 0; k < regions.placedCount; k += 1) {
+      const text = regions.names[regions.placed[k] as number] as string;
+      const x = regions.placedX[k] as number;
+      const y = regions.placedY[k] as number;
+      ctx.strokeText(text, x, y);
+      ctx.fillText(text, x, y);
+    }
+  }
+
+  private drawNoteLabels(ctx: CanvasRenderingContext2D, count: number, zoom: number): void {
+    const nodes = this.scene.nodes;
     const c = this.cam;
     const p = this.palette;
-    order.sort(
-      (i, j) =>
-        (ranks[j] as number) - (ranks[i] as number) ||
-        (nodes[j] as SceneNode).size - (nodes[i] as SceneNode).size,
-    );
-    const count = Math.min(order.length, LABEL_CAP);
-    ctx.font = `12px ${p.font}`;
+    ctx.font = p.labelFont;
     ctx.textAlign = "center";
     ctx.textBaseline = "top";
     ctx.lineJoin = "round";
@@ -588,15 +882,166 @@ export class GraphRenderer {
     ctx.strokeStyle = p.background;
     ctx.fillStyle = p.label;
     for (let k = 0; k < count; k += 1) {
-      const n = nodes[order[k] as number] as SceneNode;
-      ctx.globalAlpha = alphas[order[k] as number] as number;
+      const i = this.placedLabels[k] as number;
+      const n = nodes[i] as SceneNode;
+      ctx.globalAlpha = this.labelAlphas[i] as number;
       const x = c.x + c.s * n.x;
-      const y = c.y + c.s * n.y + this.radius(n, zoom) + 3;
-      const text = this.labels[order[k] as number] as string;
+      const y = c.y + c.s * n.y + this.radius(n, zoom) + LABEL_OFFSET;
+      const text = this.labels[i] as string;
       ctx.strokeText(text, x, y);
       ctx.fillText(text, x, y);
     }
   }
+
+  /** A note label's width; the context's font must be the label font. Measured once. */
+  private labelWidth(ctx: CanvasRenderingContext2D, i: number): number {
+    const known = this.labelWidths[i] as number;
+    if (!Number.isNaN(known)) return known;
+    const width = ctx.measureText(this.labels[i] as string).width;
+    this.labelWidths[i] = width;
+    return width;
+  }
+}
+
+/** The page's regions, kept by note key so a new scene (filters, Animate) keeps every note's
+ * region, with the arrays a frame needs to name them. Everything per frame is preallocated. */
+class RegionLabels {
+  /** Names, shortened like note labels; an empty one leaves its region unnamed. */
+  readonly names: readonly string[];
+  /** Region per scene node, -1 for none. */
+  of = new Int32Array(0);
+  /** Notes per region on the canvas. */
+  readonly total: Int32Array;
+  /** The regions to name, biggest first. */
+  order = new Int32Array(0);
+  /** Per region, the sum of its notes' positions this frame, for the centroid. */
+  readonly sumX: Float64Array;
+  readonly sumY: Float64Array;
+  /** Name widths in the region font; NaN until first measured. */
+  readonly widths: Float32Array;
+  /** The names placed this frame, with their screen centres. */
+  readonly placed: Int32Array;
+  readonly placedX: Float64Array;
+  readonly placedY: Float64Array;
+  placedCount = 0;
+  /** Screen boxes of the names drawn last frame that take clicks, for pickRegion. */
+  readonly hits: Float64Array;
+  readonly hitIds: Int32Array;
+  hitCount = 0;
+
+  private constructor(
+    private readonly byKey: ReadonlyMap<string, number>,
+    names: readonly string[],
+  ) {
+    const count = names.length;
+    this.names = names.map((name) => shortLabel(name));
+    this.total = new Int32Array(count);
+    this.sumX = new Float64Array(count);
+    this.sumY = new Float64Array(count);
+    this.widths = new Float32Array(count).fill(Number.NaN);
+    this.placed = new Int32Array(count);
+    this.placedX = new Float64Array(count);
+    this.placedY = new Float64Array(count);
+    this.hits = new Float64Array(4 * count);
+    this.hitIds = new Int32Array(count);
+  }
+
+  /** The page's regions, given aligned with `nodes`. */
+  static from(regions: SceneRegions, nodes: readonly SceneNode[]): RegionLabels {
+    const byKey = new Map<string, number>();
+    nodes.forEach((n, i) => {
+      const r = regions.assign[i] as number;
+      if (r >= 0 && r < regions.names.length) byKey.set(n.key, r);
+    });
+    const labels = new RegionLabels(byKey, regions.names);
+    labels.align(nodes);
+    return labels;
+  }
+
+  /** Lines the regions up with a scene's notes. */
+  align(nodes: readonly SceneNode[]): void {
+    this.of = Int32Array.from(nodes, (n) => this.byKey.get(n.key) ?? -1);
+    this.total.fill(0);
+    for (const r of this.of) if (r >= 0) this.total[r] = (this.total[r] as number) + 1;
+    const named: number[] = [];
+    for (let r = 0; r < this.names.length; r += 1) {
+      if (this.names[r] !== "" && (this.total[r] as number) >= REGION_MIN_NOTES) named.push(r);
+    }
+    named.sort((p, q) => (this.total[q] as number) - (this.total[p] as number) || p - q);
+    this.order = Int32Array.from(named);
+    this.placedCount = 0;
+    this.hitCount = 0;
+  }
+
+  /** Sums each region's note positions, for this frame's centroids. */
+  sum(nodes: readonly SceneNode[]): void {
+    this.sumX.fill(0);
+    this.sumY.fill(0);
+    const of = this.of;
+    for (let i = 0; i < of.length; i += 1) {
+      const r = of[i] as number;
+      if (r < 0) continue;
+      const n = nodes[i] as SceneNode;
+      this.sumX[r] = (this.sumX[r] as number) + n.x;
+      this.sumY[r] = (this.sumY[r] as number) + n.y;
+    }
+  }
+}
+
+/** Measures the names about to be offered, once each; the context's font must be the region font. */
+function measureRegions(ctx: CanvasRenderingContext2D, regions: RegionLabels): void {
+  for (const r of regions.order) {
+    if (Number.isNaN(regions.widths[r])) {
+      regions.widths[r] = ctx.measureText(regions.names[r] as string).width;
+    }
+  }
+}
+
+/** A link's style around a hovered or selected note: only links one step outwards (both ends
+ * within the depths, one apart) stand out, the source's own in the accent and deeper steps in
+ * a stronger neutral. A suggested link keeps its dashes and takes its step's colour, so the
+ * accent never lands further out than the source's own links. Everything else, links among
+ * notes at the same depth included, fades. */
+function depthStyle(edge: SceneEdge, depth: Int8Array): number {
+  const da = depth[edge.a] as number;
+  const db = depth[edge.b] as number;
+  const step = da >= 0 && db >= 0 && (da - db === 1 || db - da === 1);
+  if (!step) return edge.suggested ? DIM_SUGGESTED : DIM;
+  const own = da === 0 || db === 0;
+  if (edge.suggested) return own ? SUGGESTED : PATH_SUGGESTED;
+  return own ? NEAR : PATH;
+}
+
+/** A link's style otherwise: the hovered and selected notes' own links in the accent and,
+ * under a legend highlight, links touching a lit note stronger while the rest dim. */
+function calmStyle(
+  edge: SceneEdge,
+  standing: Int8Array,
+  litMode: boolean,
+  hover: number,
+  focus: number,
+): number {
+  const active = edge.a === hover || edge.b === hover || edge.a === focus || edge.b === focus;
+  // Dimming wins over style: a dimmed suggested link stays dashed but fades with the rest.
+  if (litMode && !active && standing[edge.a] !== 1 && standing[edge.b] !== 1) {
+    return edge.suggested ? DIM_SUGGESTED : DIM;
+  }
+  if (edge.suggested) return SUGGESTED;
+  if (active) return NEAR;
+  return litMode ? PATH : REST;
+}
+
+function indexIn(at: ReadonlyMap<string, number>, key: string | null): number {
+  return key === null ? -1 : (at.get(key) ?? -1);
+}
+
+function pathBatches(count: number): PathBatch[] {
+  return Array.from({ length: count }, () => new PathBatch());
+}
+
+/** The page's font loading, absent in jsdom. */
+function fontSet(): FontFaceSet | undefined {
+  return typeof document === "undefined" ? undefined : (document.fonts as FontFaceSet | undefined);
 }
 
 /** A batch of subpaths drawn with one fill or stroke. Built on the context's own path so a
@@ -698,12 +1143,12 @@ function boundsOf(nodes: readonly SceneNode[]): Bounds | null {
   return b;
 }
 
+function inBox(n: SceneNode, box: Bounds): boolean {
+  return n.x >= box.minX && n.x <= box.maxX && n.y >= box.minY && n.y <= box.maxY;
+}
+
 /** A cheap box test: a link is drawn unless both ends sit past the same side of the view. */
-function segmentInBox(
-  a: SceneNode,
-  b: SceneNode,
-  box: { minX: number; minY: number; maxX: number; maxY: number },
-): boolean {
+function segmentInBox(a: SceneNode, b: SceneNode, box: Bounds): boolean {
   if (a.x < box.minX && b.x < box.minX) return false;
   if (a.x > box.maxX && b.x > box.maxX) return false;
   if (a.y < box.minY && b.y < box.minY) return false;

@@ -5,8 +5,15 @@
 // motion makes those moves instant. The overlay follows the camera through renderer.subscribe.
 //
 // As in Obsidian, the canvas fills the page: the layout is a live simulation (useLiveLayout),
-// the settings float behind a button at the top right and the area button at the top left.
-// A click selects a note without moving the camera; hover lights the note and its neighbours.
+// the settings box floats open under its gear at the top right and the area button sits at the
+// top left. A click selects a note without moving the camera. Hovering a note, or else the
+// selected one, lights its own links out to the highlight depth and fades the rest. Dragging a
+// note pulls it and the graph follows, as in d3. The camera fits the area only while it first
+// opens (until the layout settles or the viewer takes the camera), on 0 and on Fit; after that
+// it stays put, so a force change shows the notes moving instead of a re-fit that hides it.
+// The graph can be coloured and separated by colour group or by brain region (the clusters its
+// links form). The canvas names the clusters on screen, brain regions or colour groups, and
+// topics, all in one collision-checked placement; the settings box lists the named clusters.
 // Positions stream outside React: each update moves the dots in place (renderer.setPositions)
 // and re-places the overlay, which follows notes by key.
 import {
@@ -31,6 +38,7 @@ import {
   centreOn,
   dotGrid,
   fitCamera,
+  frameCamera,
   type Level,
   levelFor,
   nextLevel,
@@ -43,7 +51,7 @@ import {
   wheelFactor,
   zoomAt,
 } from "./camera";
-import { GraphSettings } from "./GraphSettings";
+import { GraphSettings, type NamedPart } from "./GraphSettings";
 import { Inspector } from "./Inspector";
 import {
   alignPositions,
@@ -53,10 +61,20 @@ import {
   useLiveLayout,
   WORLD,
 } from "./layout";
-import { cardKey, cardSlots, cardsFor, formatCount, neighboursWithin, rankFrom } from "./model";
+import {
+  cardKey,
+  cardSlots,
+  cardsFor,
+  formatCount,
+  linkDepths,
+  neighboursWithin,
+  rankFrom,
+} from "./model";
 import { type CardPlace, Overlay } from "./Overlay";
+import { DISTINCT_COLOURS, paletteColour } from "./palette";
 import { OverlayPlacer } from "./placer";
-import { groupColour, matchesQuery, parseQuery, type QueryTarget } from "./query";
+import { groupColour, groupIndex, matchesQuery, parseQuery, type QueryTarget } from "./query";
+import { groupNames, regionNames } from "./regions";
 import { GraphRenderer } from "./renderer";
 import type { Scene } from "./scene";
 import { type GraphSettings as Settings, useGraphSettings, usePanelState } from "./settings";
@@ -253,11 +271,6 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
     () => settings.groups.map((g) => ({ query: parseQuery(g.query), color: g.color })),
     [settings.groups],
   );
-  const colourFor = useCallback(
-    (n: GraphNode) =>
-      groupColour(groups, targetOf(n)) ?? (isTagKey(n.key) ? tagColour : otherColour),
-    [groups, otherColour, tagColour],
-  );
 
   // Filters, as in Obsidian: the search query, legacy notes, suggested links, tags and orphans.
   // Tag nodes come from the notes the other filters keep, and their links count for orphans.
@@ -278,9 +291,78 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
   const visible = visibleData.nodes;
   const visibleEdges = visibleData.edges;
   const visibleKeys = useMemo(() => new Set(visible.map((n) => n.key)), [visible]);
+  const visibleKeysRef = useRef(visibleKeys);
+  visibleKeysRef.current = visibleKeys;
   const visibleRef = useRef(visible);
   visibleRef.current = visible;
 
+  // What the separation force sorts notes by. For colour groups, each note's first matching
+  // group, the same one its colour comes from (-1 for none); brain regions the layout finds.
+  const { separateBy, colourBy } = settings.clusters;
+  const clusterGroups = useMemo(
+    () =>
+      separateBy === "groups"
+        ? Int32Array.from(visible, (n) => groupIndex(groups, targetOf(n)))
+        : null,
+    [separateBy, visible, groups],
+  );
+  const live = useLiveLayout(domain, visibleData, settings.forces, {
+    mode: separateBy,
+    groups: clusterGroups,
+  });
+  const liveRef = useRef(live);
+  liveRef.current = live;
+
+  // The brain regions the layout found for the visible notes, by key. They come with the first
+  // positions and again once a filter changes the graph; until then a new note has none.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: regionsVersion marks new regions
+  const regionOf = useMemo(() => {
+    const found = live.regions();
+    if (!found) return null;
+    const at = new Map<string, number>();
+    visible.forEach((n, i) => {
+      const r = found.assign[i] ?? -1;
+      if (r >= 0) at.set(n.key, r);
+    });
+    return { at, assign: found.assign, count: found.count };
+  }, [live.regions, live.regionsVersion, visible]);
+
+  // The brain regions' names, worked out once per set of regions while something uses them:
+  // the canvas names them unless it names the colour groups, and colours go to named regions.
+  const regionNamesUsed =
+    colourBy === "regions" || (display.regionLabels && separateBy !== "groups");
+  const regionNameList = useMemo(
+    () =>
+      regionNamesUsed && regionOf
+        ? regionNames(visible, visibleEdges, regionOf.assign, regionOf.count)
+        : null,
+    [regionNamesUsed, regionOf, visible, visibleEdges],
+  );
+
+  // Colour by brain region: each of the largest named regions takes a palette colour by its
+  // number, which it keeps as filters change the graph. Only the first DISTINCT_COLOURS are
+  // clearly apart and the small unnamed regions would only scatter colour, so the rest stay
+  // grey: each colour then stands for one region, with its name on the canvas.
+  const regionColours = useMemo(() => {
+    if (colourBy !== "regions" || !regionOf || !regionNameList) return null;
+    const palette = Array.from({ length: regionOf.count }, (_, r) =>
+      r < DISTINCT_COLOURS && regionNameList[r] !== "" ? paletteColour(r) : null,
+    );
+    return { at: regionOf.at, palette };
+  }, [colourBy, regionOf, regionNameList]);
+  const colourFor = useCallback(
+    (n: GraphNode) => {
+      const tag = isTagKey(n.key);
+      if (regionColours) {
+        // Tags are not notes: they keep their quiet colour, and notes in no region the grey.
+        if (tag) return tagColour;
+        const r = regionColours.at.get(n.key);
+        return (r === undefined ? undefined : regionColours.palette[r]) ?? otherColour;
+      }
+      return groupColour(groups, targetOf(n)) ?? (tag ? tagColour : otherColour);
+    },
+    [groups, otherColour, tagColour, regionColours],
+  );
   const colours = useMemo(
     () => new Map(visible.map((n) => [n.key, colourFor(n)])),
     [visible, colourFor],
@@ -290,18 +372,16 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
     [colours, colourFor],
   );
 
-  // Each drawn node's neighbours, so a hover can light the note and the notes it links to.
+  // Each drawn note's linked notes, for the depths a hover or a selection lights.
   const adjacency = useMemo(() => {
     const out = new Map<string, Set<string>>();
     const add = (a: string, b: string) => {
-      let set = out.get(a);
-      if (!set) {
-        set = new Set([a]);
-        out.set(a, set);
-      }
-      set.add(b);
+      const set = out.get(a);
+      if (set) set.add(b);
+      else out.set(a, new Set([b]));
     };
     for (const e of visibleEdges) {
+      if (e.source === e.target) continue;
       add(e.source, e.target);
       add(e.target, e.source);
     }
@@ -310,10 +390,63 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
   const adjacencyRef = useRef(adjacency);
   adjacencyRef.current = adjacency;
 
-  const live = useLiveLayout(domain, visibleData, settings.forces);
-  const liveRef = useRef(live);
-  liveRef.current = live;
-  const arranging = !live.settled;
+  // What the canvas names while Region labels is on, by key: the clusters on screen. Those are
+  // the colour groups while the graph is separated by them (a region's notes are then spread
+  // over every group's cluster, so its name would float over clusters it doesn't describe),
+  // and the brain regions otherwise. The renderer treats either as regions.
+  const groupsNamed = separateBy === "groups";
+  const canvasNames = useMemo(() => {
+    if (!display.regionLabels) return null;
+    let at: ReadonlyMap<string, number>;
+    let names: readonly string[];
+    if (groupsNamed) {
+      if (!clusterGroups) return null;
+      names = groupNames(
+        visible,
+        clusterGroups,
+        settings.groups.map((g) => g.query),
+      );
+      const byKey = new Map<string, number>();
+      visible.forEach((n, i) => {
+        const g = clusterGroups[i] ?? -1;
+        if (g >= 0) byKey.set(n.key, g);
+      });
+      at = byKey;
+    } else {
+      if (!regionOf || !regionNameList) return null;
+      names = regionNameList;
+      at = regionOf.at;
+    }
+    return names.some((name) => name !== "") ? { at, names } : null;
+  }, [
+    display.regionLabels,
+    groupsNamed,
+    clusterGroups,
+    visible,
+    settings.groups,
+    regionOf,
+    regionNameList,
+  ]);
+  const canvasNamesRef = useRef(canvasNames);
+  canvasNamesRef.current = canvasNames;
+
+  // The named clusters for the settings box, largest first, each with the colour its notes
+  // share: its group's while groups both colour and gather the notes, its own while regions do.
+  const namedParts = useMemo((): NamedPart[] => {
+    if (!canvasNames) return [];
+    const sizes = new Map<number, number>();
+    for (const n of visible) {
+      const id = canvasNames.at.get(n.key);
+      if (id !== undefined && !isTagKey(n.key)) sizes.set(id, (sizes.get(id) ?? 0) + 1);
+    }
+    const colourOfPart = (id: number): string | null => {
+      if (groupsNamed) return colourBy === "groups" ? (settings.groups[id]?.color ?? null) : null;
+      return regionColours ? (regionColours.palette[id] ?? otherColour) : null;
+    };
+    return canvasNames.names
+      .flatMap((name, id) => (name === "" ? [] : [{ id, name, colour: colourOfPart(id) }]))
+      .sort((p, q) => (sizes.get(q.id) ?? 0) - (sizes.get(p.id) ?? 0) || p.id - q.id);
+  }, [canvasNames, visible, groupsNamed, colourBy, settings.groups, regionColours, otherColour]);
 
   // A note's live position, looked up through an index rebuilt when the layout's keys change.
   const keyIndex = useRef<{ keys: readonly string[] | null; at: Map<string, number> }>({
@@ -352,8 +485,27 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
   const cameraRef = useRef(camera);
   const selectedRef = useRef(selected);
   selectedRef.current = selected;
-  /** True once the viewer moved the camera: from then on the layout never moves it. */
-  const userMoved = useRef(false);
+  /** True while the area first opens: until the layout first settles the camera follows the
+   * spreading notes, unless the viewer takes the camera or changes a setting first (see
+   * endOpening). After that only 0, Fit or a resize move it on their own. */
+  const opening = useRef(true);
+  /** Becomes true once, when the layout first settles; until then the page says it arranges. */
+  const [arranged, setArranged] = useState(false);
+  /** The bounds the whole-area camera was fitted to, so a resize refits the same box instead of
+   * wherever the notes have moved since. */
+  const fitBounds = useRef<Bounds>(boundsOf(null));
+
+  /** The part of the stage the open settings box leaves free, from the left edge. Fits and
+   * frames use it so what they show is not under the box; when the box would leave less than
+   * half the stage, they use the whole stage. */
+  const freeView = useCallback((v: Viewport): Viewport => {
+    const stage = stageRef.current?.getBoundingClientRect();
+    const box = settingsRef.current?.querySelector(".gs-panel")?.getBoundingClientRect();
+    const covered = stage && box && box.width > 0 ? stage.right - box.left : 0;
+    return covered > 0 && v.width - covered >= v.width / 2
+      ? { width: v.width - covered, height: v.height }
+      : v;
+  }, []);
 
   /** The pending "wheel gesture ended" sync; a newer programmatic move cancels it. */
   const wheelIdle = useRef<number | undefined>(undefined);
@@ -379,6 +531,26 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
     cameraRef.current = c;
     setCameraState(c);
   }, []);
+
+  /** Ends the opening the moment the viewer takes the camera (a wheel, a drag, a key, a link)
+   * or changes a setting: from then on the camera stays where it is, so a change shows in the
+   * notes instead of being undone by a re-fit. */
+  const endOpening = useCallback(() => {
+    if (!opening.current) return;
+    opening.current = false;
+    // The stream moved only the renderer; React takes the fit and the camera it left. Without
+    // this, a camera taken before the first settle would leave React's fit at the first, tiny
+    // spiral of positions for good.
+    setFit((f) => (sameCamera(f, fitRef.current) ? f : fitRef.current));
+    syncCamera();
+  }, [syncCamera]);
+
+  /** The scale that fits the notes where they are now, beside the open settings box. Once
+   * forces have spread the notes past the fitted area, zooming out may go this far. */
+  const liveFitScale = useCallback(
+    () => fitCamera(boundsOf(liveRef.current.current()), freeView(viewRef.current)).s,
+    [freeView],
+  );
 
   /** The opening camera: the whole area, with the URL's focus note selected in it. With the
    * card levels on, the closest step on that note instead. */
@@ -486,13 +658,27 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
   /** Cancels the running Animate's next frame. */
   const animation = useRef<(() => void) | null>(null);
 
+  /** Hands the renderer the canvas's names, mapped by key onto `target`, the scene it draws: it
+   * reads them against that scene, so they always fit whatever order scenes and regions come in. */
+  const pushRegions = useCallback((target: Scene, labels = canvasNamesRef.current) => {
+    const r = rendererRef.current;
+    if (!r) return;
+    if (!labels || target.nodes.length === 0) {
+      r.setRegions(null);
+      return;
+    }
+    const assign = Int32Array.from(target.nodes, (n) => labels.at.get(n.key) ?? -1);
+    r.setRegions({ assign, names: labels.names });
+  }, []);
+
   const drawScene = useCallback(
     (next: Scene) => {
       sceneRef.current = next;
       rendererRef.current?.setScene(next);
+      pushRegions(next);
       pushPositions();
     },
-    [pushPositions],
+    [pushPositions, pushRegions],
   );
 
   /** Ends Animate, if it runs, and shows everything. */
@@ -540,19 +726,28 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
     else drawScene(fullSceneRef.current);
   }, [scene, live.ready, drawScene, stopAnimation]);
 
-  /** Settings changes stop Animate first, as in Obsidian. */
+  // New names, or Region labels switched: the renderer hears at once.
+  useLayoutEffect(() => {
+    pushRegions(sceneRef.current, canvasNames);
+  }, [canvasNames, pushRegions]);
+
+  /** Settings changes stop Animate first, as in Obsidian, and end the opening's camera. */
   const changeSettings = useCallback(
     (next: Settings) => {
       stopAnimation();
+      endOpening();
       updateSettings(next);
     },
-    [stopAnimation, updateSettings],
+    [stopAnimation, endOpening, updateSettings],
   );
   const restoreSettings = useCallback(() => {
     stopAnimation();
+    endOpening();
     resetSettings();
-  }, [stopAnimation, resetSettings]);
+  }, [stopAnimation, endOpening, resetSettings]);
 
+  // The canvas names topics itself, in the same collision-checked placement as region names
+  // and note labels, so Topic labels works at every zoom and no label piles on another.
   useLayoutEffect(() => {
     rendererRef.current?.setDisplay({
       nodeSize: display.nodeSize,
@@ -570,14 +765,17 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
   ]);
 
   // Each layout update, outside React: move the dots, then either keep the opening camera on
-  // the spreading notes (until the viewer moves it) or re-place the overlay where it is.
+  // the spreading notes or re-place the overlay where it is. Only the opening follows the
+  // notes: later updates (forces, filters, clustering, a drag) leave the camera still.
   useEffect(
     () =>
       live.subscribe(() => {
         pushPositions();
         const r = rendererRef.current;
-        if (!userMoved.current && r) {
-          const f = fitCamera(boundsOf(liveRef.current.current()), viewRef.current);
+        if (opening.current && r) {
+          const b = boundsOf(liveRef.current.current());
+          const f = fitCamera(b, freeView(viewRef.current));
+          fitBounds.current = b;
           fitRef.current = f;
           const c = openingCamera(f, viewRef.current);
           cameraRef.current = c;
@@ -586,33 +784,42 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
         }
         placerRef.current?.place();
       }),
-    [live.subscribe, pushPositions, openingCamera],
+    [live.subscribe, pushPositions, openingCamera, freeView],
   );
 
-  // When the layout first has positions, settles, or the stage resizes: React takes the new
-  // fit. The opening camera follows it until the viewer moves; after that a resize keeps the
-  // camera's place and a forces change keeps the camera, as in Obsidian.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: settled marks the final positions
+  // While the area opens (positions arrive, then settle) React takes each new fit and the
+  // camera follows it; the first settle ends the opening, if the viewer has not already. After
+  // that only a resize moves the camera here, keeping its place and its zoom relative to the
+  // same whole-area box, so dots and labels keep their size; a forces change keeps it, as in
+  // Obsidian.
   useLayoutEffect(() => {
     const prevView = viewRef.current;
     viewRef.current = view;
     const r = rendererRef.current;
     r?.resize(view.width, view.height);
-    const prevFit = fitRef.current;
-    const next = fitCamera(boundsOf(live.ready ? liveRef.current.current() : null), view);
-    fitRef.current = next;
-    setFit((f) => (sameCamera(f, next) ? f : next));
-    if (!userMoved.current) {
+    const done = live.ready && live.settled;
+    if (done) setArranged(true);
+    if (opening.current) {
+      const b = boundsOf(live.ready ? liveRef.current.current() : null);
+      const next = fitCamera(b, freeView(view));
+      fitBounds.current = b;
+      fitRef.current = next;
+      setFit((f) => (sameCamera(f, next) ? f : next));
       // Always through moveCamera: the stream may have moved the renderer already, but React's
       // copy (which the zoom steps read) only catches up here.
       moveCamera(openingCamera(next, view));
+      if (done) opening.current = false;
       return;
     }
     if (prevView.width === view.width && prevView.height === view.height) return;
+    const prevFit = fitRef.current;
+    const next = fitCamera(fitBounds.current, freeView(view));
+    fitRef.current = next;
+    setFit((f) => (sameCamera(f, next) ? f : next));
     const c = r?.camera ?? cameraRef.current;
     const centre = toWorld(c, { x: prevView.width / 2, y: prevView.height / 2 });
     moveCamera(centreOn(centre, next.s * (c.s / prevFit.s), view));
-  }, [view, live.ready, live.settled, openingCamera, moveCamera]);
+  }, [view, live.ready, live.settled, openingCamera, moveCamera, freeView]);
 
   // Without the card levels the graph is always at the whole-area level, however far it zooms.
   const level: Level = CARD_LEVELS ? levelFor(camera.s, fit.s) : 0;
@@ -647,30 +854,44 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
   const placed = live.ready && focusKey !== null && posOf(focusKey) !== null;
   const focusNode = focusKey ? (byKey.get(focusKey) ?? null) : null;
 
-  // Emphasis: the focus ring, the hovered note (kept in a ref, set per frame by the pointer)
-  // with its neighbours lit, else the notes a hovered settings group matches.
+  // Emphasis: the selection ring, the hovered note (kept in a ref, set per frame by the pointer)
+  // and the depths around a source note, as far as the highlight depth reaches: the hovered
+  // note, else the selected one. While nothing is hovered, a group the settings box highlights
+  // (lit) wins over the selection, so a group row still shows its notes with a note selected.
   const hoverRef = useRef<string | null>(null);
-  const emphasisRef = useRef<{ focusKey: string | null; lit: ReadonlySet<string> | null }>({
-    focusKey: null,
-    lit: null,
-  });
+  const emphasisRef = useRef<{
+    focusKey: string | null;
+    focusDepths: ReadonlyMap<string, number> | null;
+    lit: ReadonlySet<string> | null;
+    depth: number;
+  }>({ focusKey: null, focusDepths: null, lit: null, depth: 1 });
   const pushEmphasis = useCallback(() => {
-    const hoverKey = hoverRef.current;
-    const lit = hoverKey
-      ? (adjacencyRef.current.get(hoverKey) ?? new Set([hoverKey]))
-      : emphasisRef.current.lit;
-    rendererRef.current?.setEmphasis({ focusKey: emphasisRef.current.focusKey, hoverKey, lit });
+    const hovered = hoverRef.current;
+    // A note a filter just hid is not drawn, so it lights nothing.
+    const hoverKey = hovered !== null && visibleKeysRef.current.has(hovered) ? hovered : null;
+    const { focusKey, focusDepths, lit, depth } = emphasisRef.current;
+    let depths: ReadonlyMap<string, number> | null = lit ? null : focusDepths;
+    if (hoverKey !== null) {
+      depths =
+        hoverKey === focusKey ? focusDepths : linkDepths(adjacencyRef.current, hoverKey, depth);
+    }
+    rendererRef.current?.setEmphasis({ focusKey, hoverKey, lit, depths });
   }, []);
   const litKeys = useMemo(() => {
     if (highlight === null || highlight.trim() === "") return null;
     const q = parseQuery(highlight);
     return new Set(visible.filter((n) => matchesQuery(q, targetOf(n))).map((n) => n.key));
   }, [visible, highlight]);
+  /** How far each note is from the selected one, for the canvas and the inspector's lists. */
+  const focusDepths = useMemo(
+    () => (focusKey ? linkDepths(adjacency, focusKey, display.highlightDepth) : null),
+    [adjacency, focusKey, display.highlightDepth],
+  );
   // biome-ignore lint/correctness/useExhaustiveDependencies: a new adjacency re-lights the hover
   useLayoutEffect(() => {
-    emphasisRef.current = { focusKey, lit: litKeys };
+    emphasisRef.current = { focusKey, focusDepths, lit: litKeys, depth: display.highlightDepth };
     pushEmphasis();
-  }, [focusKey, litKeys, adjacency, pushEmphasis]);
+  }, [focusKey, focusDepths, litKeys, display.highlightDepth, adjacency, pushEmphasis]);
 
   const neighbours = useMemo(
     () =>
@@ -762,7 +983,7 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
       if (route.name !== "graph" || (route.domain && route.domain !== domain)) return;
       const f = route.focus ?? null;
       if (f === selectedRef.current) return;
-      userMoved.current = true;
+      endOpening();
       setExpanded(new Set());
       if (f && byKey.has(f)) {
         setMissing(null);
@@ -785,15 +1006,17 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
       window.removeEventListener("hashchange", onHash);
       window.removeEventListener("popstate", onHash);
     };
-  }, [domain, byKey, posOf, moveCamera]);
+  }, [domain, byKey, posOf, moveCamera, endOpening]);
 
   const goTo = useCallback(
     (target: Level, key: string | null = null) => {
       const k = key ?? focusKey ?? nearest?.key ?? null;
-      userMoved.current = true;
+      endOpening();
       if (target === 0) {
-        // The whole area as it is now, not as it was when the layout last settled.
-        const f = fitCamera(boundsOf(liveRef.current.current()), viewRef.current);
+        // The whole area as it is now, not as it was when the camera last fitted it.
+        const b = boundsOf(liveRef.current.current());
+        const f = fitCamera(b, freeView(viewRef.current));
+        fitBounds.current = b;
         fitRef.current = f;
         setFit((prev) => (sameCamera(prev, f) ? prev : f));
         moveCamera(f, duration.zoom);
@@ -805,7 +1028,7 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
         duration.zoom,
       );
     },
-    [focusKey, nearest, posOf, moveCamera],
+    [focusKey, nearest, posOf, moveCamera, freeView, endOpening],
   );
 
   /** Selects a note, as in Obsidian without moving the camera (the card levels zoom to it).
@@ -837,30 +1060,82 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
     goTo(nextLevel(level, -1));
   }, [goTo, level]);
 
-  // Drag to move; a press that doesn't move is a click on the note under it.
-  const drag = useRef<{
+  /** Frames a region whose name was clicked, beside the settings box while it is open. */
+  const zoomToRegion = (region: number) => {
+    const bounds = rendererRef.current?.regionBounds(region);
+    if (!bounds) return;
+    endOpening();
+    moveCamera(frameCamera(bounds, freeView(viewRef.current), fitRef.current.s), duration.zoom);
+  };
+
+  // A press on a note that moves drags the note, and one on empty canvas pans; a press that
+  // doesn't move is a click: on a region's name it frames the region, on a note it selects it.
+  const press = useRef<{
     x: number;
     y: number;
     moved: boolean;
     id: number;
+    /** The note pressed on: a move drags it. */
     hit: string | null;
+    /** The region whose name was pressed on. */
+    region: number | null;
+    /** The note's centre less the pointer's world point, so the note keeps its place under
+     * the pointer instead of jumping to it. */
+    grab: Point;
   } | null>(null);
   const localPoint = (e: PointerEvent<HTMLDivElement>): Point => {
     const rect = e.currentTarget.getBoundingClientRect();
     return { x: e.clientX - rect.left, y: e.clientY - rect.top };
   };
 
+  /** True while the pointer is over a region's name, which a click frames. */
+  const overRegion = useRef(false);
+  /** The stage's cursor: grabbing while a note or the canvas is dragged, a hand over a region's
+   * name, grab over a note, and the canvas's own otherwise. */
+  const applyCursor = useCallback(() => {
+    const stage = stageRef.current;
+    if (!stage) return;
+    stage.style.cursor = press.current?.moved
+      ? "grabbing"
+      : overRegion.current
+        ? "pointer"
+        : hoverRef.current
+          ? "grab"
+          : "";
+  }, []);
+
   // Hover: at most one pick per frame, however fast the pointer moves.
   const hoverAt = useRef<Point | null>(null);
   const hoverFrame = useRef(0);
   const setHover = useCallback(
-    (key: string | null) => {
-      if (key === hoverRef.current) return;
-      hoverRef.current = key;
-      if (stageRef.current) stageRef.current.style.cursor = key ? "pointer" : "";
-      pushEmphasis();
+    (key: string | null, region = false) => {
+      overRegion.current = region;
+      if (key !== hoverRef.current) {
+        hoverRef.current = key;
+        pushEmphasis();
+      }
+      applyCursor();
     },
-    [pushEmphasis],
+    [pushEmphasis, applyCursor],
+  );
+  /** What is under a stage point. A dot drawn right under it wins over a region's name: names
+   * sit on their region's centroid, which is where its hub usually is, so the hub stays within
+   * reach. Then the name, then a note within the usual slop around the pointer. */
+  const pickAt = useCallback((p: Point): { hit: string | null; region: number | null } => {
+    const r = rendererRef.current;
+    if (!r) return { hit: null, region: null };
+    const dot = r.pick(p.x, p.y, 0);
+    if (dot !== null) return { hit: dot, region: null };
+    const region = r.pickRegion(p.x, p.y);
+    return region === null ? { hit: r.pick(p.x, p.y), region: null } : { hit: null, region };
+  }, []);
+  /** Hovers what is under a stage point. */
+  const hoverPoint = useCallback(
+    (p: Point) => {
+      const { hit, region } = pickAt(p);
+      setHover(hit, region !== null);
+    },
+    [pickAt, setHover],
   );
   useEffect(
     () => () => {
@@ -874,31 +1149,32 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
     hoverFrame.current = requestAnimationFrame(() => {
       hoverFrame.current = 0;
       const at = hoverAt.current;
-      if (!at) return;
-      setHover(rendererRef.current?.pick(at.x, at.y) ?? null);
+      if (at) hoverPoint(at);
     });
   };
 
   // Wheel and trackpad: zoom about the pointer (or pan sideways) on the renderer's camera,
   // with no React update until the gesture ends. React's onWheel is passive, so this
-  // listens directly.
+  // listens directly. Zooming out may reach the notes' current spread (liveFitScale), worked
+  // out once per gesture, as it measures the stage and the box.
   useEffect(() => {
     const el = stageRef.current;
     if (!el) return;
+    let gestureFit = 0;
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
       stopAnimation();
       const r = rendererRef.current;
       if (!r) return;
-      userMoved.current = true;
+      endOpening();
+      if (wheelIdle.current === undefined || gestureFit <= 0) gestureFit = liveFitScale();
       const rect = el.getBoundingClientRect();
       const anchor = { x: e.clientX - rect.left, y: e.clientY - rect.top };
       const c = r.camera;
       const zoom = e.ctrlKey || !e.deltaX || Math.abs(e.deltaY) >= Math.abs(e.deltaX);
+      const factor = wheelFactor(e.deltaY, e.deltaMode);
       r.setCamera(
-        zoom
-          ? zoomAt(c, wheelFactor(e.deltaY, e.deltaMode), anchor, fitRef.current.s)
-          : pan(c, -e.deltaX, 0),
+        zoom ? zoomAt(c, factor, anchor, fitRef.current.s, gestureFit) : pan(c, -e.deltaX, 0),
       );
       window.clearTimeout(wheelIdle.current);
       wheelIdle.current = window.setTimeout(() => {
@@ -906,7 +1182,7 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
         syncCamera();
         // The notes moved under a still pointer, so re-pick what it is over.
         const at = hoverAt.current;
-        if (at) setHover(rendererRef.current?.pick(at.x, at.y) ?? null);
+        if (at) hoverPoint(at);
       }, WHEEL_IDLE_MS);
     };
     el.addEventListener("wheel", onWheel, { passive: false });
@@ -914,7 +1190,7 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
       el.removeEventListener("wheel", onWheel);
       window.clearTimeout(wheelIdle.current);
     };
-  }, [syncCamera, setHover, stopAnimation]);
+  }, [syncCamera, hoverPoint, stopAnimation, endOpening, liveFitScale]);
 
   /** Drops the hover, including a pick still queued for the next frame. */
   const clearHover = () => {
@@ -924,56 +1200,105 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
     setHover(null);
   };
 
+  /** Lets go of a note a press dragged, so the graph settles again. */
+  const letGo = (d: { moved: boolean; hit: string | null }) => {
+    if (!d.moved || !d.hit) return;
+    liveRef.current.release(d.hit);
+    rendererRef.current?.setDragging(null);
+  };
+
+  /** Ends the press of this pointer: a dragged note is let go, so the graph settles again. */
+  const endPress = (e: PointerEvent<HTMLDivElement>) => {
+    const d = press.current;
+    if (!d || d.id !== e.pointerId) return null;
+    press.current = null;
+    e.currentTarget.classList.remove("graph-live");
+    letGo(d);
+    applyCursor();
+    return d;
+  };
+  /** A press that ends without a release: cancelled, its capture lost, or its button let go
+   * where the stage never heard it. */
+  const onPointerCancel = (e: PointerEvent<HTMLDivElement>) => {
+    const d = endPress(e);
+    if (d?.moved && !d.hit) syncCamera();
+  };
+
   const onPointerDown = (e: PointerEvent<HTMLDivElement>) => {
     if (e.button !== 0 || e.target !== e.currentTarget) return;
     stopAnimation();
+    // A press another pointer still holds (a second finger, or one whose release never came)
+    // gives way, letting go of any note it dragged: a note left held would keep the graph live.
+    if (press.current) letGo(press.current);
     const r = rendererRef.current;
     const p = localPoint(e);
     // Pick against the picture on screen, then stop any animated move where it is.
-    const hit = r?.pick(p.x, p.y) ?? null;
+    const { hit, region } = pickAt(p);
+    const at = hit ? posOf(hit) : null;
+    const world = r ? toWorld(r.camera, p) : p;
     r?.setCamera(r.camera);
-    drag.current = { x: e.clientX, y: e.clientY, moved: false, id: e.pointerId, hit };
+    press.current = {
+      x: e.clientX,
+      y: e.clientY,
+      moved: false,
+      id: e.pointerId,
+      hit,
+      region,
+      grab: at ? { x: at.x - world.x, y: at.y - world.y } : { x: 0, y: 0 },
+    };
     e.currentTarget.setPointerCapture?.(e.pointerId);
   };
   const onPointerMove = (e: PointerEvent<HTMLDivElement>) => {
-    const d = drag.current;
+    const d = press.current;
     if (!d) {
       if (e.target === e.currentTarget) scheduleHover(localPoint(e));
       else clearHover(); // over a card, no dot is under the pointer
       return;
     }
     if (d.id !== e.pointerId) return;
+    // No button is down during a real press, for mouse, touch or pen alike: the release came
+    // where the stage never heard it (a context menu, another window). End the press, or every
+    // plain move would go on dragging and keep the graph live.
+    if (e.buttons === 0) {
+      onPointerCancel(e);
+      return;
+    }
     const dx = e.clientX - d.x;
     const dy = e.clientY - d.y;
     if (!d.moved && Math.hypot(dx, dy) < DRAG_SLOP) return;
     const r = rendererRef.current;
     if (!r) return;
-    if (!d.moved) e.currentTarget.classList.add("graph-live");
-    d.moved = true;
-    d.x = e.clientX;
-    d.y = e.clientY;
-    userMoved.current = true;
-    r.setCamera(pan(r.camera, dx, dy));
-  };
-  const endDrag = (e: PointerEvent<HTMLDivElement>) => {
-    const d = drag.current;
-    drag.current = null;
-    e.currentTarget.classList.remove("graph-live");
-    return d && d.id === e.pointerId ? d : null;
-  };
-  const onPointerUp = (e: PointerEvent<HTMLDivElement>) => {
-    const d = endDrag(e);
-    if (!d) return;
     if (!d.moved) {
-      // A click on a note selects it; a click on empty canvas clears the selection.
-      if (d.hit) focusNote(d.hit);
-      else setSelected(null);
+      d.moved = true;
+      e.currentTarget.classList.add("graph-live");
+      // From the first move the camera is the viewer's: the opening ends, so no refit moves
+      // the camera, and a dragged note with it, away from the pointer.
+      endOpening();
+      if (d.hit) r.setDragging(d.hit);
+      applyCursor();
+    }
+    if (d.hit) {
+      // The note is held at the pointer and the graph follows it (layout.ts).
+      const w = toWorld(r.camera, localPoint(e));
+      liveRef.current.drag(d.hit, w.x + d.grab.x, w.y + d.grab.y);
       return;
     }
-    syncCamera();
+    d.x = e.clientX;
+    d.y = e.clientY;
+    r.setCamera(pan(r.camera, dx, dy));
   };
-  const onPointerCancel = (e: PointerEvent<HTMLDivElement>) => {
-    if (endDrag(e)) syncCamera();
+  const onPointerUp = (e: PointerEvent<HTMLDivElement>) => {
+    const d = endPress(e);
+    if (!d) return;
+    if (d.moved) {
+      if (!d.hit) syncCamera();
+      return;
+    }
+    // A click on a region's name frames the region, a click on a note selects it, and a click
+    // on empty canvas clears the selection.
+    if (d.region !== null) zoomToRegion(d.region);
+    else if (d.hit) focusNote(d.hit);
+    else setSelected(null);
   };
 
   const keyMove = (key: string): (() => void) | null => {
@@ -985,8 +1310,9 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
       return !r || r.animating ? cameraRef.current : r.camera;
     };
     const panBy = (dx: number, dy: number) => () => moveCamera(pan(from(), dx, dy), duration.view);
+    // The same limits as the wheel: fitRef is right even before React has caught up with it.
     const zoomBy = (factor: number) => () =>
-      moveCamera(zoomAt(from(), factor, centre, fit.s), duration.zoom);
+      moveCamera(zoomAt(from(), factor, centre, fitRef.current.s, liveFitScale()), duration.zoom);
     switch (key) {
       case "ArrowLeft":
         return panBy(PAN_STEP, 0);
@@ -1018,7 +1344,7 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
     const move = keyMove(e.key);
     if (!move) return;
     e.preventDefault();
-    userMoved.current = true;
+    endOpening();
     move();
   };
 
@@ -1043,12 +1369,13 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
     zoomOut();
   };
 
-  // Development only: ?perf=1 runs the performance probe once the layout settles.
+  // Development only: ?perf=1 runs the performance probe once, after the layout first settles
+  // (a drag or a forces change settles again, and must not set it off a second time).
   const [perf] = useState(wantsPerfProbe);
   const mountedAt = useRef(performance.now());
-  // biome-ignore lint/correctness/useExhaustiveDependencies: runs once per settle, not per scene change
+  // biome-ignore lint/correctness/useExhaustiveDependencies: runs once, not per scene change
   useEffect(() => {
-    if (!import.meta.env.DEV || !perf || arranging) return;
+    if (!import.meta.env.DEV || !perf || !arranged) return;
     const layoutMs = performance.now() - mountedAt.current;
     const r = rendererRef.current;
     if (!r) return;
@@ -1071,7 +1398,7 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
     return () => {
       cancelled = true;
     };
-  }, [perf, arranging]);
+  }, [perf, arranged]);
 
   // The caption describes what is drawn, so it follows the filters.
   const noteCount = visible.filter((n) => !isTagKey(n.key)).length;
@@ -1081,8 +1408,27 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
   const focusLabel = focusNode?.key ?? "a note";
   const recorded = neighbours.filter((n) => !n.edge.suggested).length;
   const suggested = neighbours.length - recorded;
+  // The canvas is hidden from screen readers, so the caption says what it names and where
+  // the list of those names is.
+  const namedCount = namedParts.length;
+  const namedNoun = groupsNamed
+    ? namedCount === 1
+      ? "colour group"
+      : "colour groups"
+    : namedCount === 1
+      ? "brain region"
+      : "brain regions";
+  // While names show on the canvas, the hint says a click on one zooms to its part.
+  const nameHint = canvasNames
+    ? groupsNamed
+      ? " Click a group's name to zoom to it."
+      : " Click a region's name to zoom to it."
+    : "";
   const caption = [
     `${formatCount(noteCount)}${hidden > 0 ? ` of ${formatCount(data.nodes.length)}` : ""} notes${tagCount > 0 ? `, ${formatCount(tagCount)} tags` : ""} and ${formatCount(linkCount)} links in ${areaLabel}`,
+    namedCount > 0
+      ? `${formatCount(namedCount)} named ${namedNoun}, listed in graph settings under Display`
+      : "",
     focusNode
       ? `Selected ${focusLabel}: ${formatCount(recorded)} recorded links${suggested ? ` and ${formatCount(suggested)} suggested by reflect` : ""}`
       : "",
@@ -1100,13 +1446,6 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
 
   const inspected = shownSelected ? (byKey.get(shownSelected) ?? null) : null;
 
-  const topics = useMemo(
-    () =>
-      display.topicLabels
-        ? visible.flatMap((n) => (n.kind === TOPIC_KIND ? [{ key: n.key, title: n.title }] : []))
-        : [],
-    [display.topicLabels, visible],
-  );
   const onOpenCard = useStableCallback((key: string) => focusNote(key, true));
   const onExpandGroup = useStableCallback((kind: NoteKind) => {
     setExpanded((prev) => new Set([...prev, kind]));
@@ -1116,7 +1455,7 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
   const closeSettings = () => {
     setHighlight(null);
     setPanel({ ...panel, open: false });
-    // Escape or Close hands focus back to the button that opened the panel.
+    // Escape, Close or the gear hands focus to the gear, which opens the box again.
     settingsRef.current?.querySelector<HTMLButtonElement>(".graph-settings-button")?.focus();
   };
 
@@ -1143,7 +1482,7 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
       <p className="graph-sr" aria-live="polite">
         {announced}
       </p>
-      <div className="graph-body">
+      <div className={`graph-body${panel.open ? " graph-body-settings" : ""}`}>
         <div
           ref={stageRef}
           className="graph-stage"
@@ -1156,6 +1495,7 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
           onPointerMove={onPointerMove}
           onPointerUp={onPointerUp}
           onPointerCancel={onPointerCancel}
+          onLostPointerCapture={onPointerCancel}
           onPointerLeave={clearHover}
           onKeyDown={onStageKeyDown}
         >
@@ -1168,8 +1508,6 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
           />
           <Overlay
             rootRef={overlayRef}
-            topics={topics}
-            topicsOn={level < 2}
             focusNode={CARD_LEVELS && placed ? focusNode : null}
             cards={cards}
             places={places}
@@ -1182,7 +1520,8 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
             onExpand={onExpandGroup}
           />
           {stageEmpty && <div className="graph-stage-empty">{stageEmpty}</div>}
-          {arranging && visible.length > 0 && (
+          {/* Only the first arrangement: later ones (a drag, a force) show in the notes moving. */}
+          {!arranged && visible.length > 0 && (
             <p className="graph-status" role="status">
               Arranging notes
             </p>
@@ -1195,7 +1534,7 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
           )}
           <p id="graph-stage-hint" className="graph-hint">
             {level < 2
-              ? "Scroll to zoom and drag to move. Click a note to select it."
+              ? `Scroll to zoom and drag to move. Drag a note to pull it, or click it to select it.${nameHint}`
               : "Esc or − zooms out. Click a card to move to that note."}
           </p>
         </div>
@@ -1207,6 +1546,7 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
               visibleKeys={visibleKeys}
               rank={rank}
               colourOf={colourOf}
+              depths={focusDepths}
               onFocus={(key) => {
                 focusNote(key, true);
                 // A neighbour off screen would be selected with nothing to show for it, so
@@ -1216,7 +1556,7 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
                 const at = toScreen(cameraRef.current, p);
                 const v = viewRef.current;
                 if (at.x < 0 || at.y < 0 || at.x > v.width || at.y > v.height) {
-                  userMoved.current = true;
+                  endOpening();
                   moveCamera(centreOn(p, cameraRef.current.s, v), duration.zoom);
                 }
               }}
@@ -1226,7 +1566,7 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
                   goTo(3, inspected.key);
                   return;
                 }
-                userMoved.current = true;
+                endOpening();
                 moveCamera(
                   stepCamera(1, posOf(inspected.key), fitRef.current, viewRef.current),
                   duration.zoom,
@@ -1255,13 +1595,22 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
             closeSettings();
           }}
         >
-          <IconButton
-            icon="settings"
-            label="Graph settings"
-            className="graph-settings-button"
-            aria-expanded={panel.open}
-            onClick={() => setPanel({ ...panel, open: !panel.open })}
-          />
+          <div className="graph-tools">
+            <IconButton
+              icon="fit"
+              label="Fit the whole area"
+              className="graph-tool"
+              onClick={() => goTo(0)}
+            />
+            {/* A toggle: pressed while the box is open, and closing it hands focus back here. */}
+            <IconButton
+              icon="settings"
+              label="Graph settings"
+              className="graph-tool graph-settings-button"
+              aria-expanded={panel.open}
+              onClick={() => (panel.open ? closeSettings() : setPanel({ ...panel, open: true }))}
+            />
+          </div>
           {panel.open && (
             <GraphSettings
               settings={settings}
@@ -1272,6 +1621,8 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
               onPanelChange={setPanel}
               onHighlight={setHighlight}
               onClose={closeSettings}
+              named={namedParts}
+              onZoomTo={zoomToRegion}
             />
           )}
         </div>

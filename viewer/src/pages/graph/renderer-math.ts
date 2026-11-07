@@ -1,4 +1,5 @@
-// Pure helpers for the canvas renderer: easing, screen sizes and the spatial grid.
+// Pure helpers for the canvas renderer: easing, screen sizes, how strongly links, notes and
+// labels draw, label placement and the spatial grid.
 import type { Camera } from "./camera";
 import type { SceneNode } from "./scene";
 
@@ -37,18 +38,272 @@ export function cubicBezier(x1: number, y1: number, x2: number, y2: number): (p:
 /** The camera easing used across the viewer: cubic-bezier(.2,.7,.2,1). */
 export const cameraEase = cubicBezier(0.2, 0.7, 0.2, 1);
 
+const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
+
 /** A node's drawn radius in screen pixels. `zoom` is the camera scale over the whole-area scale. */
 export function screenRadius(size: number, topic: boolean, zoom: number): number {
-  // About 2-5 px at the whole-area scale, growing gently (square root) when zooming in, capped.
-  const base = 2 + Math.min(3, Math.log2(Math.max(1, size)) * 0.9);
+  // About 1.5-5 px at the whole-area scale: a typical note stays small, so a dense area is not
+  // a carpet of dots, while hubs (log of their links) still stand out. Grows gently (square
+  // root) when zooming in, capped.
+  const base = 1.5 + Math.min(3.5, Math.log2(Math.max(1, size)) * 0.5);
   const r = Math.min(12, base * Math.sqrt(Math.max(1, zoom)));
   return topic ? r + 1.5 : r;
 }
 
-/** Rest alpha for links: fainter when many are on screen. */
-export function edgeAlpha(visibleEdges: number): number {
-  if (visibleEdges <= 200) return 0.2;
-  return Math.max(0.06, 0.2 * Math.sqrt(200 / visibleEdges));
+// --- How strongly links draw ---------------------------------------------------------------
+
+/** How much of the screen a set of links covers: their total on-screen length per screen
+ * pixel. The renderer counts each link at most once across the screen, however long. */
+export function linkDensity(totalLength: number, width: number, height: number): number {
+  return totalLength / Math.max(1, width * height);
+}
+
+/** Rest alpha for links while few cover the screen. */
+export const REST_LINK_MAX = 0.18;
+/** The floor: the densest area keeps a faint web you can still see, about 5 grey levels over
+ * the background in either theme. One stroke paints links that overlap only once, so a dense
+ * area never builds up past this; any lower and the web disappears. */
+export const REST_LINK_MIN = 0.035;
+
+/** 1 at a density of 1 (a screen's worth of links), falling off with the square root: a denser
+ * set of links draws fainter, but density still shows. Infinite when there are none. */
+function falloff(density: number): number {
+  return density > 0 ? 1 / Math.sqrt(density) : Number.POSITIVE_INFINITY;
+}
+
+/** Rest alpha for links: clear when few cover the screen and fainter as more do, so a dense
+ * area reads as a soft texture instead of a grey mat. 0.05 at a density of 1; 16,000 links
+ * across a whole area (a density above 2) sit on the floor. */
+export function restLinkAlpha(density: number): number {
+  return clamp(0.05 * falloff(density), REST_LINK_MIN, REST_LINK_MAX);
+}
+
+/** Links outside a hovered or selected note's neighbourhood: nearly invisible (about one grey
+ * level on a dense area), so the highlighted path is obvious at a glance among 16,000 links. */
+export function fadedLinkAlpha(rest: number): number {
+  return rest * 0.2;
+}
+
+/** Links outside a legend highlight: fainter than rest, but still there for context. */
+export function dimmedEdgeAlpha(rest: number): number {
+  return rest * 0.4;
+}
+
+/** What the renderer is emphasising: nothing ("calm", where hover and selection only ring and
+ * accent their own links), a legend group ("lit"), or the depths around a note ("depth"). */
+export type EmphasisMode = "calm" | "lit" | "depth";
+
+/** The density (linkDensity) of the links drawn in each style this frame. */
+export interface LinkDensities {
+  all: number;
+  near: number;
+  path: number;
+  suggested: number;
+}
+
+export interface LinkAlphas {
+  /** Links when nothing is emphasised. */
+  rest: number;
+  /** Links outside the emphasis. */
+  dim: number;
+  /** Steps further out than the source's own links (suggested ones dashed), or links of a
+   * legend-lit note: a stronger neutral. */
+  path: number;
+  /** The source's own links, in the accent. */
+  near: number;
+  /** Links Reflect suggests: dashed, accent. */
+  suggested: number;
+  dimSuggested: number;
+}
+
+/** The accent for the source's own links: as strong as this for a note with a few links... */
+export const NEAR_MAX = 0.85;
+/** ...and never weaker than this, however many it has. */
+export const NEAR_MIN = 0.35;
+/** The neutral for deeper steps never goes past this. */
+export const PATH_MAX = 0.5;
+
+/** Every style's alpha for one frame. Each emphasised style falls off with its own density, as
+ * rest links do, so a hub's fan of links stays a readable fan instead of a solid block. A
+ * path link is always at least 2.5 times as strong as a resting one, whatever the density.
+ * The accents scale on their own rather than off the rest alpha, so the resting web can be
+ * tuned without turning a hub's fan of accent links into a solid burst. */
+export function linkAlphas(mode: EmphasisMode, d: LinkDensities): LinkAlphas {
+  const rest = restLinkAlpha(d.all);
+  const dim = mode === "depth" ? fadedLinkAlpha(rest) : dimmedEdgeAlpha(rest);
+  const suggested = clamp(0.1125 * falloff(d.suggested), 0.3, 0.8);
+  return {
+    rest,
+    dim,
+    path: Math.min(PATH_MAX, 2.5 * restLinkAlpha(d.path)),
+    near: clamp(0.125 * falloff(d.near), NEAR_MIN, NEAR_MAX),
+    suggested,
+    // Dashes cover less of their length, so they take twice the faded alpha.
+    dimSuggested: Math.min(suggested, dim * 2),
+  };
+}
+
+// --- How strongly notes and labels draw -------------------------------------------------
+
+/** Alpha for notes and labels outside the emphasis: clearly faded but still visible. */
+export const DIM_ALPHA = 0.2;
+/** Alpha for legacy notes and their labels. */
+export const LEGACY_ALPHA = 0.45;
+/** Notes two and three links from the source draw a little softer than its own neighbours. */
+export const DEPTH_ALPHAS = [1, 1, 0.8, 0.62] as const;
+
+/** A note's place in the emphasis ("standing"): CALM while nothing is emphasised, FADED
+ * outside the emphasis, else its number of links from the source (0); a legend-lit note
+ * counts as 1. */
+export const CALM = -2;
+export const FADED = -1;
+
+/** Note strengths, dimmest first: the renderer draws them in this order, so emphasised notes
+ * sit on top of faded ones. Indices come from noteStrength. */
+export const NOTE_ALPHAS = [DIM_ALPHA, LEGACY_ALPHA, DEPTH_ALPHAS[3], DEPTH_ALPHAS[2], 1] as const;
+
+/** A note's strength, an index into NOTE_ALPHAS. Legacy notes stay faint even when lit. */
+export function noteStrength(standing: number, legacy: boolean): number {
+  if (standing === FADED) return 0;
+  if (legacy) return 1;
+  if (standing >= 3) return 2;
+  if (standing === 2) return 3;
+  return 4;
+}
+
+/** The zoom ratio (camera scale over whole-area scale) at which labels start to appear.
+ * textFade 0 shows them from 2x; each step of 1 moves that by a factor of 1.6. */
+export function labelThreshold(textFade: number): number {
+  return 2 * 1.6 ** -textFade;
+}
+
+/** Label opacity at a zoom ratio: 0 up to the threshold, then fading in until 1.5x past it. */
+export function labelAlpha(zoom: number, textFade: number): number {
+  const t = labelThreshold(textFade);
+  return clamp((zoom / t - 1) / 0.5, 0, 1);
+}
+
+/** A label's opacity. Hovered, selected and dragged notes (`active`) are always named at full
+ * strength, and the source and its direct neighbours (or legend-lit notes) whatever the zoom;
+ * deeper notes and the rest fade in with the zoom, at their dot's strength. Positional, so
+ * the per-node call allocates nothing. */
+export function labelOpacity(
+  zoomAlpha: number,
+  active: boolean,
+  standing: number,
+  legacy: boolean,
+): number {
+  if (active) return 1;
+  if (standing === FADED) return zoomAlpha * DIM_ALPHA;
+  const strength = NOTE_ALPHAS[noteStrength(standing, legacy)] as number;
+  if (standing === 0 || standing === 1) return strength;
+  return zoomAlpha * strength;
+}
+
+/** Label priorities, highest first: a label that would overlap one of a higher priority is
+ * skipped. Region names come after the notes the viewer is pointing at and their direct
+ * neighbours, and ahead of every other note. Topics come next: they give way to region names
+ * (a topic is often its region's hub, right under the name) but never to plain notes. Ties go
+ * to the bigger note. */
+export const RANK_SOURCE = 6;
+export const RANK_SELECTED = 5;
+export const RANK_NEAR = 4;
+export const RANK_REGION = 3;
+export const RANK_TOPIC = 2;
+export const RANK_DEEP = 1;
+export const RANK_REST = 0;
+
+/** A note label's priority. `source` is the hovered or dragged note; depth 0 counts too. */
+export function labelRank(standing: number, source: boolean, selected: boolean): number {
+  if (source || standing === 0) return RANK_SOURCE;
+  if (selected) return RANK_SELECTED;
+  if (standing === 1) return RANK_NEAR;
+  if (standing >= 2) return RANK_DEEP;
+  return RANK_REST;
+}
+
+/** A topic label's priority while topic labels are on: at least RANK_TOPIC, except outside the
+ * emphasis, where a faded topic gives way to every lit note. */
+export function topicLabelRank(standing: number, source: boolean, selected: boolean): number {
+  const rank = labelRank(standing, source, selected);
+  return standing === FADED ? rank : Math.max(rank, RANK_TOPIC);
+}
+
+/** A topic label's opacity while topic labels are on: shown at any zoom, as strong as its ring,
+ * so it fades with the ring outside the emphasis instead of vanishing on every hover. */
+export function topicLabelOpacity(active: boolean, standing: number, legacy: boolean): number {
+  return active ? 1 : (NOTE_ALPHAS[noteStrength(standing, legacy)] as number);
+}
+
+const INDEX_SPAN = 2 ** 21;
+const SIZE_SPAN = 2 ** 20;
+
+/** A label's sort key: ascending keys put higher ranks first, then bigger notes, then scene
+ * order. Packed into one exact integer so a Float64Array of keys sorts in place without a
+ * comparator, allocating nothing per frame. Holds ranks 0-7, sizes up to about a million and
+ * about two million notes. */
+export function labelSortKey(rank: number, size: number, index: number): number {
+  const s = size >= 1 ? Math.min(SIZE_SPAN - 1, Math.floor(size)) : 0;
+  return ((7 - rank) * SIZE_SPAN + (SIZE_SPAN - 1 - s)) * INDEX_SPAN + index;
+}
+
+/** The scene index a labelSortKey was made for. */
+export function labelSortIndex(key: number): number {
+  return key % INDEX_SPAN;
+}
+
+/** Region names show in full up to this zoom ratio (the whole area is 1)... */
+export const REGION_FADE_FROM = 1.25;
+/** ...and are gone by this one, about when note labels have faded in. */
+export const REGION_FADE_TO = 2.5;
+
+/** A region name's opacity at a zoom ratio, before the renderer's own softening. */
+export function regionLabelAlpha(zoom: number): number {
+  return clamp((REGION_FADE_TO - zoom) / (REGION_FADE_TO - REGION_FADE_FROM), 0, 1);
+}
+
+/** Screen boxes of the labels placed so far in a frame, for greedy collision avoidance: the
+ * caller offers labels in priority order and each one is placed only where it overlaps none
+ * placed before. One buffer, reused across frames. */
+export class LabelBoxes {
+  private boxes = new Float64Array(4 * 128);
+  private count = 0;
+
+  reset(): void {
+    this.count = 0;
+  }
+
+  get size(): number {
+    return this.count;
+  }
+
+  /** Places the box unless it overlaps one already placed; true when placed. */
+  place(x0: number, y0: number, x1: number, y1: number): boolean {
+    const b = this.boxes;
+    const end = 4 * this.count;
+    for (let i = 0; i < end; i += 4) {
+      if (
+        x0 < (b[i + 2] as number) &&
+        x1 > (b[i] as number) &&
+        y0 < (b[i + 3] as number) &&
+        y1 > (b[i + 1] as number)
+      ) {
+        return false;
+      }
+    }
+    if (end + 4 > b.length) {
+      const grown = new Float64Array(b.length * 2);
+      grown.set(b);
+      this.boxes = grown;
+    }
+    const o = this.boxes;
+    o[end] = x0;
+    o[end + 1] = y0;
+    o[end + 2] = x1;
+    o[end + 3] = y1;
+    this.count += 1;
+    return true;
+  }
 }
 
 /** A uniform grid over world space, so pick and nearest look at a few cells, not every note. */
@@ -167,45 +422,8 @@ export function visibleWorld(c: Camera, width: number, height: number, marginPx:
   };
 }
 
-/** The zoom ratio (camera scale over whole-area scale) at which labels start to appear.
- * textFade 0 shows them from 2x; each step of 1 moves that by a factor of 1.6. */
-export function labelThreshold(textFade: number): number {
-  return 2 * 1.6 ** -textFade;
-}
-
-/** Label opacity at a zoom ratio: 0 up to the threshold, then fading in until 1.5x past it. */
-export function labelAlpha(zoom: number, textFade: number): number {
-  const t = labelThreshold(textFade);
-  return Math.max(0, Math.min(1, (zoom / t - 1) / 0.5));
-}
-
-/** Alpha for notes and labels outside a hover's lit set: clearly faded but still visible. */
-export const DIM_ALPHA = 0.15;
-/** Alpha for links outside a hover's lit set. Links already rest faint (as low as 0.06 on a
- * large area), so DIM_ALPHA would erase them; a gentler factor with a floor keeps context. */
-export function dimmedEdgeAlpha(restAlpha: number): number {
-  return Math.max(restAlpha * 0.4, 0.04);
-}
-/** Alpha for legacy notes and their labels. */
-export const LEGACY_ALPHA = 0.45;
 /** Tag nodes draw this much smaller than a note of the same size, as in Obsidian. */
 export const TAG_SCALE = 0.6;
-
-/** A label's opacity: hovered and focused (`active`) always at full strength; while a hover
- * lights a neighbourhood, lit labels show whatever the zoom and the others fade with their dots.
- * `lit` is null when nothing is lit. Positional so the per-node call allocates nothing. */
-export function labelOpacity(
-  zoomAlpha: number,
-  active: boolean,
-  lit: boolean | null,
-  legacy: boolean,
-): number {
-  if (active) return 1;
-  const legacyAlpha = legacy ? LEGACY_ALPHA : 1;
-  if (lit === true) return legacyAlpha;
-  if (lit === false) return zoomAlpha * DIM_ALPHA;
-  return zoomAlpha * legacyAlpha;
-}
 
 /** The text drawn for a node: tags read "#name", long titles end in an ellipsis. */
 export function nodeLabel(label: string, tag: boolean): string {
@@ -219,5 +437,5 @@ export const ARROW_MIN_LENGTH = 24;
 export const LABEL_MAX = 28;
 
 export function shortLabel(title: string): string {
-  return title.length <= LABEL_MAX ? title : `${title.slice(0, LABEL_MAX - 1).trimEnd()}\u2026`;
+  return title.length <= LABEL_MAX ? title : `${title.slice(0, LABEL_MAX - 1).trimEnd()}…`;
 }

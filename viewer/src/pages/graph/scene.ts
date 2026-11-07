@@ -24,7 +24,8 @@ export interface SceneEdge {
   /** Indices into nodes. */
   a: number;
   b: number;
-  /** A link Reflect suggests: dashed, accent. */
+  /** A link Reflect suggests: dashed, in the accent, or the stronger neutral when it is a
+   * deeper step around a hovered or selected note. */
   suggested: boolean;
 }
 
@@ -34,10 +35,26 @@ export interface Scene {
 }
 
 export interface Emphasis {
+  /** The selected note: ringed, and always drawn and named at full strength. */
   focusKey: string | null;
   hoverKey: string | null;
-  /** When set, only these notes and the links touching them draw at full strength. */
+  /** The legend's group highlight, used while depths is null: these notes and the links
+   * touching them draw at full strength and the rest fade. */
   lit: ReadonlySet<string> | null;
+  /** Set while a note is hovered or selected: 0 for that note (the source), 1..d for notes
+   * that many links away. These notes draw at full strength (depths 2 and 3 a little softer)
+   * and every other note fades. Only links one step outwards (both ends here, depths one
+   * apart) stand out: the source's own in the accent, deeper steps a stronger neutral. */
+  depths: ReadonlyMap<string, number> | null;
+}
+
+/** Regions of the graph to name on the canvas ("parts of the brain"). */
+export interface SceneRegions {
+  /** Each note's region, aligned with the nodes of the scene last passed to the renderer
+   * (map them by key); -1 for none. */
+  assign: Int32Array;
+  /** A name per region, indexed by region; an empty name leaves that region unnamed. */
+  names: readonly string[];
 }
 
 export interface DisplayOptions {
@@ -49,6 +66,7 @@ export interface DisplayOptions {
   arrows: boolean;
   /** -3..3 as in Obsidian: higher shows labels at a lower zoom. */
   textFade: number;
-  /** Topic names show as page labels; when off, the canvas names a hovered or selected topic. */
+  /** Name every topic at any zoom, placed with the other labels just below region names; when
+   * false, only a hovered, selected or dragged topic is named. On unless false. */
   topicLabels?: boolean;
 }

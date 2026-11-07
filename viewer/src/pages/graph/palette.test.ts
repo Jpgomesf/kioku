@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { paletteColour } from "./palette";
+import { DISTINCT_COLOURS, paletteColour } from "./palette";
 
 function luminance(hex: string): number {
   const [r, g, b] = [1, 3, 5].map((i) => {
@@ -61,10 +61,11 @@ describe("paletteColour", () => {
     }
   });
 
-  it("keeps every pair of the first 12 apart, not only neighbours", () => {
+  it("keeps every pair of the first DISTINCT_COLOURS apart, not only neighbours", () => {
+    expect(DISTINCT_COLOURS).toBe(12);
     let min = Number.POSITIVE_INFINITY;
-    for (let i = 0; i < 12; i++) {
-      for (let j = i + 1; j < 12; j++) {
+    for (let i = 0; i < DISTINCT_COLOURS; i++) {
+      for (let j = i + 1; j < DISTINCT_COLOURS; j++) {
         min = Math.min(min, perceptualDistance(colours[i] ?? "", colours[j] ?? ""));
       }
     }

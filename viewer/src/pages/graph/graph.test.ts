@@ -6,6 +6,7 @@ import {
   DOT_SPACING,
   dotGrid,
   fitCamera,
+  frameCamera,
   levelFor,
   nextLevel,
   STEPS,
@@ -20,6 +21,7 @@ import {
   cardSlots,
   cardsFor,
   GROUP_AFTER,
+  linkDepths,
   neighboursOf,
   neighboursWithin,
   rankFrom,
@@ -208,6 +210,15 @@ describe("camera", () => {
     expect(zoomAt({ x: 0, y: 0, s: 1 }, 0.01, { x: 0, y: 0 }, 1).s).toBe(0.6);
   });
 
+  it("zooms out further once the notes have spread past the fitted box, and never in less", () => {
+    const at = { x: 0, y: 0 };
+    // The notes now need a quarter of the fitted scale to fit.
+    expect(zoomAt({ x: 0, y: 0, s: 1 }, 0.01, at, 1, 0.25).s).toBeCloseTo(0.15);
+    expect(zoomAt({ x: 0, y: 0, s: 1 }, 100, at, 1, 0.25).s).toBe(10);
+    // Notes drawn closer together than the fit leave the limits as they were.
+    expect(zoomAt({ x: 0, y: 0, s: 1 }, 0.01, at, 1, 4).s).toBe(0.6);
+  });
+
   it("centres the focus at each step and maps steps back to their level", () => {
     const fit = fitCamera(bounds, view);
     const focus = { x: 428, y: 379 };
@@ -222,6 +233,21 @@ describe("camera", () => {
     expect(stepCamera(0, focus, fit, view)).toEqual(fit);
     expect(levelFor(fit.s, fit.s)).toBe(0);
     expect(centreOn(focus, 2, view).s).toBe(2);
+  });
+
+  it("frames a small part of the area with a margin, within the zoom limits", () => {
+    const fit = fitCamera(bounds, view);
+    const part = { minX: 400, minY: 300, maxX: 600, maxY: 400 };
+    const c = frameCamera(part, view, fit.s, 64);
+    // Centred, and as close as fits the margin: no minimum box as in fitCamera.
+    const centre = toScreen(c, { x: 500, y: 350 });
+    expect(centre.x).toBeCloseTo(500);
+    expect(centre.y).toBeCloseTo(300);
+    expect(c.s).toBeCloseTo((1000 - 2 * 64) / 200);
+    expect(toScreen(c, { x: 400, y: 300 }).x).toBeCloseTo(64);
+    // A single point zooms in only as far as the zoom range allows.
+    const point = frameCamera({ minX: 5, minY: 5, maxX: 5, maxY: 5 }, view, fit.s);
+    expect(point.s).toBeCloseTo(fit.s * 10);
   });
 
   it("steps within range and turns wheel deltas into factors", () => {
@@ -321,5 +347,33 @@ describe("neighbour order", () => {
       neighboursOf({ nodes, edges }, "f", rankFrom(kinds)).map((n) => n.node.key);
     expect(keys(["decision", "question"])).toEqual(["d1", "d2", "q", "a", "r"]);
     expect(keys(["runbook", "decision"])).toEqual(["r", "d1", "d2", "a", "q"]);
+  });
+});
+
+describe("link depths", () => {
+  // s - a - b - c, with a shortcut s - x - b, and d off on its own.
+  const adjacency = new Map<string, Set<string>>([
+    ["s", new Set(["a", "x"])],
+    ["a", new Set(["s", "b"])],
+    ["x", new Set(["s", "b"])],
+    ["b", new Set(["a", "x", "c"])],
+    ["c", new Set(["b"])],
+    ["d", new Set()],
+  ]);
+  const depths = (maxDepth: number) =>
+    Object.fromEntries([...linkDepths(adjacency, "s", maxDepth)].sort());
+
+  it("gives the source 0 and each note its fewest links away", () => {
+    expect(depths(3)).toEqual({ a: 1, b: 2, c: 3, s: 0, x: 1 });
+  });
+
+  it("stops at the depth asked for", () => {
+    expect(depths(1)).toEqual({ a: 1, s: 0, x: 1 });
+    expect(depths(0)).toEqual({ s: 0 });
+  });
+
+  it("reaches only the source when it has no links", () => {
+    expect([...linkDepths(adjacency, "d", 3)]).toEqual([["d", 0]]);
+    expect([...linkDepths(adjacency, "missing", 3)]).toEqual([["missing", 0]]);
   });
 });

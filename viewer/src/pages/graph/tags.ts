@@ -11,7 +11,7 @@ export const TAG_KIND = "tag";
 export const isTagKey = (key: string): boolean => key.startsWith(TAG_PREFIX);
 
 /** Tags compare without case or a leading #, as tag: queries do. */
-const tagName = (tag: string): string => tag.trim().replace(/^#+/, "").toLowerCase();
+export const tagName = (tag: string): string => tag.trim().replace(/^#+/, "").toLowerCase();
 
 /** The notes plus one node per tag they carry, and a link from each note to its tags. A tag
  * node's update time is its earliest note's, so Animate shows it with that note. */
