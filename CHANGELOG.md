@@ -8,6 +8,9 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `memory_get` takes `count_use`. A read with `count_use: false` isn't counted
+  as use, so agents that read notes only to compare, deduplicate, or audit
+  them don't keep those notes from aging out.
 - A code map for small models: `kioku codemap update` parses a repository's
   source files at HEAD (only those that changed since the last update) into
   their purpose, main definitions, and the files they import. It is stored

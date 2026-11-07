@@ -67,6 +67,8 @@ pub struct GetArgs {
     /// Size cap for the whole response in bytes (an upper bound on tokens), 256-8000. Default 2000. If the result says truncated, raise it or ask for fewer keys.
     #[schemars(range(min = 256, max = 8000))]
     pub max_bytes: Option<i64>,
+    /// Count this read as use, which keeps the memories from aging out. Default true; pass false when you read only to compare, deduplicate, or audit.
+    pub count_use: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
