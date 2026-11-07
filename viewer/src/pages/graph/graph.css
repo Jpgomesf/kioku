@@ -51,10 +51,15 @@
   box-shadow: var(--shadow-overlay);
 }
 /* The canvas's own controls above the box: Fit, then the settings gear. */
+/* Two columns, so the wand can sit under the gear while the box is closed. */
 .graph-tools {
-  display: flex;
+  display: grid;
+  grid-template-columns: auto auto;
   flex: none;
   gap: var(--space-4);
+}
+.graph-tool-animate {
+  grid-column: 2;
 }
 .graph-tool {
   background: var(--surface);

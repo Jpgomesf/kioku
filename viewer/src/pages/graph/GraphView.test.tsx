@@ -591,6 +591,24 @@ describe("GraphView", () => {
     expect(scene.nodes).toHaveLength(2);
   });
 
+  it("plays Animate from the wand under the gear while the box is closed", () => {
+    const nodes = [
+      { ...node("a"), updatedAt: "2026-01-01T00:00:00Z" },
+      { ...node("b"), updatedAt: "2026-02-01T00:00:00Z" },
+    ];
+    const edges = [{ source: "a", target: "b", relation: "related", suggested: false }];
+    const host = render(undefined, { nodes, edges });
+    const wand = () =>
+      host.querySelector<HTMLButtonElement>('.graph-tools button[aria-label="Animate"]');
+    // The open box has its own wand, so the one under the gear shows only once it closes.
+    expect(wand()).toBeNull();
+    act(() => settingsButton(host)?.click());
+    expect(panelOf(host)).toBeNull();
+    expect(wand()?.getAttribute("title")).toBe("Animate");
+    act(() => wand()?.click());
+    expect(scene.nodes.length).toBeLessThan(2);
+  });
+
   it("says when an area has no notes", () => {
     const host = render(undefined, { nodes: [], edges: [] });
     expect(host.textContent).toContain("No notes in this area yet");

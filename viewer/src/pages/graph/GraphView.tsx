@@ -1610,6 +1610,15 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
               aria-expanded={panel.open}
               onClick={() => (panel.open ? closeSettings() : setPanel({ ...panel, open: true }))}
             />
+            {/* As in Obsidian, the wand under the gear plays Animate; the open box has its own. */}
+            {!panel.open && (
+              <IconButton
+                icon="wand"
+                label="Animate"
+                className="graph-tool graph-tool-animate"
+                onClick={startAnimation}
+              />
+            )}
           </div>
           {panel.open && (
             <GraphSettings

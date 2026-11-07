@@ -107,6 +107,14 @@ const paths = {
     </>
   ),
   play: <path d="M8 5.5v13l10-6.5z" />,
+  // A wand with a sparkle at its tip: Obsidian's Animate.
+  wand: (
+    <>
+      <path d="M4 20l9-9" />
+      <path d="M16.5 3.5c.4 2.6 1.4 3.6 4 4-2.6.4-3.6 1.4-4 4-.4-2.6-1.4-3.6-4-4 2.6-.4 3.6-1.4 4-4z" />
+      <path d="M7 3.5v3M5.5 5h3" />
+    </>
+  ),
   clock: (
     <>
       <circle cx="12" cy="12" r="8.5" />

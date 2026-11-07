@@ -378,6 +378,13 @@ describe("GraphSettings", () => {
     expect(props.onChange).not.toHaveBeenCalled();
   });
 
+  it("calls onAnimate from the wand in the top row", () => {
+    const { host, props } = setup();
+    click(host.querySelector('.gs-head button[aria-label="Animate"]'));
+    expect(props.onAnimate).toHaveBeenCalledTimes(1);
+    expect(props.onChange).not.toHaveBeenCalled();
+  });
+
   it("shows each slider's value left of its track", () => {
     const { host } = setup();
     const track = host.querySelector(".gs-slider-track");

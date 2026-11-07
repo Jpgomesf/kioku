@@ -361,8 +361,10 @@ export function GraphSettings({
 
   return (
     <section className="gs-panel" aria-label="Graph settings" onKeyDown={onKeyDown}>
-      {/* Only the two small icons, as in Obsidian; the panel's name is its aria-label. */}
+      {/* Only small icons, as in Obsidian; the panel's name is its aria-label. The wand is the
+          one under the gear while the box is closed, kept in reach while it is open. */}
       <div className="gs-head">
+        <IconButton icon="wand" label="Animate" onClick={onAnimate} />
         <IconButton icon="restore" label="Restore default settings" onClick={onReset} />
         <IconButton icon="close" label="Close" onClick={onClose} />
       </div>
