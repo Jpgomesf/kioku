@@ -88,6 +88,19 @@ body {
   justify-content: center;
   padding: 0;
 }
+/* The kanji on top, the toggle under it. */
+.k-sidebar[data-collapsed] .sidebar-top {
+  flex-direction: column;
+  gap: var(--space-8);
+}
+.k-sidebar[data-collapsed] .k-brand {
+  padding: 0;
+}
+.k-sidebar[data-collapsed] .k-brand span {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--fg);
+}
 .k-sidebar[data-collapsed] .k-nav-item,
 .k-sidebar[data-collapsed] .sidebar-services-toggle {
   position: relative;

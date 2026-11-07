@@ -220,11 +220,11 @@ export function Sidebar({ route }: SidebarProps) {
   return (
     <nav className="k-sidebar" aria-label="Views and areas" data-collapsed={collapsed || undefined}>
       <div className="sidebar-top">
-        {collapsed ? null : (
-          <div className="k-brand">
-            Kioku <span lang="ja">記憶</span>
-          </div>
-        )}
+        {/* In the rail the brand is its kanji alone, which reads "kioku". */}
+        <div className="k-brand" title={collapsed ? "Kioku" : undefined}>
+          {collapsed ? null : "Kioku "}
+          <span lang="ja">記憶</span>
+        </div>
         <button
           type="button"
           className="k-btn k-btn-icon"

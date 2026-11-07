@@ -69,6 +69,11 @@ describe("collapsed sidebar", () => {
     expect(host.querySelector(".k-area-row")).not.toBeNull();
     act(() => button("Collapse the sidebar (⌘\\)")?.click());
     expect(nav()?.hasAttribute("data-collapsed")).toBe(true);
+    // The brand is its kanji, read in Japanese as "kioku", and named in its tooltip.
+    const brand = host.querySelector(".k-brand");
+    expect(brand?.textContent).toBe("記憶");
+    expect(brand?.querySelector('[lang="ja"]')?.textContent).toBe("記憶");
+    expect(brand?.getAttribute("title")).toBe("Kioku");
     // The name stays in the link for screen readers and shows as its tooltip.
     expect(link("Library")?.getAttribute("title")).toBe("Library");
     expect(link("Library")?.querySelector(".k-sr")?.textContent).toBe("Library");
@@ -80,6 +85,7 @@ describe("collapsed sidebar", () => {
     act(() => button("Expand the sidebar (⌘\\)")?.click());
     expect(nav()?.hasAttribute("data-collapsed")).toBe(false);
     expect(link("Library")?.hasAttribute("title")).toBe(false);
+    expect(host.querySelector(".k-brand")?.textContent).toBe("Kioku 記憶");
   });
 
   it("expands with the services details from the rail's status dot", async () => {
