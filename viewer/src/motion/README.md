@@ -33,7 +33,7 @@ Motion explains a change; it never decorates. Values live in `index.ts` (JS) and
 - `.motion-list` plus `staggerStyle(i)`: list items rise in, the stagger capped at 8 items.
 - The Library's More types pops its extra type chips up one after another (240 ms each, a
   slight overshoot, the cascade within 320 ms), and Fewer types pops them down last first and
-  quicker (180 ms each, within 220 ms) before the row closes. The timing is in
+  quicker (120 ms each, within 120 ms) before the row closes. The timing is in
   `pages/library/typePops.ts`.
 
 ## Reduced motion

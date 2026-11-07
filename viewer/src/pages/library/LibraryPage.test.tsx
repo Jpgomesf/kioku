@@ -281,7 +281,7 @@ describe("LibraryPage", () => {
     vi.useFakeTimers();
     act(() => button(host, "Fewer types")?.click());
     expect(chip("G7s")?.classList.contains("library-chip-pop-out")).toBe(true);
-    expect([delay("G7s"), delay("H8s"), delay("I9s")]).toEqual(["40ms", "20ms", "0ms"]);
+    expect([delay("G7s"), delay("H8s"), delay("I9s")]).toEqual(["24ms", "12ms", "0ms"]);
     // Reopened before the fold ends: the chips pop back up and stay.
     act(() => button(host, "More types (3)")?.click());
     expect(chip("G7s")?.classList.contains("library-chip-pop-in")).toBe(true);

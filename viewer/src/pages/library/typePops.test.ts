@@ -16,7 +16,7 @@ describe("type chip pops", () => {
     const lastIn = delayOf(popProps(count - 1, count, false));
     const firstOut = delayOf(popProps(0, count, true));
     expect(lastIn).toBeLessThanOrEqual(320);
-    expect(firstOut).toBeLessThanOrEqual(220);
+    expect(firstOut).toBeLessThanOrEqual(120);
     // Out goes the other way round: the last chip leaves first.
     expect(delayOf(popProps(count - 1, count, true))).toBe(0);
     expect(foldMs(count)).toBe(firstOut + POP_OUT_MS);

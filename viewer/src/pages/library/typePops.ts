@@ -6,12 +6,12 @@ import type { CSSProperties } from "react";
 /** One chip popping in. */
 export const POP_IN_MS = 240;
 /** One chip popping out: quicker than in. */
-export const POP_OUT_MS = 180;
+export const POP_OUT_MS = 120;
 const IN_STEP_MS = 30;
-const OUT_STEP_MS = 20;
+const OUT_STEP_MS = 12;
 /** However many chips there are, the cascade's delays fit in these. */
 const IN_SPREAD_MS = 320;
-const OUT_SPREAD_MS = 220;
+const OUT_SPREAD_MS = 120;
 
 function stepFor(count: number, step: number, spread: number): number {
   return count <= 1 ? 0 : Math.min(step, spread / (count - 1));
