@@ -1,5 +1,6 @@
-//! Visibility previews: apply app switches to the vaults file's text in memory,
-//! show the diff, and check the result with kioku's own parser. Never written.
+//! Visibility changes: apply app switches to the vaults file's text in memory, show the
+//! diff, and check the result with kioku's own parser. `preview` feeds the review step;
+//! `apply_text` gives the text Allow writes, refusing anything the review's checks fail.
 
 use std::path::Path;
 
@@ -256,6 +257,27 @@ fn sentences(
         out.push("Nothing changes.".to_owned());
     }
     out
+}
+
+/// The vaults file's new text for `changes`: the text the review previewed, refused when any
+/// of the review's three checks would fail.
+pub fn apply_text(text: &str, file: &Path, changes: &[VisibilityChange]) -> CommandResult<String> {
+    let (edits, conflicts) = plan(text, changes)?;
+    if conflicts {
+        return Err(CommandError::invalid_argument(
+            "apps that share a model provider disagree",
+        ));
+    }
+    if edits.iter().any(|e| e.after.is_empty()) {
+        return Err(CommandError::invalid_argument(
+            "a changed vault would have no app that can read it",
+        ));
+    }
+    let new = rewrite(text, &edits)?;
+    vaults_file::validate(&new, file).map_err(|error| {
+        CommandError::invalid_argument(format!("Kioku doesn't accept the new file: {error:#}"))
+    })?;
+    Ok(new)
 }
 
 /// The preview of `changes` to the vaults file `text` at `file`.

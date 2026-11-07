@@ -22,9 +22,9 @@ pub enum UpdateChannel {
 pub struct AppInfo {
     pub version: String,
     pub channel: UpdateChannel,
-    /// True while every command that would change a vault returns `read_only`.
+    /// True while visibility changes can't be saved: there is no way to confirm them here.
     pub read_only: bool,
-    /// True once a person can confirm changes with Touch ID or a password.
+    /// True when a person can confirm changes with Touch ID or the Mac password (macOS).
     pub can_authenticate: bool,
 }
 
@@ -53,8 +53,8 @@ fn app_info() -> AppInfo {
     AppInfo {
         version: env!("CARGO_PKG_VERSION").to_owned(),
         channel: CHANNEL,
-        read_only: true,
-        can_authenticate: false,
+        read_only: !crate::auth::available(),
+        can_authenticate: crate::auth::available(),
     }
 }
 
@@ -168,8 +168,9 @@ mod tests {
         let info = app_info();
         assert_eq!(info.version, env!("CARGO_PKG_VERSION"));
         assert_eq!(info.channel, UpdateChannel::Stable);
-        assert!(info.read_only);
-        assert!(!info.can_authenticate);
+        // Changes can be saved exactly where they can be confirmed: on macOS.
+        assert_eq!(info.can_authenticate, cfg!(target_os = "macos"));
+        assert_eq!(info.read_only, !info.can_authenticate);
     }
 
     #[test]

@@ -1,5 +1,7 @@
 //! The error every command returns, serialized as `{ code, message }` (see `CommandError` in
-//! src/api/core.ts). Codes: not_implemented, read_only, not_found, invalid_argument, unavailable.
+//! src/api/core.ts). Codes: not_implemented, read_only, not_found, invalid_argument, unavailable,
+//! cancelled (the person cancelled the Touch ID or password check) and conflict (a file changed
+//! under a write, so nothing was written).
 
 use kioku::error::UserError;
 use serde::Serialize;
@@ -39,6 +41,14 @@ impl CommandError {
     pub fn unavailable(message: impl Into<String>) -> Self {
         Self::new("unavailable", message)
     }
+
+    pub fn cancelled() -> Self {
+        Self::new("cancelled", "You cancelled the check.")
+    }
+
+    pub fn conflict(message: impl Into<String>) -> Self {
+        Self::new("conflict", message)
+    }
 }
 
 impl From<anyhow::Error> for CommandError {
@@ -47,7 +57,7 @@ impl From<anyhow::Error> for CommandError {
             Some(user @ (UserError::NotFound(_) | UserError::InvalidArgument(_))) => {
                 Self::new(user.category(), user.to_string())
             }
-            // Conflict and refused only come from writes, which this build never makes.
+            // Conflict and refused only come from note writes, which the viewer never makes.
             Some(user) => Self::invalid_argument(user.to_string()),
             None => Self::unavailable(format!("{err:#}")),
         }

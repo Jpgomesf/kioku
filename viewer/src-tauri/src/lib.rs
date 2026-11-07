@@ -1,5 +1,6 @@
 //! Kioku Viewer's Rust side: Tauri commands over the kioku library.
 
+mod auth;
 mod commands;
 mod data;
 mod error;

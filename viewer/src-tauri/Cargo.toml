@@ -31,6 +31,11 @@ toml = { version = "1.1.8", default-features = false, features = ["std", "parse"
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls-aws-lc-rs", "postgres", "uuid"] }
 uuid = { version = "1.29", features = ["v5", "serde"] }
 
+# Touch ID, or the Mac password, before a visibility change is written (src/auth.rs). The
+# crate holds LocalAuthentication's unsafe calls, so this one keeps forbidding unsafe code.
+[target.'cfg(target_os = "macos")'.dependencies]
+robius-authentication = "0.3.1"
+
 [lints.rust]
 unsafe_code = "forbid"
 

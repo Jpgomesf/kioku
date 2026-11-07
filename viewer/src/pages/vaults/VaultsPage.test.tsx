@@ -4,6 +4,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getDraftState, resetDraftStore, setDraft } from "./draft";
 
 const failRequests = { value: false };
+/** Stands in for the Touch ID check and the write, when a test sets it. */
+const apply = vi.hoisted(() => ({
+  value: null as null | (() => Promise<{ backup: string | null }>),
+}));
+/** True where the build can confirm changes (macOS), when a test sets it. */
+const touchId = vi.hoisted(() => ({ value: false }));
 
 vi.mock("../../api/vaults/client", async (importOriginal) => {
   const real = await importOriginal<typeof import("../../api/vaults/client")>();
@@ -13,6 +19,20 @@ vi.mock("../../api/vaults/client", async (importOriginal) => {
       failRequests.value
         ? Promise.reject(new Error("not implemented yet"))
         : real.listAccessRequests(),
+    applyVisibility: (changes: Parameters<typeof real.applyVisibility>[0]) =>
+      apply.value ? apply.value() : real.applyVisibility(changes),
+  };
+});
+
+vi.mock("../../api/app/client", async (importOriginal) => {
+  const real = await importOriginal<typeof import("../../api/app/client")>();
+  return {
+    ...real,
+    getAppInfo: async () => ({
+      ...(await real.getAppInfo()),
+      readOnly: !touchId.value,
+      canAuthenticate: touchId.value,
+    }),
   };
 });
 
@@ -37,6 +57,8 @@ let root: Root;
 beforeEach(() => {
   resetDraftStore();
   failRequests.value = false;
+  apply.value = null;
+  touchId.value = false;
   host = document.createElement("div");
   document.body.append(host);
   root = createRoot(host);
@@ -199,6 +221,39 @@ describe("ReviewPage", () => {
     await settle();
     expect(host.querySelector('[role="alert"]')?.textContent).toContain("Not saved");
     expect(host.textContent).not.toContain("Saved.");
+  });
+
+  it("saves after Touch ID and says where the old file was kept", async () => {
+    touchId.value = true;
+    apply.value = () =>
+      Promise.resolve({ backup: "~/.config/kioku/backups/vaults-20261107-120000-000001.toml" });
+    setDraft({ "personal\nopenai": true });
+    act(() => root.render(<ReviewPage />));
+    await settle();
+    expect(host.textContent).toContain("macOS asks for your fingerprint or password");
+    act(() => buttonNamed("Allow with Touch ID")?.click());
+    await settle();
+    const status = host.querySelector('[role="status"]')?.textContent ?? "";
+    expect(status).toContain("Saved.");
+    expect(status).toContain(
+      "The old file is backed up at ~/.config/kioku/backups/vaults-20261107-120000-000001.toml.",
+    );
+    expect(status).toContain("Sessions already running see the change after they reconnect Kioku.");
+    expect(getDraftState().draft).toEqual({});
+  });
+
+  it("keeps the change when the Touch ID check is cancelled", async () => {
+    touchId.value = true;
+    apply.value = () => Promise.reject({ code: "cancelled", message: "You cancelled the check." });
+    setDraft({ "personal\nopenai": true });
+    act(() => root.render(<ReviewPage />));
+    await settle();
+    act(() => buttonNamed("Allow with Touch ID")?.click());
+    await settle();
+    expect(host.querySelector('[role="alert"]')?.textContent).toBe(
+      "Not saved. You cancelled the check. The file is unchanged.",
+    );
+    expect(getDraftState().draft).toEqual({ "personal\nopenai": true });
   });
 
   it("takes a declined grant out of the draft even when the answer can't be recorded", async () => {

@@ -58,6 +58,11 @@ export interface VisibilityPreview {
   checks: PreviewCheck[];
 }
 
+export interface AppliedVisibility {
+  /** Where the old vaults file was backed up, home-relative; null when nothing changed. */
+  backup: string | null;
+}
+
 export interface AccessRequest {
   id: string;
   app: string;

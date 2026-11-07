@@ -68,10 +68,15 @@ the fixtures and the mock in the same change. Shared limits are exported from th
 Outside Tauri (`window.__TAURI_INTERNALS__` missing) the client answers from the mocks, so
 every page works in a plain browser.
 
-## Read-only for now
+## What it writes
 
-Data access is read-only. Commands that would change a vault (saving Reflect settings,
-dismissing a finding, applying visibility) return a `read_only` error instead of writing;
-`list_access_requests` returns `[]` and `start_reflect` returns `read_only`. Update checks
+One thing: the vaults file, when you allow a visibility change. On macOS, Allow first asks
+for Touch ID, or the Mac password when Touch ID can't be used; agents can ask for access but
+can't pass that check. Kioku then re-reads the file (a file that changed meanwhile is left
+alone), backs it up under `backups/` beside it, and swaps the new text in whole, as
+`scripts/vaults.py` does. Other systems and the browser preview can't confirm, so they stay
+read-only. Everything else is read-only: saving Reflect settings, dismissing a finding and
+answering an access request return a `read_only` error; `list_access_requests` returns `[]`
+and `start_reflect` returns `read_only`. Update checks
 report `configured: false` until signing keys exist. Note text is shown as plain text and
 links only navigate.

@@ -15,7 +15,11 @@ export type CommandErrorCode =
   | "read_only"
   | "not_found"
   | "invalid_argument"
-  | "unavailable";
+  | "unavailable"
+  /** The person cancelled the Touch ID or password check: nothing was written. */
+  | "cancelled"
+  /** A file changed under a write, so nothing was written. */
+  | "conflict";
 
 const CODES: readonly string[] = [
   "not_implemented",
@@ -23,6 +27,8 @@ const CODES: readonly string[] = [
   "not_found",
   "invalid_argument",
   "unavailable",
+  "cancelled",
+  "conflict",
 ];
 
 /** What every failed command rejects with, in Tauri and in the mock alike. */

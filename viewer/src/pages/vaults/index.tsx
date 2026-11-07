@@ -3,6 +3,7 @@ import { type ReactNode, type RefObject, useEffect, useId, useMemo, useRef, useS
 import {
   type AccessRequest,
   type AppInfo,
+  type AppliedVisibility,
   applyVisibility,
   getAppInfo,
   getVaultsConfig,
@@ -484,9 +485,10 @@ type Outcome =
   | { kind: "idle" }
   | { kind: "busy" }
   | { kind: "failed"; message: string }
-  | { kind: "partial"; message: string }
+  | { kind: "partial"; message: string; backup: string | null }
   | { kind: "declineFailed"; message: string; name: string; vault: string }
-  | { kind: "saved" };
+  /** `backup`: where the old vaults file was kept, home-relative. */
+  | { kind: "saved"; backup: string | null };
 
 export function ReviewPage() {
   const { draft, request } = useDraftState();
@@ -515,8 +517,15 @@ export function ReviewPage() {
           </h1>
           <p role="status">
             {outcome.kind === "saved"
-              ? "Saved. A backup of the old file was kept."
+              ? "Saved."
               : `Saved. Couldn't mark the request as answered: ${outcome.message}`}
+            {outcome.backup ? (
+              <>
+                {" "}
+                The old file is backed up at <span className="k-mono">{outcome.backup}</span>.
+              </>
+            ) : null}{" "}
+            Sessions already running see the change after they reconnect Kioku.
           </p>
         </div>
       </section>
@@ -622,17 +631,17 @@ function ReviewBody({
   const allow = async () => {
     if (busy || failedChecks.length > 0) return;
     setOutcome({ kind: "busy" });
-    let applied = false;
+    // Set once the vaults file is written: macOS asked for Touch ID or the password first.
+    let applied: AppliedVisibility | null = null;
     try {
-      await applyVisibility(changes);
-      applied = true;
+      applied = await applyVisibility(changes);
       if (request) await respondAccessRequest(request.asked.id, true);
-      setOutcome({ kind: "saved" });
+      setOutcome({ kind: "saved", backup: applied.backup });
       discardDraft();
     } catch (error) {
       const message = toCommandError(error).message;
       if (applied) {
-        setOutcome({ kind: "partial", message });
+        setOutcome({ kind: "partial", message, backup: applied.backup });
         discardDraft();
       } else {
         setOutcome({ kind: "failed", message });

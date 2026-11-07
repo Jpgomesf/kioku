@@ -16,6 +16,9 @@ First build of the desktop app.
 - Visibility with one switch per app, reviewed in plain language before it applies.
 - Reflect in Manual and Automatic modes.
 - Light and dark themes from the design tokens, and reduced motion when the system asks.
-- Read-only data access: commands that would change a vault return an error.
+- Visibility changes are saved after Touch ID, or the Mac password, with a backup of the vaults
+  file first; everything else is read-only.
+- The Vaults page is one access matrix (a row per vault, a column per model provider) with
+  search and filters, so it stays usable with a hundred vaults or more.
 - App info and release notes in the app; update checks stay off until signing keys exist.
 - Note types come from each note's source, so a knowledge base's own types show as they are, and the graph colours up to three types you choose per area.

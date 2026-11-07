@@ -1,6 +1,7 @@
 import { commandError, READ_ONLY_MESSAGE } from "../core";
 import type {
   AccessRequest,
+  AppliedVisibility,
   DiffLine,
   VaultApp,
   VaultConfig,
@@ -147,7 +148,7 @@ export function previewVisibility(changes: VisibilityChange[]): VisibilityPrevie
   };
 }
 
-export function applyVisibility(_changes: VisibilityChange[]): void {
+export function applyVisibility(_changes: VisibilityChange[]): AppliedVisibility {
   throw commandError("read_only", READ_ONLY_MESSAGE);
 }
 
