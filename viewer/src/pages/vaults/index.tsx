@@ -19,7 +19,14 @@ import {
 import { READ_ONLY_MESSAGE, toCommandError } from "../../api/core";
 import { formatDayTime } from "../../app/dates";
 import { navigate } from "../../app/router";
-import { Button, ConfirmBlock, EmptyState, Icon, IconButton } from "../../components/ui";
+import {
+  Button,
+  ConfirmBlock,
+  EmptyState,
+  Icon,
+  IconButton,
+  SuccessMark,
+} from "../../components/ui";
 import {
   appOf,
   type Draft,
@@ -485,10 +492,25 @@ type Outcome =
   | { kind: "idle" }
   | { kind: "busy" }
   | { kind: "failed"; message: string }
-  | { kind: "partial"; message: string; backup: string | null }
+  | { kind: "partial"; message: string; backup: string | null; headline: string }
   | { kind: "declineFailed"; message: string; name: string; vault: string }
-  /** `backup`: where the old vaults file was kept, home-relative. */
-  | { kind: "saved"; backup: string | null };
+  /** `backup`: where the old vaults file was kept, home-relative; `headline`: what changed. */
+  | { kind: "saved"; backup: string | null; headline: string };
+
+/** What a saved change did, in one line, such as "Codex can now read personal". */
+export function savedHeadline(config: VaultsConfig, changes: VisibilityChange[]): string {
+  const vaults = [...new Set(changes.map((c) => c.vault))];
+  const [vault] = vaults;
+  const on = changes.every((c) => c.canRead);
+  const off = changes.every((c) => !c.canRead);
+  if (vaults.length === 1 && vault && (on || off)) {
+    const names = changes.map((c) => appOf(config, c.vault, c.app)?.name ?? c.app);
+    return `${listNames(names)} can ${on ? "now" : "no longer"} read ${vault}`;
+  }
+  return vaults.length > NAMED_VAULTS
+    ? `Who can read ${vaults.length} vaults has changed`
+    : `Who can read ${listNames(vaults)} has changed`;
+}
 
 export function ReviewPage() {
   const { draft, request } = useDraftState();
@@ -502,31 +524,53 @@ export function ReviewPage() {
     return { config, requests, changes, preview };
   }, key);
   const titleRef = useRef<HTMLHeadingElement>(null);
-  useFocusWhenReady(titleRef, load.state === "ok" || outcome.kind === "saved");
+  useFocusWhenReady(titleRef, load.state === "ok");
+  // The saved screen replaces the button that had focus: its heading takes it, so the next
+  // Tab starts there and a screen reader reads what changed.
+  const saved = outcome.kind === "saved" || outcome.kind === "partial";
+  useEffect(() => {
+    if (saved) titleRef.current?.focus();
+  }, [saved]);
 
   if (outcome.kind === "saved" || outcome.kind === "partial") {
     return (
       <section className="page" aria-labelledby="review-title">
-        <div className="k-review">
+        <div className="k-review vaults-saved">
           <a className="k-back" href="#/vaults">
             <Icon name="back" />
             Vaults and visibility
           </a>
-          <h1 id="review-title" ref={titleRef} tabIndex={-1}>
-            Saved
-          </h1>
-          <p role="status">
-            {outcome.kind === "saved"
-              ? "Saved."
-              : `Saved. Couldn't mark the request as answered: ${outcome.message}`}
+          <div className="vaults-saved-head">
+            <SuccessMark />
+            <div className="vaults-saved-title">
+              <h1 id="review-title" ref={titleRef} tabIndex={-1}>
+                {outcome.headline}
+              </h1>
+              <p role="status">
+                {outcome.kind === "saved"
+                  ? "Saved to the vaults file."
+                  : `Saved to the vaults file, but the request couldn't be marked as answered: ${outcome.message}`}
+              </p>
+            </div>
+          </div>
+          <dl className="k-dl vaults-saved-facts">
             {outcome.backup ? (
               <>
-                {" "}
-                The old file is backed up at <span className="k-mono">{outcome.backup}</span>.
+                <dt>Backup</dt>
+                <dd>
+                  The old file is kept at <span className="k-mono">{outcome.backup}</span>
+                </dd>
               </>
-            ) : null}{" "}
-            Sessions already running see the change after they reconnect Kioku.
-          </p>
+            ) : null}
+            <dt>Running sessions</dt>
+            <dd>
+              See the change after they reconnect Kioku: <span className="k-mono">/mcp</span> in
+              Claude Code.
+            </dd>
+          </dl>
+          <a className="k-btn k-btn-primary vaults-saved-done" href="#/vaults">
+            Back to Vaults and visibility
+          </a>
         </div>
       </section>
     );
@@ -631,17 +675,19 @@ function ReviewBody({
   const allow = async () => {
     if (busy || failedChecks.length > 0) return;
     setOutcome({ kind: "busy" });
+    // Worked out now: discarding the draft afterwards empties `changes`.
+    const headline = savedHeadline(config, changes);
     // Set once the vaults file is written: macOS asked for Touch ID or the password first.
     let applied: AppliedVisibility | null = null;
     try {
       applied = await applyVisibility(changes);
       if (request) await respondAccessRequest(request.asked.id, true);
-      setOutcome({ kind: "saved", backup: applied.backup });
+      setOutcome({ kind: "saved", backup: applied.backup, headline });
       discardDraft();
     } catch (error) {
       const message = toCommandError(error).message;
       if (applied) {
-        setOutcome({ kind: "partial", message, backup: applied.backup });
+        setOutcome({ kind: "partial", message, backup: applied.backup, headline });
         discardDraft();
       } else {
         setOutcome({ kind: "failed", message });

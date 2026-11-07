@@ -16,7 +16,7 @@ import {
   setDraft,
   setDrafted,
 } from "./draft";
-import { unchangedLines, warningLines } from "./index";
+import { savedHeadline, unchangedLines, warningLines } from "./index";
 
 const config = getVaultsConfig();
 const personal = config.vaults.find((v) => v.name === "personal");
@@ -125,6 +125,23 @@ describe("visibility draft", () => {
   it("gives no warning for apps on this Mac", () => {
     const changes = draftChanges(config, setDrafted({}, personal, "local", false));
     expect(warningLines(config, changes)).toEqual([]);
+  });
+
+  it("says in one line what a saved change did", () => {
+    const work = config.vaults.find((v) => v.name === "work");
+    if (!work) throw new Error("mock has no work vault");
+    const one = draftChanges(config, setDrafted({}, personal, "openai", true));
+    expect(savedHeadline(config, one)).toBe("Codex can now read personal");
+    // One switch, two apps on the same provider.
+    const both = draftChanges(config, setDrafted({}, personal, "anthropic", false));
+    expect(savedHeadline(config, both)).toBe(
+      "Claude Code and Claude Desktop can no longer read personal",
+    );
+    const two = draftChanges(
+      config,
+      setDrafted(setDrafted({}, personal, "google", true), work, "google", true),
+    );
+    expect(savedHeadline(config, two)).toBe("Who can read personal and work has changed");
   });
 
   it("keeps the review short when a column changes many vaults", () => {

@@ -328,6 +328,41 @@ button.k-area-row {
   min-height: 0;
   overflow: hidden;
 }
+/* SuccessMark: the ring pops in a little past full size, then the tick draws itself. Under
+   reduced motion the rules above cut both, so it shows finished. Ends within 600 ms. */
+.k-success-mark {
+  flex: none;
+  overflow: visible;
+}
+.k-success-ring {
+  fill: var(--ok-soft);
+  stroke: var(--ok-dot);
+  stroke-width: 2;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: k-success-pop var(--duration-view) cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+.k-success-tick {
+  fill: none;
+  stroke: var(--ok-dot);
+  stroke-width: 4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-dasharray: 1;
+  stroke-dashoffset: 0;
+  animation: k-success-draw 320ms var(--ease-standard) 200ms both;
+}
+@keyframes k-success-pop {
+  from {
+    opacity: 0;
+    transform: scale(0.5);
+  }
+}
+@keyframes k-success-draw {
+  from {
+    stroke-dashoffset: 1;
+  }
+}
 /* Panels and lists entering: pair with usePresence and staggerStyle. */
 .motion-panel {
   transition:

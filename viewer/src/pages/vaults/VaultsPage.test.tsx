@@ -233,12 +233,22 @@ describe("ReviewPage", () => {
     expect(host.textContent).toContain("macOS asks for your fingerprint or password");
     act(() => buttonNamed("Allow with Touch ID")?.click());
     await settle();
-    const status = host.querySelector('[role="status"]')?.textContent ?? "";
-    expect(status).toContain("Saved.");
-    expect(status).toContain(
-      "The old file is backed up at ~/.config/kioku/backups/vaults-20261107-120000-000001.toml.",
+    // The check draws itself beside what changed, which takes focus as the page's title.
+    expect(host.querySelector(".k-success-mark")).not.toBeNull();
+    expect(host.querySelector("h1")?.textContent).toBe("Codex can now read personal");
+    expect(document.activeElement).toBe(host.querySelector("h1"));
+    expect(host.querySelector('[role="status"]')?.textContent).toBe("Saved to the vaults file.");
+    const facts = host.querySelector(".vaults-saved-facts")?.textContent ?? "";
+    expect(facts).toContain(
+      "The old file is kept at ~/.config/kioku/backups/vaults-20261107-120000-000001.toml",
     );
-    expect(status).toContain("Sessions already running see the change after they reconnect Kioku.");
+    expect(facts).toContain("reconnect Kioku");
+    expect(buttonNamed("Back to Vaults and visibility")).toBeUndefined();
+    expect(
+      [...host.querySelectorAll("a")].some(
+        (a) => a.textContent === "Back to Vaults and visibility",
+      ),
+    ).toBe(true);
     expect(getDraftState().draft).toEqual({});
   });
 

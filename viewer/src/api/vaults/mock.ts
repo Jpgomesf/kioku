@@ -1,3 +1,4 @@
+import { previewTouchId } from "../app/mock";
 import { commandError, READ_ONLY_MESSAGE } from "../core";
 import type {
   AccessRequest,
@@ -149,6 +150,10 @@ export function previewVisibility(changes: VisibilityChange[]): VisibilityPrevie
 }
 
 export function applyVisibility(_changes: VisibilityChange[]): AppliedVisibility {
+  // The Touch ID preview (api/app/mock.ts) pretends the save went through; nothing is written.
+  if (previewTouchId()) {
+    return { backup: "~/.config/kioku/backups/vaults-20261107-120000-000001.toml" };
+  }
   throw commandError("read_only", READ_ONLY_MESSAGE);
 }
 

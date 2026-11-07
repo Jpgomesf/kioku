@@ -11,5 +11,6 @@ export { Kbd } from "./Kbd";
 export { SearchField } from "./SearchField";
 export { SegmentedControl, type SegmentOption } from "./SegmentedControl";
 export { StatusPill } from "./StatusPill";
+export { SuccessMark } from "./SuccessMark";
 export { Switch } from "./Switch";
 export { dismissToast, showToast, ToastHost, type ToastMessage } from "./Toast";

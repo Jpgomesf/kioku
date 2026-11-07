@@ -304,3 +304,28 @@
 .k-checklist .vaults-check-failed .k-icon {
   color: var(--danger-ink);
 }
+/* The saved screen: the check drawing itself beside what changed, then the backup and what
+   running sessions need. The text rises in as the check starts its tick. */
+.vaults-saved-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-16);
+}
+.vaults-saved-title h1 {
+  margin: 0;
+}
+.vaults-saved-title p {
+  margin: var(--space-4) 0 0;
+  color: var(--fg-2);
+}
+.vaults-saved-facts {
+  max-width: 720px;
+}
+.vaults-saved-done {
+  align-self: flex-start;
+}
+.vaults-saved-title,
+.vaults-saved-facts,
+.vaults-saved-done {
+  animation: motion-rise var(--duration-overlay) var(--ease-standard) 160ms both;
+}
