@@ -3,6 +3,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Note, NoteSummary, SearchHit } from "../../api";
 import { noteHref } from "../../app/router";
+import { foldMs } from "./typePops";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -249,8 +250,68 @@ describe("LibraryPage", () => {
     expect(chipText().some((t) => t.startsWith("G7s"))).toBe(false);
     act(() => button(host, "More types (1)")?.click());
     expect(chipText().some((t) => t.startsWith("G7s"))).toBe(true);
+    vi.useFakeTimers();
     act(() => button(host, "Fewer types")?.click());
+    // It pops down before the row closes; More types is offered again at once.
+    expect(button(host, "More types (1)")?.getAttribute("aria-expanded")).toBe("false");
+    act(() => vi.advanceTimersByTime(foldMs(1)));
     expect(chipText().some((t) => t.startsWith("G7s"))).toBe(false);
+    vi.useRealTimers();
+  });
+
+  it("pops the extra types up in turn and down last first, and back up if reopened", async () => {
+    const kinds = ["a1", "b2", "c3", "d4", "e5", "f6", "g7", "h8", "i9"];
+    api.listNotes.mockResolvedValue(
+      kinds.flatMap((k, i) =>
+        Array.from({ length: 10 - i }, (_, j) => summary(`${k}-${j}`, { kind: k })),
+      ),
+    );
+    act(() => root.render(<LibraryPage params={{}} />));
+    await settle();
+    const chip = (label: string) =>
+      [...host.querySelectorAll<HTMLElement>(".k-chip")].find((c) =>
+        c.textContent?.startsWith(label),
+      );
+    const delay = (label: string) => chip(label)?.style.getPropertyValue("--pop-delay");
+    act(() => button(host, "More types (3)")?.click());
+    // Only the extra chips pop, in order; the ones shown either way stay still.
+    expect(chip("A1s")?.className).toBe("k-chip");
+    expect(chip("G7s")?.classList.contains("library-chip-pop-in")).toBe(true);
+    expect([delay("G7s"), delay("H8s"), delay("I9s")]).toEqual(["0ms", "30ms", "60ms"]);
+    vi.useFakeTimers();
+    act(() => button(host, "Fewer types")?.click());
+    expect(chip("G7s")?.classList.contains("library-chip-pop-out")).toBe(true);
+    expect([delay("G7s"), delay("H8s"), delay("I9s")]).toEqual(["40ms", "20ms", "0ms"]);
+    // Reopened before the fold ends: the chips pop back up and stay.
+    act(() => button(host, "More types (3)")?.click());
+    expect(chip("G7s")?.classList.contains("library-chip-pop-in")).toBe(true);
+    act(() => vi.advanceTimersByTime(foldMs(3)));
+    expect(chip("G7s")).toBeDefined();
+    expect(button(host, "Fewer types")).toBeDefined();
+    vi.useRealTimers();
+  });
+
+  it("closes the extra types at once under reduced motion", async () => {
+    vi.stubGlobal("matchMedia", (query: string) => ({
+      matches: query.includes("reduce"),
+      media: query,
+      addEventListener: () => undefined,
+      removeEventListener: () => undefined,
+    }));
+    const kinds = ["a1", "b2", "c3", "d4", "e5", "f6", "g7"];
+    api.listNotes.mockResolvedValue(
+      kinds.flatMap((k, i) =>
+        Array.from({ length: 10 - i }, (_, j) => summary(`${k}-${j}`, { kind: k })),
+      ),
+    );
+    act(() => root.render(<LibraryPage params={{}} />));
+    await settle();
+    act(() => button(host, "More types (1)")?.click());
+    act(() => button(host, "Fewer types")?.click());
+    expect(
+      [...host.querySelectorAll(".k-chip")].some((c) => c.textContent?.startsWith("G7s")),
+    ).toBe(false);
+    vi.unstubAllGlobals();
   });
 
   it("shows a selected type the area lacks with 0, so it can be cleared", async () => {

@@ -38,7 +38,7 @@ import {
   StatusPill,
   showToast,
 } from "../../components/ui";
-import { duration, easing, useFlip } from "../../motion";
+import { prefersReducedMotion } from "../../motion";
 import { latestFinished } from "../reflect/state";
 import {
   areaLabel,
@@ -64,6 +64,7 @@ import {
   toggleKind,
 } from "./logic";
 import { NotePreview } from "./NotePreview";
+import { foldMs, popProps } from "./typePops";
 import { markReviewed, useLastVisit } from "./useLastVisit";
 import "./library.css";
 
@@ -73,8 +74,6 @@ export interface LibraryPageProps {
 
 /** Rows rendered at a time; more are added on request, so 1,600 notes stay fast. */
 const PAGE = 100;
-/** Fewer types: the chips fold away slower than More types brings them in. */
-const FOLD = { duration: duration.fold, easing: easing.inOut };
 const SEARCH_DELAY_MS = 200;
 const rowId = (key: string) => `library-row-${key}`;
 
@@ -279,10 +278,41 @@ export function LibraryPage({ params }: LibraryPageProps) {
   const [expandedFor, setExpandedFor] = useState<string | null>(null);
   const typesExpanded = expandedFor === domain;
   const typeChips = kindChips(areaKinds, filters.kinds, typesExpanded);
+  // Fewer types first pops the extra chips down (typePops.ts), then closes the row.
+  const [foldingFor, setFoldingFor] = useState<string | null>(null);
+  const typesFolding = typesExpanded && foldingFor === domain;
+  const foldTimer = useRef<number | undefined>(undefined);
+  useEffect(() => () => window.clearTimeout(foldTimer.current), []);
+  // The chips shown only while expanded, in order: they pop in and out.
+  const collapsedKinds = typesExpanded
+    ? new Set(kindChips(areaKinds, filters.kinds, false).chips.map((c) => c.kind))
+    : null;
+  const extraKinds = collapsedKinds
+    ? typeChips.chips.filter((c) => !collapsedKinds.has(c.kind)).map((c) => c.kind)
+    : [];
+  const onTypesToggle = () => {
+    window.clearTimeout(foldTimer.current);
+    if (typesFolding) {
+      // Reopened mid-fold: the chips pop back up.
+      setFoldingFor(null);
+      return;
+    }
+    if (!typesExpanded) {
+      setExpandedFor(domain);
+      return;
+    }
+    if (prefersReducedMotion() || extraKinds.length === 0) {
+      setExpandedFor(null);
+      return;
+    }
+    setFoldingFor(domain);
+    foldTimer.current = window.setTimeout(() => {
+      setFoldingFor(null);
+      setExpandedFor(null);
+    }, foldMs(extraKinds.length));
+  };
   const moreRef = useRef<HTMLButtonElement>(null);
   const filtersRef = useRef<HTMLFieldSetElement>(null);
-  // More types and Fewer types animate the chips' reflow (motion/flip.ts).
-  const flipFilters = useFlip(filtersRef);
   const refocusChips = useRef(false);
 
   // A cleared chip that showed only because it was selected unmounts with focus on it; move
@@ -446,6 +476,9 @@ export function LibraryPage({ params }: LibraryPageProps) {
               key={c.kind}
               pressed={filters.kinds.includes(c.kind)}
               onToggle={() => onKindToggle(c.kind)}
+              {...(extraKinds.includes(c.kind)
+                ? popProps(extraKinds.indexOf(c.kind), extraKinds.length, typesFolding)
+                : {})}
             >
               {kindLabelPlural(c.kind)}
               {c.count === null ? null : (
@@ -461,14 +494,12 @@ export function LibraryPage({ params }: LibraryPageProps) {
               ref={moreRef}
               type="button"
               className="k-btn k-btn-quiet k-btn-sm"
-              aria-expanded={typesExpanded}
-              onClick={() => {
-                // Closing folds slower than opening, whose cascade already lengthens it.
-                flipFilters(typesExpanded ? FOLD : undefined);
-                setExpandedFor(typesExpanded ? null : domain);
-              }}
+              aria-expanded={typesExpanded && !typesFolding}
+              onClick={onTypesToggle}
             >
-              {typesExpanded ? "Fewer types" : `More types (${typeChips.hidden})`}
+              {typesExpanded && !typesFolding
+                ? "Fewer types"
+                : `More types (${typeChips.overflow})`}
             </button>
           ) : null}
           {ORIGIN_CHIPS.map((c) => (

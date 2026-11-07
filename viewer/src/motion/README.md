@@ -10,7 +10,6 @@ Motion explains a change; it never decorates. Values live in `index.ts` (JS) and
 | `press` / `--duration-press` | 120 | Hover, press, focus and toggle feedback |
 | `overlay` / `--duration-overlay` | 180 | Dialogs, palette, toasts, panels, the services line, list entry, the sidebar collapsing |
 | `view` / `--duration-view` | 240 | Route changes (view transition crossfade and 6px slide) |
-| `fold` (JS only) | 300 | A row folding shut (Fewer types), eased in and out; opening's cascade already makes it as long |
 | `zoom` / `--duration-zoom` | 650 | The graph camera's semantic zoom |
 
 ## Easing
@@ -18,8 +17,6 @@ Motion explains a change; it never decorates. Values live in `index.ts` (JS) and
 - `standard`, `cubic-bezier(0, 0, 0.2, 1)` (ease-out, as the design tokens say): everything
   except the camera.
 - `zoom`, `cubic-bezier(0.2, 0.7, 0.2, 1)`: the graph camera.
-- `inOut`, `cubic-bezier(0.4, 0, 0.2, 1)` (JS only): a fold closing, so it is seen closing
-  rather than snapping shut.
 
 ## Helpers
 
@@ -34,13 +31,10 @@ Motion explains a change; it never decorates. Values live in `index.ts` (JS) and
 - `usePresence(open)`: keeps a panel mounted while it leaves; set `data-presence` on a
   `.motion-panel`. Overlays still use `app/overlay.ts`'s `usePresence`; a merge is pending.
 - `.motion-list` plus `staggerStyle(i)`: list items rise in, the stagger capped at 8 items.
-  `staggerDelay(i)` gives the same delay in milliseconds for script-driven animation.
-- `useFlip(ref)`: for a container whose children reflow (the Library's More types). Call the
-  returned `capture()` right before the change; children that stay glide to their new places,
-  new ones fade in a step apart, removed ones fade out where they stood (last in, first out),
-  and the container's height follows. `capture(timing)` sets the moves' and the height's
-  duration and curve, as Fewer types does with `fold` and `inOut`. The container must be
-  `position: relative`.
+- The Library's More types pops its extra type chips up one after another (240 ms each, a
+  slight overshoot, the cascade within 320 ms), and Fewer types pops them down last first and
+  quicker (180 ms each, within 220 ms) before the row closes. The timing is in
+  `pages/library/typePops.ts`.
 
 ## Reduced motion
 
