@@ -16,7 +16,14 @@ import {
   zoomAt,
 } from "./camera";
 import { clearLayoutCache, computeLayout, layoutFor, WORLD } from "./layout";
-import { cardSlots, cardsFor, GROUP_AFTER, neighboursOf, neighboursWithin } from "./model";
+import {
+  cardSlots,
+  cardsFor,
+  GROUP_AFTER,
+  neighboursOf,
+  neighboursWithin,
+  rankFrom,
+} from "./model";
 
 const node = (key: string, kind: GraphNode["kind"] = "decision"): GraphNode => ({
   key,
@@ -296,7 +303,7 @@ describe("neighbourhood cards", () => {
 });
 
 describe("neighbour order", () => {
-  it("lists coloured types in slot order, then the rest by label, then by title", () => {
+  it("lists ranked types first, then the rest by label, then by title", () => {
     const nodes = [
       node("f"),
       node("r", "runbook"),
@@ -308,9 +315,9 @@ describe("neighbour order", () => {
     const edges = nodes
       .slice(1)
       .map((n) => ({ source: "f", target: n.key, relation: "related", suggested: false }));
-    const keys = (slots: Parameters<typeof neighboursOf>[2]) =>
-      neighboursOf({ nodes, edges }, "f", slots).map((n) => n.node.key);
-    expect(keys(["decision", "question", null])).toEqual(["d1", "d2", "q", "a", "r"]);
-    expect(keys(["runbook", null, "decision"])).toEqual(["r", "d1", "d2", "a", "q"]);
+    const keys = (kinds: string[]) =>
+      neighboursOf({ nodes, edges }, "f", rankFrom(kinds)).map((n) => n.node.key);
+    expect(keys(["decision", "question"])).toEqual(["d1", "d2", "q", "a", "r"]);
+    expect(keys(["runbook", "decision"])).toEqual(["r", "d1", "d2", "a", "q"]);
   });
 });

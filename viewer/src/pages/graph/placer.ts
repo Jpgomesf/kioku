@@ -2,16 +2,25 @@
 // overlay's content and marks each element with its world point in data attributes; this sets
 // the screen transforms straight on the DOM nodes, so a camera frame never re-renders React.
 //
+// The notes move while the live layout settles, so a point can follow a note: with data-k the
+// element sits at that note's live position (from options.point) plus data-x, data-y as a
+// world offset. Without it, data-x, data-y are a fixed world point.
+//
 // Attributes on a placed element:
-//   data-x, data-y    world point it sits at when shown
-//   data-fx, data-fy  world point it grows from while hidden (defaults to data-x, data-y)
+//   data-k            note key the point follows (optional)
+//   data-x, data-y    world point it sits at when shown, or the offset from data-k
+//   data-fk           note key it grows from while hidden (optional)
+//   data-fx, data-fy  world point it grows from while hidden, or the offset from data-fk
+//                     (with neither data-fk nor these, it grows from where it sits)
 //   data-on           "1" when shown; a change animates between the two points
 //   data-scale        "detail": sized like the cards step (grows with zoom); otherwise fixed
 //   data-anchor       "top": hangs below its point; otherwise centred on it
 //   data-dy           a fixed screen offset downwards, in pixels
 //   data-grow         "1": shrinks to a speck while hidden (cards)
-// An SVG <line> with data-x1, data-y1 draws from that fixed world point to its moving end.
+// An SVG <line> with data-x1, data-y1 (or data-k1, a note key) draws from that point to its
+// moving end.
 import type { Camera } from "./camera";
+import type { Point } from "./layout";
 import { cameraEase } from "./renderer-math";
 
 interface Growth {
@@ -34,6 +43,8 @@ export interface OverlayPlacerOptions {
   detailScale: () => number;
   /** How long an element takes to grow out of its dot; 0 under reduced motion. */
   growMs: () => number;
+  /** A note's live world position, or null while it has none. */
+  point?: (key: string) => Point | null;
 }
 
 export class OverlayPlacer {
@@ -53,7 +64,12 @@ export class OverlayPlacer {
     const detail = cam.s / Math.max(this.options.detailScale(), 1e-9);
     const dur = this.options.growMs();
     let moving = false;
-    for (const el of this.root.querySelectorAll("[data-x]")) {
+    for (const el of this.root.querySelectorAll("[data-x],[data-k]")) {
+      const at = this.resolve(el, "data-k", "data-x", "data-y", null);
+      // A note with no position yet: leave the element where it is until it has one.
+      if (!at) continue;
+      const start = this.resolve(el, "data-fk", "data-fx", "data-fy", at);
+      if (!start) continue;
       const on = el.getAttribute("data-on") !== "0";
       let g = this.growth.get(el);
       if (!g) {
@@ -68,15 +84,15 @@ export class OverlayPlacer {
       if (p < 1) moving = true;
       const e = cameraEase(p);
       const t = on ? e : 1 - e;
-      const x = num(el, "data-x");
-      const y = num(el, "data-y");
-      const wx = num(el, "data-fx", x) + (x - num(el, "data-fx", x)) * t;
-      const wy = num(el, "data-fy", y) + (y - num(el, "data-fy", y)) * t;
+      const wx = start.x + (at.x - start.x) * t;
+      const wy = start.y + (at.y - start.y) * t;
       const sx = cam.x + cam.s * wx;
       const sy = cam.y + cam.s * wy + num(el, "data-dy");
-      if (el.hasAttribute("data-x1")) {
-        el.setAttribute("x1", String(cam.x + cam.s * num(el, "data-x1")));
-        el.setAttribute("y1", String(cam.y + cam.s * num(el, "data-y1")));
+      if (el.hasAttribute("data-x1") || el.hasAttribute("data-k1")) {
+        const one = this.resolve(el, "data-k1", "data-x1", "data-y1", null);
+        if (!one) continue;
+        el.setAttribute("x1", String(cam.x + cam.s * one.x));
+        el.setAttribute("y1", String(cam.y + cam.s * one.y));
         el.setAttribute("x2", String(sx));
         el.setAttribute("y2", String(sy));
         continue;
@@ -88,6 +104,25 @@ export class OverlayPlacer {
         `translate(${sx}px, ${sy}px) translate(${anchor}) scale(${k})`;
     }
     if (moving) this.schedule();
+  }
+
+  /** The world point named by a key attribute plus offsets, or the offsets alone as a fixed
+   * point; `fallback` when the element sets none of the three. Null when the key has no
+   * position. */
+  private resolve(
+    el: Element,
+    keyAttr: string,
+    xAttr: string,
+    yAttr: string,
+    fallback: Point | null,
+  ): Point | null {
+    const key = el.getAttribute(keyAttr);
+    if (key !== null) {
+      const p = this.options.point?.(key) ?? null;
+      return p ? { x: p.x + num(el, xAttr), y: p.y + num(el, yAttr) } : null;
+    }
+    if (fallback && !el.hasAttribute(xAttr) && !el.hasAttribute(yAttr)) return fallback;
+    return { x: num(el, xAttr), y: num(el, yAttr) };
   }
 
   destroy(): void {

@@ -3,8 +3,17 @@
 // never re-renders per frame. It knows nothing of React or the API: the page hands it a Scene.
 import { type Camera, fitCamera } from "./camera";
 import type { Bounds } from "./layout";
-import { cameraEase, edgeAlpha, SpatialGrid, screenRadius, visibleWorld } from "./renderer-math";
-import type { Emphasis, Scene, SceneNode, Tone } from "./scene";
+import {
+  ARROW_MIN_LENGTH,
+  cameraEase,
+  edgeAlpha,
+  labelAlpha,
+  SpatialGrid,
+  screenRadius,
+  shortLabel,
+  visibleWorld,
+} from "./renderer-math";
+import type { DisplayOptions, Emphasis, Scene, SceneNode } from "./scene";
 
 export interface RendererOptions {
   reducedMotion: () => boolean;
@@ -17,27 +26,42 @@ export interface RendererOptions {
 type Listener = (camera: Camera) => void;
 
 interface Palette {
-  tones: Record<Tone, string>;
   edge: string;
   edgeStrong: string;
   suggested: string;
+  /** The canvas background, used as the label halo. */
+  background: string;
+  label: string;
+  font: string;
 }
 
-const TONES: readonly Tone[] = ["slot1", "slot2", "slot3", "other", "topic"];
-const TONE_VARS: Record<Tone, string> = {
-  slot1: "--type-1",
-  slot2: "--type-2",
-  slot3: "--type-3",
-  other: "--type-other",
-  topic: "--type-topic",
-};
 /** Colours used when a custom property is missing (tests, a stylesheet not loaded yet). */
 const FALLBACK: Palette = {
-  tones: { slot1: "#2a78d6", slot2: "#eb6834", slot3: "#1baf7a", other: "#8a8b93", topic: "#555" },
   edge: "#6f7078",
   edgeStrong: "#2944b8",
   suggested: "#2944b8",
+  background: "#ffffff",
+  label: "#55565e",
+  font: "system-ui, sans-serif",
 };
+
+const DEFAULT_DISPLAY: DisplayOptions = {
+  nodeSize: 1,
+  linkThickness: 1,
+  arrows: false,
+  textFade: 0,
+};
+/** Labels drawn per frame at most, biggest notes first, so a dense view stays fast and legible. */
+const LABEL_CAP = 300;
+/** The pick grid is rebuilt at most this often while positions stream in. */
+const GRID_REFRESH_MS = 200;
+
+/** One colour's batches for each strength; topics (rings) and dots kept apart. */
+interface ColourBatches {
+  color: string;
+  topic: boolean;
+  paths: [PathBatch, PathBatch, PathBatch];
+}
 
 /** Screen margin around the viewport inside which notes and links still draw. */
 const CULL_MARGIN = 24;
@@ -67,6 +91,10 @@ export class GraphRenderer {
   private scene: Scene = { nodes: [], edges: [] };
   private grid = new SpatialGrid([]);
   private bounds: Bounds | null = null;
+  /** Positions moved since the grid and bounds were built. */
+  private gridStale = false;
+  private gridBuiltAt = 0;
+  private display: DisplayOptions = DEFAULT_DISPLAY;
   private emphasis: Emphasis = EMPTY_EMPHASIS;
   private palette: Palette = FALLBACK;
   private listeners = new Set<Listener>();
@@ -81,13 +109,22 @@ export class GraphRenderer {
     dimmed: new PathBatch(),
     dimmedSuggested: new PathBatch(),
   };
-  // One batch per tone and strength, indexed by toneIndex * 3 + strength, so a frame does
-  // no string building or map lookups per note.
-  private readonly nodeBatches: PathBatch[] = Array.from(
-    { length: TONES.length * 3 },
-    () => new PathBatch(),
-  );
+  // Arrowheads, one batch per link style, filled in the link's colour.
+  private readonly arrowBatches = {
+    rest: new PathBatch(),
+    strong: new PathBatch(),
+    suggested: new PathBatch(),
+    dimmed: new PathBatch(),
+    dimmedSuggested: new PathBatch(),
+  };
+  // One entry per distinct colour (and ring or dot), built with the scene; batchOf maps each
+  // note to its entry, so a frame does no string work per note and paths grow with colours.
+  private colourBatches: ColourBatches[] = [];
+  private batchOf = new Int32Array(0);
   private readonly ringBatch = new PathBatch();
+  private labelOrder: number[] = [];
+  // Shortened titles, aligned with scene.nodes, so long titles never form a wall of text.
+  private labels: string[] = [];
   private destroyed = false;
 
   constructor(
@@ -132,9 +169,30 @@ export class GraphRenderer {
   }
 
   setScene(scene: Scene): void {
-    this.scene = scene;
-    this.grid = new SpatialGrid(scene.nodes);
-    this.bounds = boundsOf(scene.nodes);
+    // Copy the notes: setPositions moves them in place, and the page's objects stay untouched.
+    this.scene = { nodes: scene.nodes.map((n) => ({ ...n })), edges: scene.edges };
+    this.labels = this.scene.nodes.map((n) => shortLabel(n.label));
+    this.indexColours();
+    this.rebuildGrid();
+    this.schedule();
+  }
+
+  /** Move notes (aligned with the scene's nodes) without rebuilding the scene. Redraws once per
+   * frame however often it is called; the pick grid catches up lazily. */
+  setPositions(xs: Float64Array, ys: Float64Array): void {
+    const nodes = this.scene.nodes;
+    const n = Math.min(nodes.length, xs.length, ys.length);
+    for (let i = 0; i < n; i += 1) {
+      const node = nodes[i] as SceneNode;
+      node.x = xs[i] as number;
+      node.y = ys[i] as number;
+    }
+    this.gridStale = true;
+    this.schedule();
+  }
+
+  setDisplay(options: DisplayOptions): void {
+    this.display = { ...options };
     this.schedule();
   }
 
@@ -179,8 +237,11 @@ export class GraphRenderer {
 
   pick(x: number, y: number, slop = 4): string | null {
     if (this.scene.nodes.length === 0) return null;
+    this.freshGrid();
     const zoom = this.zoomRatio();
-    const reach = (12 + 1.5 + slop) / this.cam.s;
+    // The largest drawn radius (a capped topic ring) bounds the search box.
+    const reach =
+      (screenRadius(Infinity, true, Infinity) * this.display.nodeSize + slop) / this.cam.s;
     const wx = (x - this.cam.x) / this.cam.s;
     const wy = (y - this.cam.y) / this.cam.s;
     let best: string | null = null;
@@ -190,7 +251,7 @@ export class GraphRenderer {
       const sx = this.cam.x + this.cam.s * n.x;
       const sy = this.cam.y + this.cam.s * n.y;
       const d = Math.hypot(sx - x, sy - y);
-      if (d <= screenRadius(n.size, n.tone === "topic", zoom) + slop && d < bestD) {
+      if (d <= this.radius(n, zoom) + slop && d < bestD) {
         bestD = d;
         best = n.key;
       }
@@ -199,6 +260,7 @@ export class GraphRenderer {
   }
 
   nearest(x: number, y: number): string | null {
+    this.freshGrid();
     const view = visibleWorld(this.cam, this.width, this.height, 0);
     const onScreen = (i: number) => {
       const n = this.scene.nodes[i] as SceneNode;
@@ -225,13 +287,13 @@ export class GraphRenderer {
     }
     const read = (name: string, fallback: string) =>
       style?.getPropertyValue(name).trim() || fallback;
-    const tones = { ...FALLBACK.tones };
-    for (const tone of TONES) tones[tone] = read(TONE_VARS[tone], FALLBACK.tones[tone]);
     this.palette = {
-      tones,
       edge: read("--graph-edge", FALLBACK.edge),
       edgeStrong: read("--graph-edge-strong", FALLBACK.edgeStrong),
       suggested: read("--graph-suggested", FALLBACK.suggested),
+      background: read("--bg", FALLBACK.background),
+      label: read("--fg-2", FALLBACK.label),
+      font: read("--font-sans", FALLBACK.font),
     };
     this.schedule();
   }
@@ -245,6 +307,46 @@ export class GraphRenderer {
   }
 
   // --- internals ---
+
+  private indexColours(): void {
+    const index = new Map<string, number>();
+    const batches: ColourBatches[] = [];
+    const batchOf = new Int32Array(this.scene.nodes.length);
+    this.scene.nodes.forEach((n, i) => {
+      const id = `${n.topic ? "r" : "f"}${n.color}`;
+      let b = index.get(id);
+      if (b === undefined) {
+        b = batches.length;
+        index.set(id, b);
+        // Reuse earlier PathBatch buffers when the scene changes.
+        const old = this.colourBatches[b];
+        batches.push({
+          color: n.color,
+          topic: n.topic,
+          paths: old ? old.paths : [new PathBatch(), new PathBatch(), new PathBatch()],
+        });
+      }
+      batchOf[i] = b;
+    });
+    this.colourBatches = batches;
+    this.batchOf = batchOf;
+  }
+
+  private rebuildGrid(): void {
+    this.grid = new SpatialGrid(this.scene.nodes);
+    this.bounds = boundsOf(this.scene.nodes);
+    this.gridStale = false;
+    this.gridBuiltAt = now();
+  }
+
+  /** Before a pick: the grid must match what is drawn. */
+  private freshGrid(): void {
+    if (this.gridStale) this.rebuildGrid();
+  }
+
+  private radius(n: SceneNode, zoom: number): number {
+    return screenRadius(n.size, n.topic, zoom) * this.display.nodeSize;
+  }
 
   private moveCamera(camera: Camera): void {
     this.cam = { ...camera };
@@ -299,6 +401,8 @@ export class GraphRenderer {
     const { nodes, edges } = this.scene;
     const { focusKey, hoverKey, lit } = this.emphasis;
     const c = this.cam;
+    if (this.gridStale && started - this.gridBuiltAt >= GRID_REFRESH_MS) this.rebuildGrid();
+    const display = this.display;
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     ctx.clearRect(0, 0, this.width, this.height);
 
@@ -315,6 +419,9 @@ export class GraphRenderer {
     suggested.reset();
     dimmed.reset();
     dimmedSuggested.reset();
+    const arrows = this.arrowBatches;
+    for (const batch of Object.values(arrows)) batch.reset();
+    const arrowLength = 6 * Math.max(0.6, Math.sqrt(display.linkThickness));
     let visibleEdges = 0;
     for (const edge of edges) {
       const a = nodes[edge.a];
@@ -325,32 +432,58 @@ export class GraphRenderer {
         a.key === focusKey || b.key === focusKey || a.key === hoverKey || b.key === hoverKey;
       // Dimming wins over style: a dimmed suggested link stays dashed but fades with the rest.
       const dim = !touchesActive && lit !== null && !(isLit(a) || isLit(b));
-      const target = dim
+      const style = dim
         ? edge.suggested
-          ? dimmedSuggested
-          : dimmed
+          ? "dimmedSuggested"
+          : "dimmed"
         : edge.suggested
-          ? suggested
+          ? "suggested"
           : touchesActive
-            ? strong
-            : rest;
-      target.segment(c.x + c.s * a.x, c.y + c.s * a.y, c.x + c.s * b.x, c.y + c.s * b.y);
+            ? "strong"
+            : "rest";
+      const ax = c.x + c.s * a.x;
+      const ay = c.y + c.s * a.y;
+      const bx = c.x + c.s * b.x;
+      const by = c.y + c.s * b.y;
+      this.edgeBatches[style].segment(ax, ay, bx, by);
+      if (display.arrows) {
+        // The tip sits on the target dot's edge; skip links too short to carry a readable head.
+        const len = Math.hypot(bx - ax, by - ay);
+        const back = this.radius(b, zoom);
+        if (len - back >= ARROW_MIN_LENGTH) {
+          const ux = (bx - ax) / len;
+          const uy = (by - ay) / len;
+          arrows[style].arrow(bx - ux * back, by - uy * back, ux * arrowLength, uy * arrowLength);
+        }
+      }
     }
     // The rest alpha depends on the count, but only the stroke needs it, so tracing goes first.
     const restAlpha = edgeAlpha(visibleEdges);
-    ctx.lineWidth = 1;
-    dimmed.stroke(ctx, this.palette.edge, restAlpha * DIM_ALPHA);
-    rest.stroke(ctx, this.palette.edge, restAlpha);
+    const thick = display.linkThickness;
+    const p = this.palette;
+    ctx.lineWidth = thick;
+    dimmed.stroke(ctx, p.edge, restAlpha * DIM_ALPHA);
+    rest.stroke(ctx, p.edge, restAlpha);
     ctx.setLineDash([4, 3]);
-    suggested.stroke(ctx, this.palette.suggested, 0.8);
-    dimmedSuggested.stroke(ctx, this.palette.suggested, 0.8 * DIM_ALPHA);
+    suggested.stroke(ctx, p.suggested, 0.8);
+    dimmedSuggested.stroke(ctx, p.suggested, 0.8 * DIM_ALPHA);
     ctx.setLineDash([]);
-    ctx.lineWidth = 1.5;
-    strong.stroke(ctx, this.palette.edgeStrong, 0.75);
+    ctx.lineWidth = 1.5 * thick;
+    strong.stroke(ctx, p.edgeStrong, 0.75);
+    // Heads read better a little stronger than their faint lines.
+    arrows.dimmed.fill(ctx, p.edge, Math.min(1, restAlpha * 2) * DIM_ALPHA);
+    arrows.rest.fill(ctx, p.edge, Math.min(1, restAlpha * 2));
+    arrows.suggested.fill(ctx, p.suggested, 0.8);
+    arrows.dimmedSuggested.fill(ctx, p.suggested, 0.8 * DIM_ALPHA);
+    arrows.strong.fill(ctx, p.edgeStrong, 0.75);
 
-    // Notes: one path per tone and strength (full, legacy, dimmed); topics are rings.
-    const groups = this.nodeBatches;
-    for (const batch of groups) batch.reset();
+    // Notes: one path per colour and strength (full, legacy, dimmed); topics are rings.
+    const groups = this.colourBatches;
+    for (const group of groups) for (const path of group.paths) path.reset();
+    const batchOf = this.batchOf;
+    const labels = labelAlpha(zoom, display.textFade);
+    const labelOrder = this.labelOrder;
+    labelOrder.length = 0;
     const ring = this.ringBatch;
     ring.reset();
     let hoverRing = false;
@@ -358,14 +491,16 @@ export class GraphRenderer {
     let focusX = 0;
     let focusY = 0;
     let focusR = 0;
-    for (const n of nodes) {
+    for (let i = 0; i < nodes.length; i += 1) {
+      const n = nodes[i] as SceneNode;
       if (!inView(n)) continue;
       const strength = !isLit(n) ? DIMMED : n.legacy ? LEGACY : FULL;
-      const group = groups[TONES.indexOf(n.tone) * 3 + strength] as PathBatch;
+      const group = groups[batchOf[i] as number] as ColourBatches;
       const x = c.x + c.s * n.x;
       const y = c.y + c.s * n.y;
-      const r = screenRadius(n.size, n.tone === "topic", zoom);
-      group.circle(x, y, r);
+      const r = this.radius(n, zoom);
+      group.paths[strength].circle(x, y, r);
+      if (labels > 0 && !n.topic && n.label) labelOrder.push(i);
       // Hover and focus each get a ring, whatever their order in the scene.
       if (n.key === hoverKey) {
         ring.circle(x, y, r + 3);
@@ -377,15 +512,16 @@ export class GraphRenderer {
         focusR = r;
       }
     }
-    for (let i = 0; i < groups.length; i += 1) {
-      const path = groups[i] as PathBatch;
-      const tone = TONES[Math.floor(i / 3)] as Tone;
-      const alpha = STRENGTH_ALPHA[i % 3] as number;
-      if (tone === "topic") {
-        ctx.lineWidth = 1.5;
-        path.stroke(ctx, this.palette.tones.topic, alpha);
-      } else {
-        path.fill(ctx, this.palette.tones[tone], alpha);
+    for (const group of groups) {
+      for (let s = 0; s < 3; s += 1) {
+        const path = group.paths[s] as PathBatch;
+        const alpha = STRENGTH_ALPHA[s] as number;
+        if (group.topic) {
+          ctx.lineWidth = 1.5;
+          path.stroke(ctx, group.color, alpha);
+        } else {
+          path.fill(ctx, group.color, alpha);
+        }
       }
     }
     if (focusRing) ring.circle(focusX, focusY, focusR + 3);
@@ -393,8 +529,41 @@ export class GraphRenderer {
       ctx.lineWidth = 1.5;
       ring.stroke(ctx, this.palette.edgeStrong, 1);
     }
+    if (labelOrder.length > 0) this.drawLabels(ctx, labelOrder, labels, zoom);
     ctx.globalAlpha = 1;
     this.drawMs = now() - started;
+  }
+
+  /** Titles under their dots, biggest notes first, capped, with a halo so links don't cut them. */
+  private drawLabels(
+    ctx: CanvasRenderingContext2D,
+    order: number[],
+    alpha: number,
+    zoom: number,
+  ): void {
+    const { nodes } = this.scene;
+    const { lit } = this.emphasis;
+    const c = this.cam;
+    const p = this.palette;
+    order.sort((i, j) => (nodes[j] as SceneNode).size - (nodes[i] as SceneNode).size);
+    const count = Math.min(order.length, LABEL_CAP);
+    ctx.font = `11px ${p.font}`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "top";
+    ctx.lineJoin = "round";
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = p.background;
+    ctx.fillStyle = p.label;
+    for (let k = 0; k < count; k += 1) {
+      const n = nodes[order[k] as number] as SceneNode;
+      const dim = lit !== null && !lit.has(n.key);
+      ctx.globalAlpha = alpha * (dim ? DIM_ALPHA : n.legacy ? LEGACY_ALPHA : 1);
+      const x = c.x + c.s * n.x;
+      const y = c.y + c.s * n.y + this.radius(n, zoom) + 3;
+      const text = this.labels[order[k] as number] as string;
+      ctx.strokeText(text, x, y);
+      ctx.fillText(text, x, y);
+    }
   }
 }
 
@@ -415,6 +584,11 @@ class PathBatch {
 
   circle(x: number, y: number, r: number): void {
     this.push(1, x, y, r, 0);
+  }
+
+  /** A filled triangle with its tip at (x, y), pointing along (dx, dy), which is its length. */
+  arrow(x: number, y: number, dx: number, dy: number): void {
+    this.push(2, x, y, dx, dy);
   }
 
   private push(kind: number, a: number, b: number, p: number, q: number): void {
@@ -441,9 +615,18 @@ class PathBatch {
       const x = o[i + 1] as number;
       const y = o[i + 2] as number;
       const p = o[i + 3] as number;
+      const q = o[i + 4] as number;
       if (o[i] === 0) {
         ctx.moveTo(x, y);
-        ctx.lineTo(p, o[i + 4] as number);
+        ctx.lineTo(p, q);
+      } else if (o[i] === 2) {
+        // Base centre is one length back from the tip; half-width is half the length.
+        const bx = x - p;
+        const by = y - q;
+        ctx.moveTo(x, y);
+        ctx.lineTo(bx - q * 0.5, by + p * 0.5);
+        ctx.lineTo(bx + q * 0.5, by - p * 0.5);
+        ctx.lineTo(x, y);
       } else {
         ctx.moveTo(x + p, y);
         ctx.arc(x, y, p, 0, Math.PI * 2);

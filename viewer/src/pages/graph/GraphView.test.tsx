@@ -4,10 +4,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { GraphData, GraphNode } from "../../api";
 import { getGraph } from "../../api/graph/mock";
 import { graphHref } from "../../app/router";
-import { type Camera, fitCamera, STEPS, toScreen } from "./camera";
+import { type Camera, STEPS, toScreen } from "./camera";
 import { GraphView } from "./GraphView";
-import { layoutFor } from "./layout";
+import { clearLayoutCache } from "./layout";
+import { paletteColour } from "./palette";
 import { GraphRenderer } from "./renderer";
+import type { DisplayOptions, Emphasis, Scene } from "./scene";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -21,21 +23,44 @@ afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
   window.history.replaceState(null, "", "#/");
+  // Settings and the panel's open state are saved per browser; every test starts afresh.
+  try {
+    window.localStorage?.clear();
+  } catch {
+    // No storage in this environment: nothing was saved.
+  }
+  clearLayoutCache();
 });
 
 /** The page's renderer, caught as it receives its first scene. */
 let renderer: GraphRenderer | null = null;
+/** What the page last handed the renderer: jsdom has no 2D context to read back. */
+let scene: Scene = { nodes: [], edges: [] };
+let positions: { xs: Float64Array; ys: Float64Array } | null = null;
 
 function render(focus: string | undefined, data: GraphData = getGraph({ domain: "demo" })) {
   renderer = null;
-  const real = GraphRenderer.prototype.setScene;
+  positions = null;
+  const realScene = GraphRenderer.prototype.setScene;
   vi.spyOn(GraphRenderer.prototype, "setScene").mockImplementation(function (
     this: GraphRenderer,
-    scene,
+    next,
   ) {
     renderer = this;
-    real.call(this, scene);
+    scene = next;
+    realScene.call(this, next);
   });
+  const realPositions = GraphRenderer.prototype.setPositions;
+  vi.spyOn(GraphRenderer.prototype, "setPositions").mockImplementation(function (
+    this: GraphRenderer,
+    xs,
+    ys,
+  ) {
+    positions = { xs: Float64Array.from(xs), ys: Float64Array.from(ys) };
+    realPositions.call(this, xs, ys);
+  });
+  vi.spyOn(GraphRenderer.prototype, "setEmphasis");
+  vi.spyOn(GraphRenderer.prototype, "setDisplay");
   const host = document.createElement("div");
   document.body.append(host);
   const root = createRoot(host);
@@ -70,12 +95,49 @@ function key(target: Element | null, k: string) {
 
 const VIEW = { width: 1000, height: 640 };
 
-/** Where the whole-area camera draws a note's dot. */
-function dotAt(noteKey: string, data = getGraph({ domain: "demo" })) {
-  const layout = layoutFor("demo", data);
-  const p = layout.positions.get(noteKey);
-  if (!p) throw new Error("no position");
-  return toScreen(fitCamera(layout.bounds, VIEW), p);
+/** Where the renderer's camera draws a note's dot, from the positions the page handed it. */
+function dotAt(noteKey: string) {
+  const i = scene.nodes.findIndex((n) => n.key === noteKey);
+  const x = positions?.xs[i];
+  const y = positions?.ys[i];
+  if (i < 0 || x === undefined || y === undefined || !renderer) throw new Error("no position");
+  return toScreen(renderer.camera, { x, y });
+}
+
+const lastEmphasis = (): Emphasis | undefined =>
+  vi.mocked(GraphRenderer.prototype.setEmphasis).mock.calls.at(-1)?.[0];
+const lastDisplay = (): DisplayOptions | undefined =>
+  vi.mocked(GraphRenderer.prototype.setDisplay).mock.calls.at(-1)?.[0];
+
+const settingsButton = (host: HTMLElement) =>
+  host.querySelector<HTMLButtonElement>('button[aria-label="Graph settings"]');
+const panelOf = (host: HTMLElement) => host.querySelector<HTMLElement>(".gs-panel");
+
+function openSettings(host: HTMLElement): HTMLElement {
+  const button = settingsButton(host);
+  button?.focus();
+  act(() => button?.click());
+  const panel = panelOf(host);
+  if (!panel) throw new Error("no settings panel");
+  return panel;
+}
+
+/** A settings switch, found by the text of the label it is named by. */
+function switchNamed(host: HTMLElement, name: string): HTMLButtonElement {
+  const found = Array.from(host.querySelectorAll<HTMLButtonElement>('[role="switch"]')).find(
+    (b) => document.getElementById(b.getAttribute("aria-labelledby") ?? "")?.textContent === name,
+  );
+  if (!found) throw new Error(`no switch named ${name}`);
+  return found;
+}
+
+/** Sets an input's value the way React's onChange sees it. */
+function typeInto(input: HTMLInputElement | null, value: string) {
+  const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+  act(() => {
+    setValue?.call(input, value);
+    input?.dispatchEvent(new Event("input", { bubbles: true }));
+  });
 }
 
 function pointer(host: HTMLElement, type: string, x: number, y: number, buttons = 1) {
@@ -320,10 +382,8 @@ describe("GraphView", () => {
     const edges = [{ source: "f", target: "old", relation: "supersedes", suggested: false }];
     const host = render("old", { nodes, edges });
     expect(host.querySelector("#graph-inspector-title")).not.toBeNull();
-    const legacy = Array.from(host.querySelectorAll<HTMLButtonElement>('[role="switch"]')).find(
-      (b) => b.textContent?.includes("Legacy notes"),
-    );
-    act(() => legacy?.click());
+    openSettings(host);
+    act(() => switchNamed(host, "Legacy notes").click());
     expect(host.querySelector("#graph-inspector-title")).toBeNull();
     expect(host.querySelector(".graph-card-focus")?.getAttribute("href") ?? "").not.toContain(
       "old",
@@ -332,12 +392,7 @@ describe("GraphView", () => {
 
   it("does not add a history entry for a later Esc after re-picking the same note", () => {
     const host = render("jobs-worker");
-    const input = host.querySelector<HTMLInputElement>(".graph-find input");
-    const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
-    act(() => {
-      setValue?.call(input, "jobs-worker");
-      input?.dispatchEvent(new Event("input", { bubbles: true }));
-    });
+    typeInto(host.querySelector<HTMLInputElement>(".graph-find input"), "jobs-worker");
     const match = Array.from(host.querySelectorAll<HTMLButtonElement>(".graph-match")).find((b) =>
       b.textContent?.includes("jobs-worker"),
     );
@@ -359,5 +414,140 @@ describe("GraphView", () => {
     const host = render("not-a-note");
     expect(host.textContent).toContain("isn't in demo");
     expect(caption(host)).toContain("Whole area:");
+  });
+
+  it("gives the canvas the full width, with find-a-note in the header", () => {
+    const host = render(undefined);
+    expect(host.querySelector("aside")).toBeNull();
+    expect(host.querySelector(".graph-head .graph-find input")).not.toBeNull();
+    expect(panelOf(host)).toBeNull();
+  });
+
+  it("floats the inspector over the canvas, with a close button", () => {
+    const host = render("jobs-worker");
+    const float = host.querySelector(".graph-float-inspector");
+    expect(float?.querySelector("#graph-inspector-title")).not.toBeNull();
+    act(() =>
+      float?.querySelector<HTMLButtonElement>('button[aria-label="Clear the selection"]')?.click(),
+    );
+    expect(host.querySelector(".graph-float-inspector")).toBeNull();
+  });
+
+  it("colours every note type with its own group colour", () => {
+    render(undefined);
+    const byKind = new Map<string, Set<string>>();
+    const data = getGraph({ domain: "demo" });
+    const kindOf = new Map(data.nodes.map((n) => [n.key, n.kind]));
+    for (const n of scene.nodes) {
+      const kind = kindOf.get(n.key) ?? "";
+      byKind.set(kind, (byKind.get(kind) ?? new Set()).add(n.color));
+    }
+    // One colour per type, a different one for each, and none of them the grey for no group.
+    for (const colours of byKind.values()) expect(colours.size).toBe(1);
+    const all = [...byKind.values()].map((c) => [...c][0]);
+    expect(new Set(all).size).toBe(byKind.size);
+    expect(all).toContain(paletteColour(0));
+    expect(all).not.toContain("#8a8b93");
+  });
+
+  it("opens the settings behind the gear and closes them on Escape, focus back on the gear", () => {
+    const host = render(undefined);
+    const panel = openSettings(host);
+    expect(settingsButton(host)?.getAttribute("aria-expanded")).toBe("true");
+    expect(panel.textContent).toContain("Filters");
+    expect(panel.textContent).toContain("Forces");
+    const before = caption(host);
+    key(panel.querySelector("input"), "Escape");
+    expect(panelOf(host)).toBeNull();
+    expect(document.activeElement).toBe(settingsButton(host));
+    // Escape in the panel only closes it: the graph did not zoom out.
+    expect(caption(host)).toBe(before);
+  });
+
+  it("closes the settings on Escape while focus is still on the gear", () => {
+    const host = render(undefined);
+    openSettings(host);
+    const before = caption(host);
+    settingsButton(host)?.focus();
+    key(settingsButton(host), "Escape");
+    expect(panelOf(host)).toBeNull();
+    expect(document.activeElement).toBe(settingsButton(host));
+    expect(caption(host)).toBe(before);
+  });
+
+  it("filters notes by the search query and drops orphans when asked", () => {
+    const nodes = [node("a"), node("b"), node("lonely"), { ...node("q"), kind: "question" }];
+    const edges = [
+      { source: "a", target: "b", relation: "related", suggested: false },
+      { source: "a", target: "q", relation: "related", suggested: false },
+    ];
+    const host = render(undefined, { nodes, edges });
+    expect(scene.nodes.map((n) => n.key).sort()).toEqual(["a", "b", "lonely", "q"]);
+    const panel = openSettings(host);
+    typeInto(
+      panel.querySelector<HTMLInputElement>('[aria-label="Search notes"]'),
+      "-type:question",
+    );
+    expect(scene.nodes.map((n) => n.key).sort()).toEqual(["a", "b", "lonely"]);
+    act(() => switchNamed(host, "Orphans").click());
+    expect(scene.nodes.map((n) => n.key).sort()).toEqual(["a", "b"]);
+  });
+
+  it("hides suggested links when that filter is off", () => {
+    const nodes = [node("a"), node("b"), node("c")];
+    const edges = [
+      { source: "a", target: "b", relation: "related", suggested: false },
+      { source: "a", target: "c", relation: "related", suggested: true },
+    ];
+    const host = render(undefined, { nodes, edges });
+    expect(scene.edges).toHaveLength(2);
+    openSettings(host);
+    act(() => switchNamed(host, "Links Reflect suggests").click());
+    expect(scene.edges).toHaveLength(1);
+    expect(scene.edges[0]?.suggested).toBe(false);
+  });
+
+  it("lights the notes a group matches while its row has focus", () => {
+    const nodes = [node("a"), node("b"), { ...node("q"), kind: "question" }];
+    const host = render(undefined, { nodes, edges: [] });
+    const panel = openSettings(host);
+    const rows = panel.querySelectorAll<HTMLInputElement>(".gs-group .gs-input");
+    // Decisions are the most common type, so the first group is type:decision.
+    act(() => rows[0]?.focus());
+    expect([...(lastEmphasis()?.lit ?? [])].sort()).toEqual(["a", "b"]);
+    act(() => rows[0]?.blur());
+    expect(lastEmphasis()?.lit ?? null).toBeNull();
+  });
+
+  it("hands the display settings to the renderer", () => {
+    const host = render(undefined);
+    expect(lastDisplay()).toEqual({ nodeSize: 1, linkThickness: 1, arrows: false, textFade: 0 });
+    openSettings(host);
+    act(() => switchNamed(host, "Arrows").click());
+    expect(lastDisplay()?.arrows).toBe(true);
+  });
+
+  it("hides the topic labels when that display setting is off", () => {
+    const nodes = [node("a"), { ...node("t"), kind: "topic", title: "A topic" }];
+    const edges = [{ source: "a", target: "t", relation: "in topic", suggested: false }];
+    const host = render(undefined, { nodes, edges });
+    expect(host.querySelector(".graph-topic-label")?.textContent).toBe("A topic");
+    openSettings(host);
+    act(() => switchNamed(host, "Topic labels").click());
+    expect(host.querySelector(".graph-topic-label")).toBeNull();
+  });
+
+  it("keeps the camera when the forces change after the viewer moved it", () => {
+    const host = render(undefined);
+    pointer(host, "pointerdown", 500, 300);
+    pointer(host, "pointermove", 600, 350);
+    pointer(host, "pointerup", 600, 350, 0);
+    const moved = cameraOf();
+    const panel = openSettings(host);
+    const repel = Array.from(panel.querySelectorAll<HTMLInputElement>('input[type="range"]')).find(
+      (r) => panel.querySelector(`label[for="${r.id}"]`)?.textContent === "Repel force",
+    );
+    typeInto(repel ?? null, "18");
+    expect(cameraOf()).toEqual(moved);
   });
 });

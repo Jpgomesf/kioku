@@ -101,7 +101,6 @@
   .k-links a,
   .k-back,
   .k-node,
-  .k-type-row,
   .k-palette-item,
   .k-check input,
   .k-harness input,
@@ -1129,96 +1128,17 @@ fieldset:disabled .k-check,
   color: var(--warn-ink-2);
 }
 
-/* Graph legend */
-.k-legend {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-20);
-  width: 264px;
-  max-width: 100%;
-  box-sizing: border-box;
-}
-.k-legend-group {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-6);
-}
-.k-legend-group > .k-list-title {
-  margin-bottom: var(--space-4);
-}
+/* Small notes under graph controls, and the colour dot in graph search results. */
 .k-legend-note {
   margin-top: var(--space-6);
   font-size: 12px;
   line-height: 16px;
   color: var(--muted);
 }
-.k-type-row {
-  display: flex;
-  align-items: center;
-  gap: var(--space-10);
-  width: 100%;
-  min-height: var(--size-button-md);
-  box-sizing: border-box;
-  padding: 0 var(--space-10);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-control);
-  background: var(--surface-2);
-  color: var(--fg);
-  font: inherit;
-  font-size: 13px;
-  line-height: 18px;
-  text-align: left;
-  cursor: pointer;
-}
-.k-legend-colour {
-  display: flex;
-  align-items: center;
-  gap: var(--space-10);
-}
-.k-legend-colour-name {
-  display: flex;
-  flex: 0 0 72px;
-  align-items: center;
-  gap: var(--space-8);
-  font-size: 13px;
-  line-height: 18px;
-  color: var(--fg-2);
-}
-.k-legend-select {
-  flex: 1 1 auto;
-  min-width: 0;
-  height: var(--size-button-md);
-}
-.k-legend-more {
-  align-self: flex-start;
-}
-.k-type-row[aria-pressed="false"] {
-  min-height: var(--size-row);
-  border-style: dashed;
-  background: var(--surface);
-  color: var(--fg-2);
-}
 .k-swatch {
   width: 12px;
   height: 12px;
   flex: none;
-}
-.k-swatch-1 {
-  fill: var(--type-1);
-}
-.k-swatch-2 {
-  fill: var(--type-2);
-}
-.k-swatch-3 {
-  fill: var(--type-3);
-}
-.k-swatch-topic {
-  fill: none;
-  stroke: var(--type-topic);
-  stroke-width: 2.5;
-}
-.k-swatch-other {
-  fill: var(--type-other);
 }
 
 /* Command palette */

@@ -1,4 +1,4 @@
-// What the graph shows: the type filters, and the cards around a focus note, with busy
+// What the graph shows around a focus note: its neighbours, and the cards for them, with busy
 // types folded into "N more decisions" groups.
 import {
   type GraphData,
@@ -8,35 +8,18 @@ import {
   type NoteKind,
   TOPIC_KIND,
 } from "../../api";
-import { type ColourSlots, DEFAULT_SLOTS, slotOf } from "./colours";
 import type { Point } from "./layout";
 
-export interface Filters {
-  /** Types the viewer turned off; empty shows every type. */
-  hidden: ReadonlySet<NoteKind>;
-  suggested: boolean;
-  topicLabels: boolean;
-  legacy: boolean;
+/** Where a type sorts among a note's neighbours: lower first. */
+export type KindRank = (kind: NoteKind) => number;
+
+/** Ranks types in the given order (the area's most common first); others after, tied. */
+export function rankFrom(kinds: readonly NoteKind[]): KindRank {
+  const at = new Map(kinds.map((k, i) => [k, i]));
+  return (kind) => at.get(kind) ?? kinds.length;
 }
 
-export const DEFAULT_FILTERS: Filters = {
-  hidden: new Set(),
-  suggested: true,
-  topicLabels: true,
-  legacy: true,
-};
-
-export function isVisible(node: GraphNode, f: Pick<Filters, "hidden" | "legacy">): boolean {
-  if (f.hidden.has(node.kind)) return false;
-  return f.legacy || node.status !== "legacy";
-}
-
-/** Hides a shown type or shows a hidden one. */
-export function toggleHidden(f: Filters, kind: NoteKind): Filters {
-  const hidden = new Set(f.hidden);
-  if (!hidden.delete(kind)) hidden.add(kind);
-  return { ...f, hidden };
-}
+const UNRANKED: KindRank = () => 0;
 
 export interface Neighbour {
   node: GraphNode;
@@ -45,11 +28,11 @@ export interface Neighbour {
   outgoing: boolean;
 }
 
-/** Coloured types first in slot order, then the rest by label, then by title. */
+/** Types in rank order, then by label, then recorded links first, then by title. */
 export function neighboursOf(
   data: GraphData,
   focus: string,
-  slots: ColourSlots = DEFAULT_SLOTS,
+  rank: KindRank = UNRANKED,
 ): Neighbour[] {
   const byKey = new Map(data.nodes.map((n) => [n.key, n]));
   const seen = new Set<string>();
@@ -63,10 +46,6 @@ export function neighboursOf(
     seen.add(other);
     out.push({ node, edge, outgoing });
   }
-  const rank = (kind: NoteKind) => {
-    const slot = slotOf(slots, kind);
-    return slot < 0 ? slots.length : slot;
-  };
   return out.sort(
     (a, b) =>
       rank(a.node.kind) - rank(b.node.kind) ||
@@ -87,15 +66,15 @@ export function neighboursWithin(
   data: GraphData,
   focus: string,
   hops: 1 | 2,
-  slots: ColourSlots = DEFAULT_SLOTS,
+  rank: KindRank = UNRANKED,
   keep: (n: Neighbour) => boolean = () => true,
 ): Neighbour[] {
-  const first = neighboursOf(data, focus, slots).filter(keep);
+  const first = neighboursOf(data, focus, rank).filter(keep);
   if (hops === 1) return first;
   const seen = new Set([focus, ...first.map((n) => n.node.key)]);
   const second: Neighbour[] = [];
   for (const near of first) {
-    for (const far of neighboursOf(data, near.node.key, slots)) {
+    for (const far of neighboursOf(data, near.node.key, rank)) {
       if (seen.has(far.node.key) || !keep(far)) continue;
       seen.add(far.node.key);
       second.push(far);

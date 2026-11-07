@@ -31,9 +31,6 @@
   --accent-border: #b7c2ee;
   --control-edge: #8f8f89;
   --switch-knob: #ffffff;
-  --type-1: #2a78d6;
-  --type-2: #eb6834;
-  --type-3: #1baf7a;
   --type-topic: var(--fg-2);
   --type-other: #8a8b93;
   --graph-dot: #d9d9d3;
@@ -106,9 +103,6 @@
     --accent-border: #3b4785;
     --control-edge: #6f6f69;
     --switch-knob: #ecece8;
-    --type-1: #3987e5;
-    --type-2: #d95926;
-    --type-3: #199e70;
     --type-other: #6f7078;
     --graph-dot: #2a2c33;
     --graph-edge: #9a9ba3;
@@ -149,9 +143,6 @@
   --accent-border: #3b4785;
   --control-edge: #6f6f69;
   --switch-knob: #ecece8;
-  --type-1: #3987e5;
-  --type-2: #d95926;
-  --type-3: #199e70;
   --type-other: #6f7078;
   --graph-dot: #2a2c33;
   --graph-edge: #9a9ba3;

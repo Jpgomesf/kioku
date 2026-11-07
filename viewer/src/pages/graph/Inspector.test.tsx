@@ -2,7 +2,6 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { GraphData, GraphNode } from "../../api";
-import { DEFAULT_SLOTS } from "./colours";
 import { Inspector } from "./Inspector";
 
 const node = (key: string): GraphNode => ({
@@ -41,7 +40,8 @@ describe("Inspector", () => {
           node={a}
           data={data}
           visibleKeys={new Set(["a", "b"])}
-          slots={DEFAULT_SLOTS}
+          rank={() => 0}
+          colourOf={() => "#8a8b93"}
           onFocus={vi.fn()}
           onAround={vi.fn()}
           onClose={vi.fn()}

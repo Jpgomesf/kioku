@@ -3,6 +3,10 @@
 // wheel move it directly and React hears about it once a gesture ends, so a pan or zoom never
 // re-renders the page per event. Buttons, keys and clicks animate it with animateTo; reduced
 // motion makes those moves instant. The overlay follows the camera through renderer.subscribe.
+//
+// As in Obsidian, the layout is a live simulation (useLiveLayout) and the settings float behind
+// a button at the top right. Positions stream outside React: each update moves the dots in
+// place (renderer.setPositions) and re-places the overlay, which follows notes by key.
 import {
   type KeyboardEvent,
   type PointerEvent,
@@ -15,13 +19,21 @@ import {
   useRef,
   useState,
 } from "react";
-import { type GraphData, type GraphNode, kindLabel, type NoteKind, TOPIC_KIND } from "../../api";
+import {
+  type GraphData,
+  type GraphNode,
+  kindCounts,
+  kindLabel,
+  type NoteKind,
+  TOPIC_KIND,
+} from "../../api";
 import { hasCommandKey } from "../../app/overlay";
 import { graphHref, parseHash } from "../../app/router";
 import { EmptyState, IconButton, SearchField, SegmentedControl, Switch } from "../../components/ui";
 import { duration, usePrefersReducedMotion } from "../../motion";
 import {
   type Camera,
+  centreOn,
   dotGrid,
   fitCamera,
   type Level,
@@ -35,24 +47,31 @@ import {
   wheelFactor,
   zoomAt,
 } from "./camera";
-import { colourFor, useColourSlots } from "./colours";
+import { GraphSettings } from "./GraphSettings";
 import { Inspector } from "./Inspector";
-import { Legend } from "./Legend";
-import { type Layout, type Point, useLayout, WORLD } from "./layout";
+import {
+  alignPositions,
+  type Bounds,
+  type LivePositions,
+  type Point,
+  useLiveLayout,
+  WORLD,
+} from "./layout";
 import {
   cardKey,
   cardSlots,
   cardsFor,
-  DEFAULT_FILTERS,
-  type Filters,
   findNodes,
   formatCount,
-  isVisible,
   neighboursWithin,
+  rankFrom,
 } from "./model";
-import { Overlay } from "./Overlay";
+import { type CardPlace, Overlay } from "./Overlay";
 import { OverlayPlacer } from "./placer";
+import { groupColour, matchesQuery, parseQuery, type QueryTarget } from "./query";
 import { GraphRenderer } from "./renderer";
+import type { Scene } from "./scene";
+import { useGraphSettings, usePanelState } from "./settings";
 import { toScene } from "./toScene";
 
 export interface GraphViewProps {
@@ -65,11 +84,41 @@ export interface GraphViewProps {
 
 const DEFAULT_VIEW: Viewport = { width: 1000, height: 640 };
 
-/** Shown until the layout worker sends its first positions. */
-const EMPTY_LAYOUT: Layout = {
-  positions: new Map(),
-  bounds: { minX: 0, minY: 0, maxX: WORLD.width, maxY: WORLD.height },
-};
+/** Drawn until the layout has positions, so no pile of dots flashes at the origin. */
+const EMPTY_SCENE: Scene = { nodes: [], edges: [] };
+
+/** The colour of notes no group matches, until --type-other is read from the page. */
+const OTHER_FALLBACK = "#8a8b93";
+
+/** The box the notes fill, or a world-sized box about the origin while there are none. */
+function boundsOf(value: LivePositions | null): Bounds {
+  const n = value?.xs.length ?? 0;
+  if (!value || n === 0) {
+    return {
+      minX: -WORLD.width / 2,
+      minY: -WORLD.height / 2,
+      maxX: WORLD.width / 2,
+      maxY: WORLD.height / 2,
+    };
+  }
+  let minX = Number.POSITIVE_INFINITY;
+  let minY = Number.POSITIVE_INFINITY;
+  let maxX = Number.NEGATIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
+  for (let i = 0; i < n; i += 1) {
+    const x = value.xs[i] as number;
+    const y = value.ys[i] as number;
+    if (x < minX) minX = x;
+    if (x > maxX) maxX = x;
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
+  }
+  return { minX, minY, maxX, maxY };
+}
+
+const sameCamera = (a: Camera, b: Camera) => a.x === b.x && a.y === b.y && a.s === b.s;
+
+const targetOf = (n: GraphNode): QueryTarget => ({ key: n.key, title: n.title, kind: n.kind });
 
 /** A gesture counts as ended this long after the last wheel event. */
 const WHEEL_IDLE_MS = 150;
@@ -155,22 +204,95 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
   const stageRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const overlayRef = useRef<HTMLDivElement>(null);
+  const settingsRef = useRef<HTMLDivElement>(null);
   const rendererRef = useRef<GraphRenderer | null>(null);
   const placerRef = useRef<OverlayPlacer | null>(null);
   const view = useViewport(stageRef);
   const reduced = usePrefersReducedMotion();
   const reducedRef = useRef(reduced);
   reducedRef.current = reduced;
-  const { layout: liveLayout, settling } = useLayout(domain, data);
-  const layout = liveLayout ?? EMPTY_LAYOUT;
-  const arranging = settling || liveLayout === null;
   const byKey = useMemo(() => new Map(data.nodes.map((n) => [n.key, n])), [data]);
-  const fit = useMemo(() => fitCamera(layout.bounds, view), [layout, view]);
 
-  const posOf = useCallback(
-    (key: string): Point | null => layout.positions.get(key) ?? null,
-    [layout],
+  // Settings: one colour group per type by default, saved per area once the viewer edits.
+  const types = useMemo(() => kindCounts(data.nodes), [data]);
+  const rank = useMemo(() => rankFrom(types.map((t) => t.kind)), [types]);
+  const {
+    settings,
+    update: updateSettings,
+    reset: resetSettings,
+  } = useGraphSettings(domain, types);
+  const [panel, setPanel] = usePanelState();
+  const { filters, display } = settings;
+  const [highlight, setHighlight] = useState<string | null>(null);
+
+  // The canvas needs a concrete colour, so --type-other is read from the page (and again on a
+  // theme change, below).
+  const [otherColour, setOtherColour] = useState(OTHER_FALLBACK);
+  const readOther = useCallback(() => {
+    const el = stageRef.current;
+    let value = "";
+    try {
+      value = el ? getComputedStyle(el).getPropertyValue("--type-other").trim() : "";
+    } catch {
+      value = "";
+    }
+    setOtherColour(value || OTHER_FALLBACK);
+  }, []);
+  useLayoutEffect(readOther, [readOther]);
+
+  const groups = useMemo(
+    () => settings.groups.map((g) => ({ query: parseQuery(g.query), color: g.color })),
+    [settings.groups],
   );
+  const colours = useMemo(
+    () => new Map(data.nodes.map((n) => [n.key, groupColour(groups, targetOf(n)) ?? otherColour])),
+    [data, groups, otherColour],
+  );
+  const colourOf = useCallback(
+    (n: GraphNode) => colours.get(n.key) ?? otherColour,
+    [colours, otherColour],
+  );
+
+  // Filters, as in Obsidian: the search query, legacy notes, suggested links and orphans.
+  const filterQuery = useMemo(() => parseQuery(filters.query), [filters.query]);
+  const visibleData = useMemo((): GraphData => {
+    const matching = data.nodes.filter(
+      (n) => (filters.legacy || n.status !== "legacy") && matchesQuery(filterQuery, targetOf(n)),
+    );
+    const keys = new Set(matching.map((n) => n.key));
+    const edges = data.edges.filter(
+      (e) => keys.has(e.source) && keys.has(e.target) && (filters.suggested || !e.suggested),
+    );
+    if (filters.orphans) return { nodes: matching, edges };
+    const linked = new Set(edges.flatMap((e) => [e.source, e.target]));
+    return { nodes: matching.filter((n) => linked.has(n.key)), edges };
+  }, [data, filterQuery, filters.legacy, filters.suggested, filters.orphans]);
+  const visible = visibleData.nodes;
+  const visibleEdges = visibleData.edges;
+  const visibleKeys = useMemo(() => new Set(visible.map((n) => n.key)), [visible]);
+
+  const live = useLiveLayout(domain, visibleData, settings.forces);
+  const liveRef = useRef(live);
+  liveRef.current = live;
+  const arranging = !live.settled;
+
+  // A note's live position, looked up through an index rebuilt when the layout's keys change.
+  const keyIndex = useRef<{ keys: readonly string[] | null; at: Map<string, number> }>({
+    keys: null,
+    at: new Map(),
+  });
+  const posOf = useCallback((key: string): Point | null => {
+    const v = liveRef.current.current();
+    if (!v) return null;
+    const idx = keyIndex.current;
+    if (idx.keys !== v.keys) {
+      idx.keys = v.keys;
+      idx.at = new Map(v.keys.map((k, i) => [k, i]));
+    }
+    const i = idx.at.get(key);
+    if (i === undefined) return null;
+    return { x: v.xs[i] as number, y: v.ys[i] as number };
+  }, []);
 
   const startFocus = initialFocus && byKey.has(initialFocus) ? initialFocus : null;
   const [missing, setMissing] = useState<string | null>(
@@ -181,30 +303,21 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
   const hopsLabelId = useId();
   /** Set by an explicit focus change, so the next URL update adds a history entry. */
   const pushNext = useRef(false);
-  // The settled camera: where the renderer is, or is animating to. Opens already zoomed.
-  const [camera, setCameraState] = useState<Camera>(() => {
-    const p = startFocus ? posOf(startFocus) : null;
-    return stepCamera(p ? 3 : 0, p, fit, view);
-  });
-  const [filters, setFilters] = useState<Filters>(DEFAULT_FILTERS);
-  const [colourSlots, assignSlot] = useColourSlots(domain);
-  const [highlightKind, setHighlightKind] = useState<NoteKind | null>(null);
-  // A hidden type has no notes on screen, so highlighting it would only fade everything.
-  const litKind =
-    highlightKind !== null && !filters.hidden.has(highlightKind) ? highlightKind : null;
+  // The whole-area camera for the layout's current bounds. React holds the one the steps and
+  // the zoom control use; fitRef follows the streaming layout between renders.
+  const [fit, setFit] = useState<Camera>(() => fitCamera(boundsOf(null), DEFAULT_VIEW));
+  // The settled camera: where the renderer is, or is animating to.
+  const [camera, setCameraState] = useState<Camera>(fit);
   const [expanded, setExpanded] = useState<ReadonlySet<NoteKind>>(new Set());
   const [query, setQuery] = useState("");
 
   const fitRef = useRef(fit);
-  fitRef.current = fit;
   const viewRef = useRef(view);
   const cameraRef = useRef(camera);
   const selectedRef = useRef(selected);
   selectedRef.current = selected;
-  /** True once the viewer moved the camera, so a settling layout stops refitting it. */
+  /** True once the viewer moved the camera: from then on the layout never moves it. */
   const userMoved = useRef(false);
-  const detailScaleRef = useRef(fit.s * STEPS[3]);
-  detailScaleRef.current = fit.s * STEPS[3];
 
   /** The pending "wheel gesture ended" sync; a newer programmatic move cancels it. */
   const wheelIdle = useRef<number | undefined>(undefined);
@@ -231,6 +344,15 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
     setCameraState(c);
   }, []);
 
+  /** The opening camera: on the URL's focus note at the closest step, else the whole area. */
+  const openingCamera = useCallback(
+    (f: Camera, v: Viewport): Camera => {
+      const p = startFocus ? posOf(startFocus) : null;
+      return stepCamera(p ? 3 : 0, p, f, v);
+    },
+    [startFocus, posOf],
+  );
+
   // The renderer and the overlay placer live as long as the stage.
   useLayoutEffect(() => {
     const canvas = canvasRef.current;
@@ -242,8 +364,9 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
     });
     const placer = new OverlayPlacer(overlay, {
       camera: () => r.camera,
-      detailScale: () => detailScaleRef.current,
+      detailScale: () => fitRef.current.s * STEPS[3],
       growMs: () => (reducedRef.current ? 0 : duration.zoom),
+      point: posOf,
     });
     rendererRef.current = r;
     placerRef.current = placer;
@@ -260,11 +383,14 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
       rendererRef.current = null;
       placerRef.current = null;
     };
-  }, []);
+  }, [posOf]);
 
   // Theme changes recolour the canvas, which reads its colours from CSS custom properties.
   useEffect(() => {
-    const refresh = () => rendererRef.current?.refreshStyle();
+    const refresh = () => {
+      rendererRef.current?.refreshStyle();
+      readOther();
+    };
     const mq =
       typeof window.matchMedia === "function"
         ? window.matchMedia("(prefers-color-scheme: dark)")
@@ -277,75 +403,120 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
       mq?.removeEventListener?.("change", refresh);
       mo?.disconnect();
     };
+  }, [readOther]);
+
+  const scene = useMemo(
+    () => toScene(visible, visibleEdges, colourOf),
+    [visible, visibleEdges, colourOf],
+  );
+  const sceneRef = useRef<Scene>(EMPTY_SCENE);
+
+  // Lines the layout's positions up with the scene's notes. The mapping is rebuilt only when
+  // the scene or the layout's keys change; the buffers are reused between updates.
+  const aligned = useRef<{
+    scene: Scene | null;
+    keys: readonly string[] | null;
+    from: Int32Array;
+    xs: Float64Array;
+    ys: Float64Array;
+  }>({
+    scene: null,
+    keys: null,
+    from: new Int32Array(0),
+    xs: new Float64Array(0),
+    ys: new Float64Array(0),
+  });
+  const pushPositions = useCallback(() => {
+    const r = rendererRef.current;
+    const v = liveRef.current.current();
+    const sc = sceneRef.current;
+    if (!r || !v || sc.nodes.length === 0) return;
+    const a = aligned.current;
+    if (a.scene !== sc || a.keys !== v.keys) {
+      const at = new Map(v.keys.map((k, i) => [k, i]));
+      a.scene = sc;
+      a.keys = v.keys;
+      a.from = Int32Array.from(sc.nodes, (n) => at.get(n.key) ?? -1);
+      a.xs = new Float64Array(sc.nodes.length);
+      a.ys = new Float64Array(sc.nodes.length);
+    }
+    alignPositions(a.from, v.xs, v.ys, sc.edges, a.xs, a.ys);
+    r.setPositions(a.xs, a.ys);
   }, []);
 
-  // Keep the camera's place across resizes.
+  useLayoutEffect(() => {
+    const next = live.ready ? scene : EMPTY_SCENE;
+    sceneRef.current = next;
+    rendererRef.current?.setScene(next);
+    pushPositions();
+  }, [scene, live.ready, pushPositions]);
+
+  useLayoutEffect(() => {
+    rendererRef.current?.setDisplay({
+      nodeSize: display.nodeSize,
+      linkThickness: display.linkThickness,
+      arrows: display.arrows,
+      textFade: display.textFade,
+    });
+  }, [display.nodeSize, display.linkThickness, display.arrows, display.textFade]);
+
+  // Each layout update, outside React: move the dots, then either keep the opening camera on
+  // the spreading notes (until the viewer moves it) or re-place the overlay where it is.
+  useEffect(
+    () =>
+      live.subscribe(() => {
+        pushPositions();
+        const r = rendererRef.current;
+        if (!userMoved.current && r) {
+          const f = fitCamera(boundsOf(liveRef.current.current()), viewRef.current);
+          fitRef.current = f;
+          const c = openingCamera(f, viewRef.current);
+          cameraRef.current = c;
+          r.setCamera(c); // its subscriber re-places the overlay
+          return;
+        }
+        placerRef.current?.place();
+      }),
+    [live.subscribe, pushPositions, openingCamera],
+  );
+
+  // When the layout first has positions, settles, or the stage resizes: React takes the new
+  // fit. The opening camera follows it until the viewer moves; after that a resize keeps the
+  // camera's place and a forces change keeps the camera, as in Obsidian.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: settled marks the final positions
   useLayoutEffect(() => {
     const prevView = viewRef.current;
     viewRef.current = view;
     const r = rendererRef.current;
     r?.resize(view.width, view.height);
+    const prevFit = fitRef.current;
+    const next = fitCamera(boundsOf(live.ready ? liveRef.current.current() : null), view);
+    fitRef.current = next;
+    setFit((f) => (sameCamera(f, next) ? f : next));
+    if (!userMoved.current) {
+      // Always through moveCamera: the stream may have moved the renderer already, but React's
+      // copy (which the zoom steps read) only catches up here.
+      moveCamera(openingCamera(next, view));
+      return;
+    }
     if (prevView.width === view.width && prevView.height === view.height) return;
     const c = r?.camera ?? cameraRef.current;
     const centre = toWorld(c, { x: prevView.width / 2, y: prevView.height / 2 });
-    const before = fitCamera(layout.bounds, prevView);
-    const s = fit.s * (c.s / before.s);
-    moveCamera({ x: view.width / 2 - centre.x * s, y: view.height / 2 - centre.y * s, s });
-  }, [view, fit, layout, moveCamera]);
-
-  // While the layout settles, keep the opening camera on it until the viewer moves. Once they
-  // picked a note, keep that note centred at the current step as the notes move under it.
-  useLayoutEffect(() => {
-    if (userMoved.current) {
-      const sel = selectedRef.current;
-      const p = sel ? (layout.positions.get(sel) ?? null) : null;
-      if (p) {
-        const atLevel = levelFor(cameraRef.current.s, fit.s);
-        moveCamera(stepCamera(atLevel, p, fit, viewRef.current));
-      }
-      return;
-    }
-    const p = startFocus ? (layout.positions.get(startFocus) ?? null) : null;
-    moveCamera(stepCamera(p ? 3 : 0, p, fit, viewRef.current));
-  }, [layout, fit, startFocus, moveCamera]);
+    moveCamera(centreOn(centre, next.s * (c.s / prevFit.s), view));
+  }, [view, live.ready, live.settled, openingCamera, moveCamera]);
 
   const level = levelFor(camera.s, fit.s);
 
-  // Keyed on the fields isVisible reads, so toggling topic labels doesn't rebuild the scene.
-  const { hidden, legacy } = filters;
-  const visible = useMemo(
-    () => data.nodes.filter((n) => isVisible(n, { hidden, legacy })),
-    [data, hidden, legacy],
-  );
-  const visibleKeys = useMemo(() => new Set(visible.map((n) => n.key)), [visible]);
-  const visibleEdges = useMemo(
-    () =>
-      data.edges.filter(
-        (e) =>
-          visibleKeys.has(e.source) &&
-          visibleKeys.has(e.target) &&
-          (filters.suggested || !e.suggested),
-      ),
-    [data, visibleKeys, filters.suggested],
-  );
-
-  const scene = useMemo(
-    () => toScene(visible, visibleEdges, layout.positions, colourSlots),
-    [visible, visibleEdges, layout, colourSlots],
-  );
-  useLayoutEffect(() => {
-    rendererRef.current?.setScene(scene);
-  }, [scene]);
-
   // The focus: the selected note, or at the close steps the note nearest the centre of the
   // settled camera (not the mid-animation picture, so it names where the move is going).
+  // biome-ignore lint/correctness/useExhaustiveDependencies: ready and settled mark new positions
   const nearest = useMemo(() => {
     const centre = toWorld(camera, { x: view.width / 2, y: view.height / 2 });
     let best: GraphNode | null = null;
     let bestD = Number.POSITIVE_INFINITY;
     for (const n of visible) {
       if (n.kind === TOPIC_KIND) continue;
-      const p = layout.positions.get(n.key);
+      const p = posOf(n.key);
       if (!p) continue;
       const d = (p.x - centre.x) ** 2 + (p.y - centre.y) ** 2;
       if (d < bestD) {
@@ -354,15 +525,15 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
       }
     }
     return best;
-  }, [camera, view, visible, layout]);
+  }, [camera, view, visible, posOf, live.ready, live.settled]);
   // A selected note that the filters hide is not drawn, so it neither focuses nor inspects.
   const shownSelected = selected && visibleKeys.has(selected) ? selected : null;
   const focusKey = shownSelected ?? (level >= 2 ? (nearest?.key ?? null) : null);
+  const placed = live.ready && focusKey !== null && posOf(focusKey) !== null;
   const focusNode = focusKey ? (byKey.get(focusKey) ?? null) : null;
-  const focusPos = focusKey ? posOf(focusKey) : null;
 
   // Emphasis: the focus ring, the hovered note (kept in a ref, set per frame by the pointer)
-  // and the legend's highlighted type.
+  // and the notes a hovered settings group matches.
   const hoverRef = useRef<string | null>(null);
   const emphasisRef = useRef<{ focusKey: string | null; lit: ReadonlySet<string> | null }>({
     focusKey: null,
@@ -371,13 +542,11 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
   const pushEmphasis = useCallback(() => {
     rendererRef.current?.setEmphasis({ ...emphasisRef.current, hoverKey: hoverRef.current });
   }, []);
-  const litKeys = useMemo(
-    () =>
-      litKind === null
-        ? null
-        : new Set(visible.filter((n) => n.kind === litKind).map((n) => n.key)),
-    [visible, litKind],
-  );
+  const litKeys = useMemo(() => {
+    if (highlight === null || highlight.trim() === "") return null;
+    const q = parseQuery(highlight);
+    return new Set(visible.filter((n) => matchesQuery(q, targetOf(n))).map((n) => n.key));
+  }, [visible, highlight]);
   useLayoutEffect(() => {
     emphasisRef.current = { focusKey, lit: litKeys };
     pushEmphasis();
@@ -390,28 +559,25 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
             data,
             focusKey,
             hops,
-            colourSlots,
+            rank,
             (n) => visibleKeys.has(n.node.key) && (filters.suggested || !n.edge.suggested),
           )
         : [],
-    [data, focusKey, visibleKeys, filters.suggested, hops, colourSlots],
+    [data, focusKey, visibleKeys, filters.suggested, hops, rank],
   );
   const cards = useMemo(() => cardsFor(neighbours, expanded), [neighbours, expanded]);
   const detailScale = fit.s * STEPS[3];
   const slots = useMemo(() => cardSlots(cards.length, view), [cards.length, view]);
   const places = useMemo(
-    () =>
+    (): Array<CardPlace | null> =>
       cards.map((card, i) => {
         const slot = slots[i];
-        if (!focusPos || !slot) return null;
-        const dotKey =
+        if (!slot) return null;
+        const fromKey =
           card.type === "note" ? card.neighbour.node.key : (card.members[0]?.node.key ?? "");
-        return {
-          slot: { x: focusPos.x + slot.x / detailScale, y: focusPos.y + slot.y / detailScale },
-          from: layout.positions.get(dotKey) ?? focusPos,
-        };
+        return { offset: { x: slot.x / detailScale, y: slot.y / detailScale }, fromKey };
       }),
-    [cards, slots, focusPos, detailScale, layout],
+    [cards, slots, detailScale],
   );
 
   // Cards mount hidden at their dot, then one styled frame later move to their slots, so
@@ -429,7 +595,7 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
     return afterFrame(() => setReady(new Set(keys)));
   }, [renderSig, ready, reduced]);
 
-  const shown = level >= 2 && focusPos !== null;
+  const shown = level >= 2 && placed;
 
   // After every commit the overlay's points may have changed: place it for the live camera.
   useLayoutEffect(() => {
@@ -497,7 +663,11 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
       const k = key ?? focusKey ?? nearest?.key ?? null;
       userMoved.current = true;
       if (target === 0) {
-        moveCamera(fitRef.current, duration.zoom);
+        // The whole area as it is now, not as it was when the layout last settled.
+        const f = fitCamera(boundsOf(liveRef.current.current()), viewRef.current);
+        fitRef.current = f;
+        setFit((prev) => (sameCamera(prev, f) ? prev : f));
+        moveCamera(f, duration.zoom);
         return;
       }
       if (key) setSelected(key);
@@ -742,10 +912,8 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
     const r = rendererRef.current;
     if (!r) return;
     let cancelled = false;
-    const centre = {
-      x: (layout.bounds.minX + layout.bounds.maxX) / 2,
-      y: (layout.bounds.minY + layout.bounds.maxY) / 2,
-    };
+    const b = boundsOf(liveRef.current.current());
+    const centre = { x: (b.minX + b.maxX) / 2, y: (b.minY + b.maxY) / 2 };
     void import("./perfProbe").then(async ({ runPerfProbe }) => {
       if (cancelled) return;
       await runPerfProbe({
@@ -764,12 +932,14 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
     };
   }, [perf, arranging]);
 
-  const linkCount = data.edges.length;
+  // The caption describes what is drawn, so it follows the filters.
+  const linkCount = visibleEdges.length;
+  const hidden = data.nodes.length - visible.length;
   const focusLabel = focusNode?.key ?? "a note";
   const recorded = neighbours.filter((n) => !n.edge.suggested).length;
   const suggested = neighbours.length - recorded;
   const caption = [
-    `Whole area: ${formatCount(data.nodes.length)} notes and ${formatCount(linkCount)} links in ${areaLabel}`,
+    `Whole area: ${formatCount(visible.length)}${hidden > 0 ? ` of ${formatCount(data.nodes.length)}` : ""} notes and ${formatCount(linkCount)} links in ${areaLabel}`,
     `Closer: the notes around ${focusLabel} come forward`,
     `Neighbourhood: ${focusLabel} and the ${formatCount(neighbours.length)} notes it links to`,
     `Around ${focusLabel}: ${formatCount(recorded)} recorded links${suggested ? ` and ${formatCount(suggested)} suggested by reflect` : ""}`,
@@ -792,13 +962,10 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
 
   const topics = useMemo(
     () =>
-      filters.topicLabels
-        ? visible.flatMap((n) => {
-            const at = n.kind === TOPIC_KIND ? layout.positions.get(n.key) : undefined;
-            return at ? [{ key: n.key, title: n.title, at }] : [];
-          })
+      display.topicLabels
+        ? visible.flatMap((n) => (n.kind === TOPIC_KIND ? [{ key: n.key, title: n.title }] : []))
         : [],
-    [filters.topicLabels, visible, layout],
+    [display.topicLabels, visible],
   );
   const onOpenCard = useStableCallback((key: string) => focusNote(key, true));
   const onExpandGroup = useStableCallback((kind: NoteKind) => {
@@ -806,67 +973,105 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
     focusStage();
   });
 
+  const closeSettings = () => {
+    setHighlight(null);
+    setPanel({ ...panel, open: false });
+    // Escape or Close hands focus back to the button that opened the panel.
+    settingsRef.current?.querySelector<HTMLButtonElement>(".graph-settings-button")?.focus();
+  };
+
   const stageEmpty =
     data.nodes.length === 0 ? (
       <EmptyState title="No notes in this area yet">
         Notes show here once something is saved to {areaLabel}.
       </EmptyState>
     ) : visible.length === 0 ? (
-      <EmptyState title="Every note type is off">
-        Turn a note type on under Note types to see it.
+      <EmptyState title="No notes match the filters">
+        Change the filters in graph settings to see notes.
       </EmptyState>
     ) : null;
 
   return (
-    <>
-      {/* biome-ignore lint/a11y/noStaticElementInteractions: Esc bubbles up from the page's controls */}
-      <div className="graph-main" onKeyDown={onPageKeyDown}>
-        <header className="graph-head">
-          <div className="graph-head-text">
-            <h1 id="graph-title">Graph</h1>
-            <p className="k-count">{caption}</p>
-            <p className="graph-sr" aria-live="polite">
-              {announced}
+    // biome-ignore lint/a11y/noStaticElementInteractions: Esc bubbles up from the page's controls
+    <div className="graph-main" onKeyDown={onPageKeyDown}>
+      <header className="graph-head">
+        <div className="graph-head-text">
+          <h1 id="graph-title">Graph</h1>
+          <p className="k-count">{caption}</p>
+          <p className="graph-sr" aria-live="polite">
+            {announced}
+          </p>
+          {missing && (
+            <p className="k-legend-note" role="status">
+              <span className="k-mono">{missing}</span> isn't in {areaLabel}. Showing the whole
+              area.
             </p>
-            {missing && (
-              <p className="k-legend-note" role="status">
-                <span className="k-mono">{missing}</span> isn't in {areaLabel}. Showing the whole
-                area.
-              </p>
-            )}
-          </div>
-          <div className="graph-steps">
-            <SegmentedControl
-              label="Zoom"
-              hideLabel
-              options={stepOptions}
-              value={String(level)}
-              onChange={(v) => goTo(Number(v) as Level)}
+          )}
+        </div>
+        <div className="graph-find">
+          <SearchField
+            label="Find a note in the graph"
+            placeholder="Find a note"
+            value={query}
+            onChange={setQuery}
+          />
+          {matches.length > 0 && (
+            <ul className="graph-matches" aria-label="Matching notes">
+              {matches.map((n) => (
+                <li key={n.key}>
+                  <button
+                    type="button"
+                    className="graph-match"
+                    onClick={() => {
+                      setQuery("");
+                      focusNote(n.key, true);
+                    }}
+                  >
+                    <svg className="k-swatch" viewBox="0 0 12 12" aria-hidden="true">
+                      <circle cx="6" cy="6" r="5" style={{ fill: colourOf(n) }} />
+                    </svg>
+                    <span className="k-mono">{n.key}</span>
+                    <span className="graph-match-title">{n.title}</span>
+                    <span className="k-meta">{kindLabel(n.kind)}</span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+        <div className="graph-steps">
+          <SegmentedControl
+            label="Zoom"
+            hideLabel
+            options={stepOptions}
+            value={String(level)}
+            onChange={(v) => goTo(Number(v) as Level)}
+          />
+          <IconButton
+            icon="minus"
+            label="Zoom out"
+            disabled={level === 0 && !selected}
+            onClick={zoomOut}
+          />
+          <IconButton
+            icon="plus"
+            label="Zoom in"
+            disabled={level === 3}
+            onClick={() => goTo(nextLevel(level, 1))}
+          />
+          <span className="graph-hops">
+            <span id={hopsLabelId}>2 hops</span>
+            <Switch
+              small
+              checked={hops === 2}
+              onChange={(on) => setHops(on ? 2 : 1)}
+              labelledBy={hopsLabelId}
             />
-            <IconButton
-              icon="minus"
-              label="Zoom out"
-              disabled={level === 0 && !selected}
-              onClick={zoomOut}
-            />
-            <IconButton
-              icon="plus"
-              label="Zoom in"
-              disabled={level === 3}
-              onClick={() => goTo(nextLevel(level, 1))}
-            />
-            <span className="graph-hops">
-              <span id={hopsLabelId}>2 hops</span>
-              <Switch
-                small
-                checked={hops === 2}
-                onChange={(on) => setHops(on ? 2 : 1)}
-                labelledBy={hopsLabelId}
-              />
-            </span>
-          </div>
-          {areaButton}
-        </header>
+          </span>
+        </div>
+        {areaButton}
+      </header>
+      <div className="graph-body">
         <div
           ref={stageRef}
           className="graph-stage"
@@ -893,20 +1098,19 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
             rootRef={overlayRef}
             topics={topics}
             topicsOn={level < 2}
-            focusNode={focusNode}
-            focusPos={focusPos}
+            focusNode={placed ? focusNode : null}
             cards={cards}
             places={places}
             ready={ready}
             shown={shown}
             labelsOn={level === 3}
-            litKind={litKind}
-            slots={colourSlots}
+            lit={litKeys}
+            colourOf={colourOf}
             onOpen={onOpenCard}
             onExpand={onExpandGroup}
           />
           {stageEmpty && <div className="graph-stage-empty">{stageEmpty}</div>}
-          {arranging && data.nodes.length > 0 && (
+          {arranging && visible.length > 0 && (
             <p className="graph-status" role="status">
               Arranging notes
             </p>
@@ -917,65 +1121,58 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
               : "Esc or − zooms out. Click a card to move to that note."}
           </p>
         </div>
-      </div>
-      <aside className="graph-side" aria-label="Graph details" onKeyDown={onPageKeyDown}>
-        <div className="graph-find">
-          <SearchField label="Find a note in the graph" value={query} onChange={setQuery} />
-          {matches.length > 0 && (
-            <ul className="graph-matches" aria-label="Matching notes">
-              {matches.map((n) => (
-                <li key={n.key}>
-                  <button
-                    type="button"
-                    className="graph-match"
-                    onClick={() => {
-                      setQuery("");
-                      focusNote(n.key, true);
-                    }}
-                  >
-                    <svg className="k-swatch" viewBox="0 0 12 12" aria-hidden="true">
-                      <circle
-                        cx="6"
-                        cy="6"
-                        r="5"
-                        style={{ fill: colourFor(colourSlots, n.kind) }}
-                      />
-                    </svg>
-                    <span className="k-mono">{n.key}</span>
-                    <span className="graph-match-title">{n.title}</span>
-                    <span className="k-meta">{kindLabel(n.kind)}</span>
-                  </button>
-                </li>
-              ))}
-            </ul>
+        {inspected && (
+          <div className="graph-float graph-float-inspector">
+            <Inspector
+              node={inspected}
+              data={data}
+              visibleKeys={visibleKeys}
+              rank={rank}
+              colourOf={colourOf}
+              onFocus={(key) => focusNote(key, true)}
+              onAround={() => goTo(3, inspected.key)}
+              onClose={() => {
+                setSelected(null);
+                focusStage();
+              }}
+            />
+            {neighbours.length === 0 && level >= 2 && (
+              <p className="k-legend-note">{focusLabel} has no links shown with these filters.</p>
+            )}
+          </div>
+        )}
+        {/* biome-ignore lint/a11y/noStaticElementInteractions: catches Escape from the gear and the panel */}
+        <div
+          ref={settingsRef}
+          className="graph-float graph-float-settings"
+          onKeyDown={(e) => {
+            // Escape closes the panel even while focus is still on the gear.
+            if (e.key !== "Escape" || !panel.open) return;
+            e.preventDefault();
+            e.stopPropagation();
+            closeSettings();
+          }}
+        >
+          <IconButton
+            icon="settings"
+            label="Graph settings"
+            className="graph-settings-button"
+            aria-expanded={panel.open}
+            onClick={() => setPanel({ ...panel, open: !panel.open })}
+          />
+          {panel.open && (
+            <GraphSettings
+              settings={settings}
+              onChange={updateSettings}
+              onReset={resetSettings}
+              panel={panel}
+              onPanelChange={setPanel}
+              onHighlight={setHighlight}
+              onClose={closeSettings}
+            />
           )}
         </div>
-        {inspected ? (
-          <Inspector
-            node={inspected}
-            data={data}
-            visibleKeys={visibleKeys}
-            slots={colourSlots}
-            onFocus={(key) => focusNote(key, true)}
-            onAround={() => goTo(3, inspected.key)}
-            onClose={() => {
-              setSelected(null);
-              focusStage();
-            }}
-          />
-        ) : null}
-        <Legend
-          data={data}
-          filters={filters}
-          onChange={setFilters}
-          slots={colourSlots}
-          onAssign={assignSlot}
-          onHighlight={setHighlightKind}
-        />
-        {neighbours.length === 0 && level >= 2 && focusNode && (
-          <p className="k-legend-note">{focusLabel} has no links shown with these types.</p>
-        )}
-      </aside>
-    </>
+      </div>
+    </div>
   );
 }

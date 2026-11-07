@@ -39,6 +39,48 @@
   padding: var(--space-32);
 }
 
+/* The canvas takes the full width; the inspector and the settings float over it, as in
+   Obsidian. They sit beside the stage, not in it, so its wheel and drag handlers leave them be. */
+.graph-body {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+}
+.graph-float {
+  position: absolute;
+  z-index: 4;
+}
+.graph-float-settings {
+  top: var(--space-12);
+  right: var(--space-12);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--space-8);
+  max-height: calc(100% - 2 * var(--space-12));
+}
+.graph-settings-button {
+  flex: none;
+  background: var(--surface);
+  box-shadow: var(--shadow-overlay);
+}
+.graph-float-inspector {
+  left: var(--space-12);
+  bottom: var(--space-12);
+  width: min(320px, calc(100% - 2 * var(--space-12)));
+  max-height: calc(100% - 2 * var(--space-12));
+  box-sizing: border-box;
+  padding: var(--space-12);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+  background: var(--surface);
+  box-shadow: var(--shadow-overlay);
+}
+
 .graph-stage {
   position: relative;
   flex: 1 1 auto;
@@ -217,10 +259,12 @@
   border-radius: 50%;
   vertical-align: 0;
 }
+/* Bottom right, clear of the inspector at the bottom left. */
 .graph-hint {
   position: absolute;
-  left: var(--space-16);
+  right: var(--space-16);
   bottom: var(--space-12);
+  max-width: calc(100% - 2 * var(--space-16));
   margin: 0;
   padding: var(--space-4) var(--space-8);
   border-radius: var(--radius-mark);
@@ -231,23 +275,38 @@
   pointer-events: none;
 }
 
-.graph-side {
-  display: flex;
-  flex: 0 0 300px;
-  flex-direction: column;
-  gap: var(--space-24);
-  padding: var(--space-16);
-  overflow-y: auto;
-  border-left: 1px solid var(--border-subtle);
-  background: var(--surface);
+/* Find a note: a compact search in the header, its matches dropping down over the canvas. */
+.graph-find {
+  position: relative;
+  flex: 0 1 260px;
+  min-width: 180px;
 }
-.graph-legend {
-  width: auto;
+.graph-find .k-field {
+  margin: 0;
+}
+/* Compact: the label stays for screen readers, the placeholder says it on screen. */
+.graph-find .k-field-label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 .graph-matches {
-  margin: var(--space-6) 0 0;
-  padding: 0;
+  position: absolute;
+  top: calc(100% + var(--space-4));
+  right: 0;
+  left: 0;
+  z-index: 6;
+  min-width: 280px;
+  margin: 0;
+  padding: var(--space-4);
   list-style: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+  background: var(--surface);
+  box-shadow: var(--shadow-overlay);
 }
 .graph-match,
 .graph-link {
@@ -336,14 +395,9 @@
   margin-top: var(--space-8);
 }
 
-@media (max-width: 900px) {
-  .graph-page {
-    flex-direction: column;
-  }
-  .graph-side {
-    flex-basis: auto;
-    border-left: 0;
-    border-top: 1px solid var(--border-subtle);
+@media (max-width: 600px) {
+  .graph-find {
+    flex: 1 1 100%;
   }
 }
 

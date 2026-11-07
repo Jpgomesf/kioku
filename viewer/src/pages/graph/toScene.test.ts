@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { GraphNode } from "../../api";
 import { OverlayPlacer } from "./placer";
-import { toneOf, toScene } from "./toScene";
+import { toScene } from "./toScene";
 
 const node = (key: string, kind: string, degree = 0, legacy = false): GraphNode => ({
   key,
@@ -13,31 +13,19 @@ const node = (key: string, kind: string, degree = 0, legacy = false): GraphNode 
 });
 
 describe("toScene", () => {
-  it("maps slots, topics and unpicked types to tones", () => {
-    const slots = ["decision", null, "runbook"] as const;
-    expect(toneOf(slots, "decision")).toBe("slot1");
-    expect(toneOf(slots, "runbook")).toBe("slot3");
-    expect(toneOf(slots, "gotcha")).toBe("other");
-    expect(toneOf(slots, "topic")).toBe("topic");
-  });
-
-  it("sizes by links, marks legacy and drops notes without a position", () => {
-    const positions = new Map([
-      ["a", { x: 1, y: 2 }],
-      ["b", { x: 3, y: 4 }],
-    ]);
+  it("colours, sizes and labels notes, marks topics and legacy, and drops dangling links", () => {
     const scene = toScene(
-      [node("a", "decision", 4), node("b", "fix", 0, true), node("c", "fix")],
+      [node("a", "decision", 4), node("b", "fix", 0, true), node("t", "topic")],
       [
         { source: "a", target: "b", relation: "related", suggested: true },
-        { source: "a", target: "c", relation: "related", suggested: false },
+        { source: "a", target: "gone", relation: "related", suggested: false },
       ],
-      positions,
-      ["decision", null, null],
+      (n) => (n.kind === "decision" ? "#2a78d6" : "#8a8b93"),
     );
-    expect(scene.nodes.map((n) => [n.key, n.size, n.legacy, n.tone])).toEqual([
-      ["a", 5, false, "slot1"],
-      ["b", 1, true, "other"],
+    expect(scene.nodes.map((n) => [n.key, n.size, n.legacy, n.topic, n.color, n.label])).toEqual([
+      ["a", 5, false, false, "#2a78d6", "a"],
+      ["b", 1, true, false, "#8a8b93", "b"],
+      ["t", 1, false, true, "#8a8b93", "t"],
     ]);
     expect(scene.edges).toEqual([{ a: 0, b: 1, suggested: true }]);
   });
@@ -76,5 +64,27 @@ describe("OverlayPlacer", () => {
     expect(root.querySelector("span")?.style.transform).toBe(
       "translate(0px, 0px) translate(-50%, -50%) scale(0.05)",
     );
+  });
+
+  it("follows a note's live position by key, with a world offset", () => {
+    const root = document.createElement("div");
+    root.innerHTML =
+      '<span data-k="a" data-x="5" data-y="0"></span><span data-k="missing"></span><svg><line data-k1="a" data-k="b"></line></svg>';
+    let a = { x: 10, y: 20 };
+    const placer = new OverlayPlacer(root, {
+      camera: () => ({ x: 0, y: 0, s: 1 }),
+      detailScale: () => 1,
+      growMs: () => 0,
+      point: (key) => (key === "a" ? a : key === "b" ? { x: 0, y: 0 } : null),
+    });
+    placer.place();
+    const [follower, missing] = [...root.querySelectorAll<HTMLElement>("span")];
+    expect(follower?.style.transform).toBe("translate(15px, 20px) translate(-50%, -50%) scale(1)");
+    // No position yet: left alone rather than put at the origin.
+    expect(missing?.style.transform).toBe("");
+    expect(root.querySelector("line")?.getAttribute("x1")).toBe("10");
+    a = { x: 30, y: 40 };
+    placer.place();
+    expect(follower?.style.transform).toBe("translate(35px, 40px) translate(-50%, -50%) scale(1)");
   });
 });

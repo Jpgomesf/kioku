@@ -1,10 +1,20 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { GraphRenderer } from "./renderer";
-import { cameraEase, cubicBezier, SpatialGrid } from "./renderer-math";
+import { cameraEase, cubicBezier, labelAlpha, labelThreshold, SpatialGrid } from "./renderer-math";
 import type { Scene, SceneNode } from "./scene";
 
 function node(key: string, x: number, y: number, extra: Partial<SceneNode> = {}): SceneNode {
-  return { key, x, y, size: 1, tone: "slot1", legacy: false, ...extra };
+  return {
+    key,
+    x,
+    y,
+    size: 1,
+    color: "#2a78d6",
+    topic: false,
+    legacy: false,
+    label: key,
+    ...extra,
+  };
 }
 
 /** A fake 2D context that counts calls by name. */
@@ -16,16 +26,31 @@ function recordingContext() {
   const ctx = {
     calls,
     arcs: [] as [number, number][],
+    radii: [] as number[],
+    texts: [] as string[],
+    lineWidths: [] as number[],
     setTransform: count("setTransform"),
     clearRect: count("clearRect"),
     beginPath: count("beginPath"),
     moveTo: count("moveTo"),
     lineTo: count("lineTo"),
-    arc(x: number, y: number) {
+    arc(x: number, y: number, r: number) {
       ctx.arcs.push([x, y]);
+      ctx.radii.push(r);
     },
     fill: count("fill"),
-    stroke: count("stroke"),
+    stroke() {
+      calls.stroke = (calls.stroke ?? 0) + 1;
+      ctx.lineWidths.push(ctx.lineWidth);
+    },
+    fillText(text: string) {
+      ctx.texts.push(text);
+    },
+    strokeText: count("strokeText"),
+    font: "",
+    textAlign: "",
+    textBaseline: "",
+    lineJoin: "",
     setLineDash: count("setLineDash"),
     globalAlpha: 1,
     fillStyle: "",
@@ -204,7 +229,7 @@ describe("GraphRenderer", () => {
     expect(frames).toHaveLength(0);
   });
 
-  it("batches nodes of one tone and skips culled ones", () => {
+  it("batches nodes of one colour and skips culled ones", () => {
     const draw = (count: number) => {
       const ctx = recordingContext();
       const r = new GraphRenderer(canvasWith(ctx), noMotion);
@@ -267,5 +292,136 @@ describe("GraphRenderer", () => {
     const wide = radiusAt([node("a", 10, 10), node("z", 5000, 5000)]);
     const narrow = radiusAt([node("a", 10, 10), node("z", 20, 20)]);
     expect(wide).toBe(narrow);
+  });
+
+  function drawn(
+    nodes: SceneNode[],
+    camera = { x: 0, y: 0, s: 1 },
+    display?: Partial<Parameters<GraphRenderer["setDisplay"]>[0]>,
+    edges: Scene["edges"] = [],
+  ) {
+    const ctx = recordingContext();
+    const r = new GraphRenderer(canvasWith(ctx), { ...noMotion, fitScale: () => 1 });
+    r.resize(400, 400);
+    r.setScene({ nodes, edges });
+    if (display)
+      r.setDisplay({ nodeSize: 1, linkThickness: 1, arrows: false, textFade: 0, ...display });
+    r.setCamera(camera);
+    flushFrames();
+    return { ctx, r };
+  }
+
+  it("moves notes in place, draws once per frame and picks the moved note", () => {
+    const { ctx, r } = drawn([node("a", 10, 10), node("b", 50, 50)]);
+    const before = ctx.calls.clearRect;
+    for (let k = 0; k < 5; k += 1) {
+      r.setPositions(new Float64Array([300, 50]), new Float64Array([300, 50]));
+    }
+    expect(frames).toHaveLength(1);
+    flushFrames();
+    expect(ctx.calls.clearRect).toBe((before ?? 0) + 1);
+    expect(ctx.arcs.slice(-2)).toEqual([
+      [300, 300],
+      [50, 50],
+    ]);
+    expect(r.pick(300, 300)).toBe("a");
+    expect(r.pick(10, 10)).toBeNull();
+    expect(r.nearest(290, 290)).toBe("a");
+  });
+
+  it("leaves the page's scene objects untouched when positions move", () => {
+    const nodes = [node("a", 10, 10)];
+    const { r } = drawn(nodes);
+    r.setPositions(new Float64Array([99]), new Float64Array([99]));
+    expect(nodes[0]?.x).toBe(10);
+  });
+
+  it("grows fills with the number of colours, not notes", () => {
+    const fills = (count: number, colours: number) => {
+      const nodes = Array.from({ length: count }, (_, i) =>
+        node(`n${i}`, i % 300, (i * 7) % 300, { color: `#00000${i % colours}` }),
+      );
+      return drawn(nodes).ctx.calls.fill ?? 0;
+    };
+    expect(fills(500, 3)).toBe(fills(9, 3));
+    expect(fills(500, 3)).toBe(3);
+    expect(fills(500, 6)).toBe(6);
+  });
+
+  it("draws topics as rings in their own colour", () => {
+    const { ctx } = drawn([node("t", 10, 10, { topic: true, color: "#123456" })]);
+    expect(ctx.calls.fill).toBeUndefined();
+    expect(ctx.calls.stroke).toBe(1);
+    expect(ctx.strokeStyle).toBe("#123456");
+  });
+
+  it("hides labels below the zoom threshold and draws them above it", () => {
+    const nodes = [node("a", 10, 10), node("b", 50, 50), node("t", 80, 80, { topic: true })];
+    expect(drawn(nodes, { x: 0, y: 0, s: 1 }).ctx.texts).toEqual([]);
+    expect(drawn(nodes, { x: 0, y: 0, s: 4 }).ctx.texts.sort()).toEqual(["a", "b"]);
+    // A higher text fade shows them sooner; a lower one later.
+    expect(drawn(nodes, { x: 0, y: 0, s: 1 }, { textFade: 3 }).ctx.texts).toHaveLength(2);
+    expect(drawn(nodes, { x: 0, y: 0, s: 4 }, { textFade: -3 }).ctx.texts).toEqual([]);
+  });
+
+  it("fades labels in over a short zoom range", () => {
+    const t = labelThreshold(0);
+    expect(labelAlpha(t, 0)).toBe(0);
+    expect(labelAlpha(t * 1.25, 0)).toBeCloseTo(0.5);
+    expect(labelAlpha(t * 2, 0)).toBe(1);
+    expect(labelThreshold(3)).toBeLessThan(labelThreshold(0));
+    expect(labelThreshold(-3)).toBeGreaterThan(labelThreshold(0));
+  });
+
+  it("caps labels per frame, biggest notes first", () => {
+    const nodes = Array.from({ length: 500 }, (_, i) =>
+      node(`n${i}`, (i % 25) * 4, Math.floor(i / 25) * 4, { size: i === 499 ? 50 : 1 }),
+    );
+    const { ctx } = drawn(nodes, { x: 0, y: 0, s: 4 });
+    expect(ctx.texts).toHaveLength(300);
+    expect(ctx.texts[0]).toBe("n499");
+  });
+
+  it("draws arrowheads only on links long enough on screen", () => {
+    const nodes = [node("a", 0, 0), node("b", 200, 0), node("c", 0, 10)];
+    const edges = [
+      { a: 0, b: 1, suggested: false },
+      { a: 0, b: 2, suggested: false },
+    ];
+    const off = drawn(nodes, { x: 50, y: 50, s: 1 }, { arrows: false }, edges).ctx;
+    const on = drawn(nodes, { x: 50, y: 50, s: 1 }, { arrows: true }, edges).ctx;
+    // One extra fill for the one long link's head: a tip plus three lineTo calls.
+    expect((on.calls.fill ?? 0) - (off.calls.fill ?? 0)).toBe(1);
+    expect((on.calls.lineTo ?? 0) - (off.calls.lineTo ?? 0)).toBe(3);
+  });
+
+  it("scales dots and links by the display multipliers", () => {
+    const nodes = [node("a", 10, 10), node("b", 100, 100)];
+    const edges = [{ a: 0, b: 1, suggested: false }];
+    const plain = drawn(nodes, undefined, {}, edges);
+    const big = drawn(nodes, undefined, { nodeSize: 2, linkThickness: 3 }, edges);
+    expect(big.ctx.radii[0]).toBeCloseTo((plain.ctx.radii[0] as number) * 2);
+    expect(big.ctx.lineWidths[0]).toBe(3);
+    // Picking follows the bigger dots.
+    const r0 = plain.ctx.radii[0] as number;
+    expect(plain.r.pick(10 + r0 * 1.5, 10, 0)).toBeNull();
+    expect(big.r.pick(10 + r0 * 1.5, 10, 0)).toBe("a");
+  });
+
+  it("picks near the rim of a big topic ring at the largest node size", () => {
+    const nodes = [node("t", 0, 0, { size: 1e6, topic: true }), node("far", 1e5, 0)];
+    const { ctx, r } = drawn(nodes, { x: 0, y: 0, s: 1000 }, { nodeSize: 5 });
+    const radius = Math.max(...ctx.radii);
+    expect(radius).toBeGreaterThan(62);
+    expect(r.pick(radius - 0.5, 0, 0)).toBe("t");
+  });
+
+  it("draws long titles shortened with an ellipsis", () => {
+    const long = "A very long note title that goes on and on well past the limit";
+    const nodes = [node("a", 0, 0, { label: long }), node("b", 50, 0)];
+    const texts = drawn(nodes, { x: 0, y: 0, s: 4 }).ctx.texts;
+    const shown = texts.find((t) => t.startsWith("A very"));
+    expect(shown?.endsWith("\u2026")).toBe(true);
+    expect(shown?.length).toBeLessThanOrEqual(28);
   });
 });

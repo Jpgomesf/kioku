@@ -166,3 +166,25 @@ export function visibleWorld(c: Camera, width: number, height: number, marginPx:
     maxY: (height + marginPx - c.y) / c.s,
   };
 }
+
+/** The zoom ratio (camera scale over whole-area scale) at which labels start to appear.
+ * textFade 0 shows them from 2x; each step of 1 moves that by a factor of 1.6. */
+export function labelThreshold(textFade: number): number {
+  return 2 * 1.6 ** -textFade;
+}
+
+/** Label opacity at a zoom ratio: 0 up to the threshold, then fading in until 1.5x past it. */
+export function labelAlpha(zoom: number, textFade: number): number {
+  const t = labelThreshold(textFade);
+  return Math.max(0, Math.min(1, (zoom / t - 1) / 0.5));
+}
+
+/** Shortest on-screen link, in pixels, that still gets an arrowhead. */
+export const ARROW_MIN_LENGTH = 24;
+
+/** Longest label drawn, in characters; longer titles end in an ellipsis. */
+export const LABEL_MAX = 28;
+
+export function shortLabel(title: string): string {
+  return title.length <= LABEL_MAX ? title : `${title.slice(0, LABEL_MAX - 1).trimEnd()}\u2026`;
+}

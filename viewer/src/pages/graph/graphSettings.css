@@ -1,0 +1,167 @@
+/* The graph settings panel floats over the canvas at the top right, like Obsidian's. */
+/* It flows below the gear in .graph-float-settings (a flex column): an absolute panel would
+   size its percentages against the gear-sized wrapper and collapse to a sliver. */
+.gs-panel {
+  z-index: 5;
+  width: min(300px, calc(100vw - 48px));
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  background: var(--surface);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+  box-shadow: var(--shadow-overlay);
+  font-size: 13px;
+}
+
+.gs-head {
+  position: sticky;
+  top: 0;
+  /* Above the group swatches, which are positioned and would otherwise scroll over it. */
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-6) var(--space-6) var(--space-6) var(--space-12);
+  background: var(--surface);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.gs-title {
+  flex: 1;
+  font-weight: 600;
+}
+
+.gs-section + .gs-section {
+  border-top: 1px solid var(--border-subtle);
+}
+
+.gs-section-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-6);
+  width: 100%;
+  min-height: var(--size-row);
+  padding: 0 var(--space-12);
+  background: none;
+  border: 0;
+  color: var(--fg);
+  font: inherit;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+
+.gs-section-head:hover {
+  background: var(--sunken);
+}
+
+.gs-section-head:focus-visible {
+  outline: var(--focus-width) solid var(--focus);
+  outline-offset: calc(-1 * var(--focus-width));
+}
+
+.gs-chevron {
+  display: inline-flex;
+  color: var(--muted);
+  transition: transform var(--duration-press);
+}
+
+.gs-chevron-closed {
+  transform: rotate(-90deg);
+}
+
+.gs-section-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+  padding: var(--space-4) var(--space-12) var(--space-12);
+}
+
+.gs-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-8);
+}
+
+.gs-input {
+  flex: 1;
+  min-width: 0;
+  height: var(--size-button-sm);
+  padding: 0 var(--space-8);
+  background: var(--sunken);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  font: inherit;
+}
+
+.gs-input:focus-visible {
+  outline: var(--focus-width) solid var(--focus);
+  outline-offset: 0;
+}
+
+.gs-hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.gs-group {
+  display: flex;
+  align-items: center;
+  gap: var(--space-6);
+}
+
+.gs-swatch {
+  position: relative;
+  flex: none;
+  width: 18px;
+  height: 18px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border-strong);
+  cursor: pointer;
+}
+
+/* The native picker stays clickable and focusable but invisible over the circle. */
+.gs-swatch input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.gs-swatch:focus-within {
+  outline: var(--focus-width) solid var(--focus);
+  outline-offset: var(--focus-offset);
+}
+
+.gs-new-group {
+  align-self: flex-start;
+}
+
+.gs-slider {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.gs-slider-label {
+  display: flex;
+  justify-content: space-between;
+}
+
+.gs-slider output {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.gs-slider input[type="range"] {
+  width: 100%;
+  accent-color: var(--accent);
+}
