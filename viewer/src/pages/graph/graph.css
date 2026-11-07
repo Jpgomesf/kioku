@@ -286,6 +286,11 @@
   font-size: 12px;
   line-height: 16px;
   pointer-events: none;
+  transition: opacity var(--duration-overlay) var(--ease-standard);
+}
+/* After its first showing the hint is only the stage's description for screen readers. */
+.graph-hint[data-gone] {
+  opacity: 0;
 }
 /* While the settings box is open the hint sits left of it, not under it. */
 .graph-body-settings .graph-hint {

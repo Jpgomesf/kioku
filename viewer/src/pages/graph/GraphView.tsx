@@ -52,6 +52,7 @@ import {
   zoomAt,
 } from "./camera";
 import { GraphSettings, type NamedPart } from "./GraphSettings";
+import { useFirstVisitHint } from "./hint";
 import { Inspector } from "./Inspector";
 import {
   alignPositions,
@@ -254,6 +255,7 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
     reset: resetSettings,
   } = useGraphSettings(domain, types);
   const [panel, setPanel] = usePanelState();
+  const hintShown = useFirstVisitHint();
   const { filters, display } = settings;
   const [highlight, setHighlight] = useState<string | null>(null);
 
@@ -1532,7 +1534,8 @@ export function GraphView({ domain, areaLabel, data, initialFocus, areaButton }:
               area.
             </p>
           )}
-          <p id="graph-stage-hint" className="graph-hint">
+          {/* Seen for 5 s the first time (hint.ts), then only described to screen readers. */}
+          <p id="graph-stage-hint" className="graph-hint" data-gone={hintShown ? undefined : true}>
             {level < 2
               ? `Scroll to zoom and drag to move. Drag a note to pull it, or click it to select it.${nameHint}`
               : "Esc or − zooms out. Click a card to move to that note."}

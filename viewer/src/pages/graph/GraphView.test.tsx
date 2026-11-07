@@ -6,6 +6,7 @@ import { getGraph } from "../../api/graph/mock";
 import { graphHref } from "../../app/router";
 import { type Camera, toScreen } from "./camera";
 import { GraphView } from "./GraphView";
+import { HINT_KEY, resetFirstVisitHint } from "./hint";
 import { clearLayoutCache, useLiveLayout, type WorkerReply, type WorkerRequest } from "./layout";
 import { paletteColour } from "./palette";
 import { GraphRenderer } from "./renderer";
@@ -607,6 +608,28 @@ describe("GraphView", () => {
     expect(wand()?.getAttribute("title")).toBe("Animate");
     act(() => wand()?.click());
     expect(scene.nodes.length).toBeLessThan(2);
+  });
+
+  it("shows the how-to hint the first time the graph is seen", () => {
+    resetFirstVisitHint();
+    const host = render(undefined);
+    expect(host.querySelector("#graph-stage-hint")?.hasAttribute("data-gone")).toBe(false);
+  });
+
+  it("fades the how-to hint once the graph has been seen, keeping it for screen readers", () => {
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => (key === HINT_KEY ? "1" : null),
+      setItem: () => undefined,
+      removeItem: () => undefined,
+      clear: () => undefined,
+    });
+    const host = render(undefined);
+    const hint = host.querySelector<HTMLElement>("#graph-stage-hint");
+    expect(hint?.getAttribute("data-gone")).toBe("true");
+    expect(hint?.textContent).toContain("Scroll to zoom");
+    expect(
+      host.querySelector(".graph-stage")?.getAttribute("aria-describedby")?.split(" "),
+    ).toContain("graph-stage-hint");
   });
 
   it("says when an area has no notes", () => {
