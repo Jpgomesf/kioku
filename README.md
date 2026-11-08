@@ -166,9 +166,9 @@ The default `core` profile exposes three tools; `MEMORY_TOOLS=all` (or
 | Tool | Profile | What it does |
 |---|---|---|
 | `memory_search` | core | Ranked previews (key, title, snippet, score) for a question |
-| `memory_get` | core | Full text of chosen memories by key, with links, within a byte budget; counts as use unless `count_use` is false |
+| `memory_get` | core | Full text of chosen memories by key, with aliases and links, within a byte budget; counts as use unless `count_use` is false |
 | `memory_save` | core | Create or update one memory by key, optionally anchored to code `paths`; refuses credentials and file-backed notes; reports its links and similar notes |
-| `memory_inspect` | all | Provenance, lifecycle, usage, links, and recent history of one memory |
+| `memory_inspect` | all | Aliases, provenance, lifecycle, usage, links, and recent history of one memory |
 | `memory_feedback` | all | Record that a memory proved right or wrong |
 | `memory_retire` / `memory_restore` | all | Move a memory to legacy and back; nothing is deleted |
 | `memory_import` | all | Import Markdown notes from `MEMORY_NOTES_ROOT` |
@@ -193,6 +193,14 @@ from. Its `next` field gives advice:
     restatements, refinements, and replacements, and few were unrelated.
   - Models whose similarities run lower need a lower value.
 - `hint` still only says that `related` holds references that didn't resolve.
+
+**Updating a note's aliases.** A save replaces a note's `aliases` with the
+list it sends; leaving the field out keeps them. To add one, read the note
+with `memory_get` and send its whole list plus the new alias. Every memory
+`memory_get` returns carries `aliases`, `[]` when there are none, so a client
+can tell a note without aliases from an older server that doesn't send them.
+Aliases count toward `max_bytes` and are never cut: the text shrinks to make
+room, and a note whose aliases don't fit is left out, with `truncated` set.
 
 Two prompts, `recall` and `remember`, give users explicit shortcuts in clients
 that support MCP prompts. Tools from earlier versions (`rag_search`,
@@ -607,7 +615,7 @@ never retires them: only `kioku maintenance` or `memory_maintenance` with
 ```sh
 make check   # fmt, clippy with warnings denied, unit and contract tests
 make test-db # PostgreSQL tests (history, aging, store); MEMORY_TEST_DATABASE_URL must allow CREATE DATABASE
-make smoke   # 161 checks over stdio and 20 over HTTP; SMOKE_ENV must name test storage
+make smoke   # 167 checks over stdio and 20 over HTTP; SMOKE_ENV must name test storage
 make eval    # retrieval quality in isolated storage
 ```
 

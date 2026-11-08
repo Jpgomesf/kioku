@@ -8,6 +8,15 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `memory_get` and `memory_inspect` return each note's `aliases`, `[]` when it
+  has none, so a client can tell a note without aliases from an older server.
+  A save replaces the list, so an agent that adds an alias reads the current
+  ones with `memory_get` and sends them all; `memory_save`'s description now
+  says so. In `memory_get` the aliases count toward `max_bytes` and are never
+  cut: the text shrinks instead, and a note whose aliases don't fit is left
+  out with `truncated` set. Notes the session may not see stay out, aliases
+  and all. Packs built for a query (`rag_context` with a query,
+  `kioku context`, the eval) leave aliases out, and so do `memory_list` rows.
 - Notes anchor to the code they govern with `paths`, globs relative to a
   repository's root (`src/vault/**`), set with `memory_save` or in
   frontmatter. A code map lookup names the notes anchored to its file, and
@@ -171,12 +180,10 @@ All notable changes to this project are documented here. The format follows
 - Source split into focused modules (`app/`, `mcp/`, `eval/`, `rank/`,
   `store/`, `markdown`, `lifecycle`, `text`) with no behavior change.
 
-### Known issues
+### Fixed
 
-- The `memory_maintenance` tool description still says the server ages
-  memories daily. Background upkeep now only previews aging, but the
-  description is part of the snapshot-tested tool contract
-  (`tests/snapshots/tools-all.json`), so it changes in a deliberate re-bless.
+- The `memory_maintenance` tool description no longer says the server ages
+  memories daily: background upkeep only previews aging (#13).
 
 ## [0.2.0] - 2026-11-03
 

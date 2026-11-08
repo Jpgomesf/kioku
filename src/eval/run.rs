@@ -413,6 +413,7 @@ async fn context_sufficiency(app: &App, dataset: &Dataset, budget: usize) -> Res
                 ranking: RankOptions::HYBRID_GRAPH,
                 record_access: false,
                 viewer: None,
+                with_aliases: false,
             })
             .await
             .with_context(|| format!("context for {} failed", query.id))?;

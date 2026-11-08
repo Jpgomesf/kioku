@@ -84,7 +84,7 @@ pub struct SaveArgs {
     pub domain: String,
     /// Keys of existing memories this one builds on, e.g. ["webhook-retries"]. On update, omit to keep the current links; [] removes them.
     pub related: Option<Vec<String>>,
-    /// Other names people may search for: old names, abbreviations, translations. On update, omit to keep them; [] removes them.
+    /// Other names people may search for: old names, abbreviations, translations. On update, read the current list with memory_get and send the full list; omit to keep them; [] removes them.
     pub aliases: Option<Vec<String>>,
     /// Topic labels, e.g. ["webhooks"]. On update, omit to keep them; [] removes them.
     pub tags: Option<Vec<String>>,

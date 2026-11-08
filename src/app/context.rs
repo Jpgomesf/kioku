@@ -48,6 +48,10 @@ pub struct ContextRequest<'a> {
     /// Whose view to pack: notes it may not see are neither packed nor listed
     /// as links. `None` (the CLI and evaluation) sees everything.
     pub viewer: Option<&'a Viewer>,
+    /// Give each packed note its aliases, counted in the budget. memory_get
+    /// sets it, so a client can add an alias without losing the others; query
+    /// packs leave it off and spend those bytes on evidence.
+    pub with_aliases: bool,
 }
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
@@ -72,6 +76,11 @@ pub struct ContextMemory {
     pub id: Uuid,
     pub key: String,
     pub title: String,
+    /// Every alias, `[]` when there are none, in packs made `with_aliases`.
+    /// Never cut: like its links, a note's aliases fit whole or the note is
+    /// left out, so a client never mistakes part of the list for all of it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub aliases: Option<Vec<String>>,
     /// Shown only for legacy notes.
     #[serde(skip_serializing_if = "Status::is_active")]
     pub status: Status,
@@ -201,6 +210,7 @@ impl App {
                 priority,
                 query: request.query,
                 display: &display,
+                with_aliases: request.with_aliases,
             },
             skipped,
             request.budget,
@@ -265,6 +275,7 @@ struct PackInput<'a> {
     /// Focuses excerpts on matching sentences; without it, excerpts are prefixes.
     query: Option<&'a str>,
     display: &'a dyn Fn(Option<&str>) -> Option<String>,
+    with_aliases: bool,
 }
 
 enum Grow {
@@ -361,6 +372,7 @@ fn pack_context(
                 id: note.id,
                 key: note.input.key.clone(),
                 title: note.input.title.clone(),
+                aliases: input.with_aliases.then(|| note.input.aliases.clone()),
                 status: note.status,
                 source: (input.display)(note.input.source.as_deref()),
                 updated: note.updated_at.format("%Y-%m-%d").to_string(),
@@ -425,6 +437,20 @@ mod tests {
     }
 
     fn pack(notes: &[Note], budget: usize, query: Option<&str>) -> Result<ContextPack> {
+        pack_with(notes, budget, query, false)
+    }
+
+    /// A pack of requested notes with their aliases, as memory_get reads them.
+    fn read(notes: &[Note], budget: usize) -> Result<ContextPack> {
+        pack_with(notes, budget, None, true)
+    }
+
+    fn pack_with(
+        notes: &[Note],
+        budget: usize,
+        query: Option<&str>,
+        with_aliases: bool,
+    ) -> Result<ContextPack> {
         pack_context(
             &PackInput {
                 domain: "test",
@@ -433,6 +459,7 @@ mod tests {
                 priority: notes.len(),
                 query,
                 display: &|s| s.map(str::to_owned),
+                with_aliases,
             },
             Vec::new(),
             budget,
@@ -531,6 +558,7 @@ mod tests {
             priority: 1,
             query: Some("MEDIA_DLQ"),
             display: &|s| s.map(str::to_owned),
+            with_aliases: false,
         };
         let pack = pack_context(&input, Vec::new(), budget).unwrap();
         assert!(pack.memories[0].text.contains("09:00 UTC"), "{pack:?}");
@@ -548,6 +576,164 @@ mod tests {
         assert!(memories[0].get("status").is_none(), "active is the default");
         assert_eq!(memories[1]["status"], "legacy");
         assert!(json.get("budget_utf8_bytes").is_none());
+    }
+
+    #[test]
+    fn a_read_lists_every_alias_within_the_budget() {
+        let mut named = note(
+            "named",
+            &"The payments service settles card payments every night. ".repeat(40),
+        );
+        named.input.aliases = vec![
+            "billing".into(),
+            "Pagamentos".into(),
+            "payments-service-v1".into(),
+        ];
+        let notes = vec![named, note("plain", "A short note without aliases.")];
+        for budget in [256, 300, 400, 512, 800, 1000, 1500, 4000, 8000] {
+            let pack = read(&notes, budget).unwrap();
+            assert!(bytes(&pack) <= budget, "budget {budget}: {}", bytes(&pack));
+            for memory in &pack.memories {
+                let note = notes.iter().find(|n| n.input.key == memory.key).unwrap();
+                assert_eq!(
+                    memory.aliases.as_ref(),
+                    Some(&note.input.aliases),
+                    "budget {budget}"
+                );
+            }
+        }
+        // The text yields to the aliases, which are never cut.
+        let tight = read(&notes, 800).unwrap();
+        assert!(
+            tight.truncated && tight.memories[0].key == "named",
+            "{tight:?}"
+        );
+        let json = serde_json::to_value(read(&notes, 8000).unwrap()).unwrap();
+        assert_eq!(
+            json["memories"][0]["aliases"],
+            serde_json::json!(["billing", "Pagamentos", "payments-service-v1"])
+        );
+        assert_eq!(
+            json["memories"][1]["aliases"],
+            serde_json::json!([]),
+            "no aliases is an empty list, not a missing field"
+        );
+        let query = serde_json::to_value(pack(&notes, 8000, None).unwrap()).unwrap();
+        assert!(
+            query["memories"][0].get("aliases").is_none(),
+            "query packs spend no bytes on aliases"
+        );
+    }
+
+    #[test]
+    fn a_note_whose_aliases_do_not_fit_is_left_out_not_cut() {
+        let mut crowded = note("crowded", "A short body.");
+        crowded.input.aliases = (0..40)
+            .map(|i| format!("alias {i} of a note with many names"))
+            .collect();
+        let small = read(std::slice::from_ref(&crowded), 1000).unwrap();
+        assert!(small.memories.is_empty() && small.truncated, "{small:?}");
+        let large = read(&[crowded], 8000).unwrap();
+        assert_eq!(large.memories[0].aliases.as_ref().map(Vec::len), Some(40));
+        assert!(!large.truncated);
+    }
+
+    /// Creates and drops its own database on the server in MEMORY_TEST_DATABASE_URL.
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL; set MEMORY_TEST_DATABASE_URL"]
+    async fn a_read_lists_aliases_only_of_notes_its_viewer_may_see() -> Result<()> {
+        let scratch = crate::testing::ScratchDatabase::create().await?;
+        let outcome = alias_visibility_checks(&scratch.url).await;
+        scratch.drop_database().await?;
+        outcome
+    }
+
+    async fn alias_visibility_checks(url: &str) -> Result<()> {
+        use crate::access::Principal;
+        use crate::vault::{Session, Vaults};
+        let config = crate::config::Config::from_lookup(|name| match name {
+            "DATABASE_URL" => Some(url.to_owned()),
+            // Nothing listens there: reading notes by key needs no index.
+            "QDRANT_URL" | "EMBEDDING_URL" => Some("http://127.0.0.1:9".to_owned()),
+            _ => None,
+        })?;
+        let store = crate::store::Store::connect(url).await?;
+        store.migrate().await?;
+        let app = App {
+            vector: crate::vector::Qdrant::new(
+                &config.qdrant_url,
+                &config.collection,
+                None,
+                config.embedding_dim,
+            )?,
+            embedder: crate::embedding::Embedder::new(&config)?,
+            store,
+            config,
+        };
+        let mut open = crate::testing::note("open", "relay").input;
+        open.aliases = vec!["open label".into(), "shared label".into()];
+        let plain = crate::testing::note("plain", "relay").input;
+        let mut locked = crate::testing::note("locked", "relay").input;
+        locked.aliases = vec!["sealed label".into()];
+        locked.lock = vec!["local".into()];
+        let mut ids = Vec::new();
+        for input in [&open, &plain, &locked] {
+            ids.push(app.store.upsert(input).await?.id);
+        }
+        let vaults = std::sync::Arc::new(Vaults::parse(
+            "[[vault]]\nname = \"p\"\ndomains = [\"relay\"]\nproviders = [\"local\", \"anthropic\"]\ndefault_domain = \"relay\"\n",
+            std::path::Path::new("/cfg/vaults.toml"),
+            None,
+        )?);
+        let viewer = |provider: &str| -> Result<Viewer> {
+            let principal =
+                Principal::new("p", "read", "*")?.with_vault(Some(provider), Some("p"))?;
+            Ok(Viewer::new(
+                &principal,
+                &Session::for_principal(Some(&vaults), &principal),
+            ))
+        };
+        let (claude, local) = (viewer("anthropic")?, viewer("local")?);
+        let read = async |viewer: &Viewer| {
+            app.context(&ContextRequest {
+                query: None,
+                ids: Some(&ids),
+                domain: Some("relay"),
+                budget: 8000,
+                include_legacy: true,
+                ranking: RankOptions::HYBRID_GRAPH,
+                record_access: false,
+                viewer: Some(viewer),
+                with_aliases: true,
+            })
+            .await
+        };
+        let aliases = |pack: &ContextPack| -> Vec<(String, Vec<String>)> {
+            pack.memories
+                .iter()
+                .map(|m| (m.key.clone(), m.aliases.clone().unwrap_or_default()))
+                .collect()
+        };
+        let owned = |items: &[&str]| items.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+
+        let hidden = read(&claude).await?;
+        assert_eq!(
+            aliases(&hidden),
+            [
+                ("open".to_owned(), owned(&["open label", "shared label"])),
+                ("plain".to_owned(), Vec::new()),
+            ]
+        );
+        assert!(
+            !serde_json::to_string(&hidden)?.contains("sealed label"),
+            "a locked note's aliases must not reach a provider it leaves out"
+        );
+        let shown = read(&local).await?;
+        assert!(
+            aliases(&shown).contains(&("locked".to_owned(), owned(&["sealed label"]))),
+            "{shown:?}"
+        );
+        Ok(())
     }
 
     fn hit(key: &str, kind: MatchKind, dense: Option<f64>, lexical: Option<f64>) -> SearchHit {

@@ -442,6 +442,7 @@ async fn main() -> Result<()> {
                 ranking: RankOptions::HYBRID_GRAPH,
                 record_access: true,
                 viewer: None,
+                with_aliases: false,
             })
             .await?,
         )?,

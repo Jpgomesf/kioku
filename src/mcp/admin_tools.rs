@@ -93,7 +93,7 @@ impl MemoryServer {
     #[tool(
         name = "memory_inspect",
         title = "Inspect a memory",
-        description = "Show one memory's metadata and explicit links without its text: source, status, dates, confidence, pin, usage and feedback counts, retention score, index state, and linked memories with direction. Use for provenance, freshness, or dependency questions; use memory_get to read the text. Read-only.",
+        description = "Show one memory's metadata and explicit links without its text: aliases, source, status, dates, confidence, pin, usage and feedback counts, retention score, index state, and linked memories with direction. Use for provenance, freshness, or dependency questions; use memory_get to read the text. Read-only.",
         input_schema = schema::input::<KeyArgs>(),
         annotations(read_only_hint = true, open_world_hint = false)
     )]
@@ -455,6 +455,7 @@ impl MemoryServer {
             "id": note.id,
             "domain": note.input.domain,
             "title": note.input.title,
+            "aliases": note.input.aliases,
             "status": note.status,
             "pinned": note.input.pinned,
             "confidence": note.input.confidence,

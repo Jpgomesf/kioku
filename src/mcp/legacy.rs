@@ -45,6 +45,7 @@ impl MemoryServer {
                 ranking: RankOptions::HYBRID_GRAPH,
                 record_access: true,
                 viewer: Some(&self.caller().viewer),
+                with_aliases: false,
             })
             .await;
         match result.and_then(|pack| Ok(serde_json::to_value(pack)?)) {
