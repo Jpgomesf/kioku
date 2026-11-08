@@ -36,15 +36,18 @@ and tell the agent to search without a domain. The policy
 itself (search before reading files, read the best one or two results, save
 only confirmed facts, treat notes as evidence) travels with the server as MCP
 instructions, which Claude Code, Codex, Kilo, and Gemini CLI all pass to the
-model.
+model. For Claude Code and Codex, the
+[kioku-skills](https://github.com/Jpgomesf/kioku-skills) plugins add hooks and
+skills on top ([usage.md](usage.md#claude-code-hooks-and-skills)).
 
 ## Tool profiles
 
 | Profile | Tools | Use it for |
 |---|---|---|
 | `core` (default) | `memory_search`, `memory_get`, `memory_save` | Every model, and especially small local ones |
+| `core,code_map` | core plus the [code map](code-map.md) | Small local models, which should see a file's map before reading it |
 | `core,memory_import` | core plus Markdown import | Workflows where the agent edits notes as files |
-| `all` | all ten tools | Frontier models, or when you want feedback, retirement, and maintenance from chat |
+| `all` | all twelve tools | Frontier models, or when you want listing, feedback, retirement, and maintenance from chat |
 
 Set it with `MEMORY_TOOLS` in `.env` (applies to every client) or per client
 with `scripts/mcp.sh --tools ...`. The list is fixed for the life of the
@@ -55,13 +58,13 @@ To give one client less, set `MEMORY_SCOPES` and `MEMORY_DOMAINS` in that
 client's MCP config, for example a local model that may read and save only in
 `personal-*` domains. Tools outside the scopes disappear from its list, and
 calls on other domains return a `refused` error naming the allowed patterns.
-See [Access control](../README.md#access-control); the same principals apply
-to the optional HTTP transport.
+See [access-control.md](access-control.md); the same principals apply to the
+optional HTTP transport.
 
 ## Vaults and providers
 
-With a vaults file ([Vaults and locks](../README.md#vaults-and-locks)), every
-client must say who serves its model. Set `MEMORY_PROVIDER` in the client's
+With a vaults file ([vaults.md](vaults.md)), every client must say who serves
+its model. Set `MEMORY_PROVIDER` in the client's
 own MCP config, never in `.env`: values in `.env` override the client's, so
 every client would claim the same provider. A client without it gets no
 memories.
@@ -76,7 +79,7 @@ memories.
 
 ```sh
 # Claude Code
-claude mcp add --scope user --env MEMORY_PROVIDER=anthropic kioku -- /abs/kioku/scripts/mcp.sh
+claude mcp add --scope user kioku -e MEMORY_PROVIDER=anthropic -- /abs/kioku/scripts/mcp.sh
 ```
 
 ```toml
@@ -145,8 +148,10 @@ and stay far under 4,096. Its largest core schema is under 2 KB.
   ([evals/behavior](../evals/behavior)) after upgrading the model, the
   quantization, or the serving stack. Quantization hurts multi-call tasks more
   than single calls, so measure Q4 against a higher-precision build once.
-- Use the `core` profile. Add `memory_import` only if the agent edits notes as
-  files.
+- Use the `core` profile, plus `code_map` so the model sees a file's map
+  before reading it. Add `memory_import` only if the agent edits notes as
+  files. Small models rarely search on their own, so push notes to them too
+  ([usage.md](usage.md#small-local-models)).
 
 ## Upgrading from the earlier tool names
 

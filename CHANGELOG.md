@@ -74,7 +74,7 @@ All notable changes to this project are documented here. The format follows
   crowd out candidates, and runs after the write lock is released. `hint` is
   unchanged: it still only reports unresolved `related` entries.
 - Hosted embeddings. The OpenAI-compatible provider works with OpenRouter,
-  OpenAI, and similar services (README, "Hosted embeddings"). The service
+  OpenAI, and similar services (docs/configuration.md, "Hosted embeddings"). The service
   reads what it embeds, so `EMBEDDING_READER` names its provider (`local` by
   default on this machine, `other` elsewhere), and any reader but `local`
   receives only the notes that provider may read: vault providers, area
@@ -157,6 +157,11 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- The README leads with how to use Kioku well: the memory loop, the
+  kioku-skills hooks and skills, tool habits, note writing and upkeep, then
+  results, design choices, a comparison and limits. Its long reference
+  sections moved to `docs/`: `usage.md`, `configuration.md`, `vaults.md`,
+  `access-control.md`, `notes.md`, `code-map.md` and `design.md`.
 - The README's Kilo example now passes variables under `environment`, the key
   Kilo reads, instead of `env`.
 - Imports skip the files they can't import (unreadable, invalid frontmatter
@@ -184,6 +189,8 @@ All notable changes to this project are documented here. The format follows
 
 - The `memory_maintenance` tool description no longer says the server ages
   memories daily: background upkeep only previews aging (#13).
+- Docs: the `all` profile has twelve tools, not ten, and the `read` scope also
+  covers `memory_list` and `code_map`.
 
 ## [0.2.0] - 2026-11-03
 
