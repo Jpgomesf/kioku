@@ -272,6 +272,7 @@ pub(crate) mod tests {
             confidence: 0.8,
             pinned: false,
             lock: vec![],
+            paths: Vec::new(),
         };
         let at = DateTime::parse_from_rfc3339("2026-11-01T10:00:00Z")
             .map(|at| at.with_timezone(&Utc))

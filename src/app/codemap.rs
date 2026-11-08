@@ -95,10 +95,35 @@ pub struct FileMap {
     #[serde(skip_serializing_if = "is_zero")]
     pub more_symbols: usize,
     pub neighbours: Vec<Neighbour>,
+    /// Notes anchored to this file: the decisions, conventions and gotchas
+    /// that govern it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<AnchoredNote>,
     /// True when the file changed since the map described it, so this
     /// lookup parsed it again.
     pub reparsed: bool,
 }
+
+/// A note whose paths match the file.
+#[derive(Debug, Serialize)]
+pub struct AnchoredNote {
+    pub key: String,
+    pub title: String,
+    /// Its kind tag: decision, convention, gotcha, fix, preference or setup.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+}
+
+/// Notes a lookup names, at most.
+const MAX_ANCHORED: usize = 10;
+const KINDS: [&str; 6] = [
+    "decision",
+    "convention",
+    "gotcha",
+    "fix",
+    "preference",
+    "setup",
+];
 
 #[derive(Debug, Serialize)]
 pub struct Neighbour {
@@ -439,7 +464,12 @@ fn read_source(file: &Path) -> Result<String> {
 /// content changed since the map described it, or that the map lacks, is
 /// parsed from the working tree first and saved, keeping any model-written
 /// purpose until the next update.
-pub async fn lookup_file(store: &Store, place: CodePlace, path: &str) -> Result<FileMap> {
+pub async fn lookup_file(
+    store: &Store,
+    place: CodePlace,
+    path: &str,
+    viewer: Option<&Viewer>,
+) -> Result<FileMap> {
     let language = Language::for_path(path).ok_or_else(|| {
         let names: Vec<&str> = Language::ALL
             .iter()
@@ -500,6 +530,29 @@ pub async fn lookup_file(store: &Store, place: CodePlace, path: &str) -> Result<
         .code_map_importers(&domain, &root, path, i64::try_from(MAX_NEIGHBOURS)?)
         .await?;
     let neighbours = neighbours(&file.imports, &imported, &importers);
+    let notes: Vec<AnchoredNote> = store
+        .notes(Some(&domain), false)
+        .await?
+        .into_iter()
+        .filter(|note| viewer.is_none_or(|viewer| viewer.sees(note)))
+        .filter(|note| {
+            note.input
+                .paths
+                .iter()
+                .any(|glob| crate::paths::matches(glob, path))
+        })
+        .take(MAX_ANCHORED)
+        .map(|note| AnchoredNote {
+            kind: note
+                .input
+                .tags
+                .iter()
+                .find(|tag| KINDS.contains(&tag.to_lowercase().as_str()))
+                .map(|tag| tag.to_lowercase()),
+            key: note.input.key,
+            title: note.input.title,
+        })
+        .collect();
     let shown: Vec<Symbol> = file
         .main_symbols(MAX_SHOWN_SYMBOLS)
         .into_iter()
@@ -515,6 +568,7 @@ pub async fn lookup_file(store: &Store, place: CodePlace, path: &str) -> Result<
         more_symbols: file.symbols.len() - shown.len(),
         symbols: shown,
         neighbours,
+        notes,
         reparsed,
     })
 }
@@ -663,9 +717,15 @@ impl App {
         Ok(report)
     }
 
-    /// The map entry of a file of a checkout (see [`lookup_file`]).
-    pub async fn codemap_lookup(&self, place: CodePlace, path: &str) -> Result<FileMap> {
-        lookup_file(&self.store, place, path).await
+    /// The map entry of a file of a checkout (see [`lookup_file`]). With a
+    /// viewer, only the anchored notes it may see are named.
+    pub async fn codemap_lookup(
+        &self,
+        place: CodePlace,
+        path: &str,
+        viewer: Option<&Viewer>,
+    ) -> Result<FileMap> {
+        lookup_file(&self.store, place, path, viewer).await
     }
 }
 
@@ -766,6 +826,10 @@ mod tests {
         Ok(())
     }
 
+    async fn lookup_file_for(store: &Store, place: CodePlace, path: &str) -> Result<FileMap> {
+        lookup_file(store, place, path, None).await
+    }
+
     fn place(root: &Path) -> Result<CodePlace> {
         Ok(CodePlace {
             repo: Repository::discover(root)?,
@@ -843,7 +907,7 @@ mod tests {
         );
         assert_eq!(report.repo, "repo");
 
-        let api = lookup_file(store, place(&root)?, "pkg/api.py").await?;
+        let api = lookup_file_for(store, place(&root)?, "pkg/api.py").await?;
         assert_eq!(api.purpose.as_deref(), Some("Handles pkg/api.py."));
         assert_eq!(api.purpose_source, Some(PurposeSource::Model));
         assert!(!api.reparsed);
@@ -854,7 +918,7 @@ mod tests {
             api.neighbours[0].purpose.as_deref(),
             Some("Keeps the records.")
         );
-        let records = lookup_file(store, place(&root)?, "pkg/store.py").await?;
+        let records = lookup_file_for(store, place(&root)?, "pkg/store.py").await?;
         assert_eq!(records.neighbours[0].path, "pkg/api.py");
         assert_eq!(records.neighbours[0].relation, Relation::ImportedBy);
 
@@ -872,7 +936,7 @@ mod tests {
             (report.files, report.parsed, report.updated, report.removed),
             (2, 2, 1, 1)
         );
-        let records = lookup_file(store, place(&root)?, "pkg/store.py").await?;
+        let records = lookup_file_for(store, place(&root)?, "pkg/store.py").await?;
         assert_eq!(
             records.purpose.as_deref(),
             Some("Keeps the records and their history.")
@@ -890,12 +954,12 @@ mod tests {
             "pkg/api.py",
             "from .store import save, history\n\ndef handle():\n    save()\n\ndef audit():\n    history()\n",
         )?;
-        let api = lookup_file(store, place(&root)?, "pkg/api.py").await?;
+        let api = lookup_file_for(store, place(&root)?, "pkg/api.py").await?;
         assert!(api.reparsed);
         assert_eq!(api.purpose.as_deref(), Some("Handles pkg/api.py."));
         assert!(api.symbols.iter().any(|symbol| symbol.name == "audit"));
         assert!(
-            !lookup_file(store, place(&root)?, "pkg/api.py")
+            !lookup_file_for(store, place(&root)?, "pkg/api.py")
                 .await?
                 .reparsed
         );
@@ -911,7 +975,7 @@ mod tests {
         git(&root, &["commit", "-q", "-m", "rename"])?;
         update_repo(store, place(&root)?, &plain).await?;
         assert!(
-            lookup_file(store, place(&root)?, "pkg/api.py")
+            lookup_file_for(store, place(&root)?, "pkg/api.py")
                 .await?
                 .neighbours
                 .is_empty()
@@ -919,7 +983,7 @@ mod tests {
         git(&root, &["mv", "pkg/records.py", "pkg/store.py"])?;
         git(&root, &["commit", "-q", "-m", "rename back"])?;
         update_repo(store, place(&root)?, &plain).await?;
-        let api = lookup_file(store, place(&root)?, "pkg/api.py").await?;
+        let api = lookup_file_for(store, place(&root)?, "pkg/api.py").await?;
         assert_eq!(api.neighbours.len(), 1);
         assert_eq!(api.neighbours[0].path, "pkg/store.py");
 
@@ -946,9 +1010,9 @@ mod tests {
         git(&root, &["commit", "-q", "-m", "more"])?;
         let report = update_repo(store, place(&root)?, &summaries(1)).await?;
         assert_eq!(report.summarized, 1);
-        let tools = lookup_file(store, place(&root)?, "pkg/b_tools.py").await?;
+        let tools = lookup_file_for(store, place(&root)?, "pkg/b_tools.py").await?;
         assert_eq!(tools.purpose.as_deref(), Some("Handles pkg/b_tools.py."));
-        let settings = lookup_file(store, place(&root)?, "pkg/a_settings.py").await?;
+        let settings = lookup_file_for(store, place(&root)?, "pkg/a_settings.py").await?;
         assert_eq!(settings.purpose, None);
 
         // A folder other rules place elsewhere stays out of the map.
@@ -970,10 +1034,40 @@ mod tests {
                 .all(|file| !file.path.starts_with("area/"))
         );
         assert!(
-            lookup_file(store, fenced()?, "area/inner.py")
+            lookup_file_for(store, fenced()?, "area/inner.py")
                 .await
                 .is_err()
         );
+
+        // Notes anchored to a file come back with it; others don't.
+        let anchored = |key: &str, glob: &str, tags: &[&str]| crate::model::NoteInput {
+            domain: "test".to_owned(),
+            key: key.to_owned(),
+            title: format!("Title of {key}"),
+            body: format!("Why {key} holds."),
+            aliases: Vec::new(),
+            related: Vec::new(),
+            tags: tags.iter().map(|t| (*t).to_owned()).collect(),
+            source: None,
+            confidence: 0.8,
+            pinned: false,
+            lock: Vec::new(),
+            paths: vec![glob.to_owned()],
+        };
+        store
+            .upsert(&anchored(
+                "store-writes-once",
+                "pkg/**",
+                &["Decision", "storage"],
+            ))
+            .await?;
+        store
+            .upsert(&anchored("area-rule", "area/**", &["convention"]))
+            .await?;
+        let api = lookup_file_for(store, place(&root)?, "pkg/api.py").await?;
+        assert_eq!(api.notes.len(), 1);
+        assert_eq!(api.notes[0].key, "store-writes-once");
+        assert_eq!(api.notes[0].kind.as_deref(), Some("decision"));
 
         // A save that started from an older commit is refused.
         let refused = store
@@ -989,7 +1083,7 @@ mod tests {
             .await?;
         assert!(!refused);
         assert!(
-            lookup_file(store, place(&root)?, "README.md")
+            lookup_file_for(store, place(&root)?, "README.md")
                 .await
                 .is_err()
         );

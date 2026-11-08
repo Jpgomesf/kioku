@@ -23,6 +23,7 @@ pub(crate) fn note(key: &str, domain: &str) -> Note {
         confidence: 0.8,
         pinned: false,
         lock: Vec::new(),
+        paths: Vec::new(),
     };
     Note {
         id: input.id(),
@@ -54,6 +55,7 @@ pub(crate) fn sourced_note(key: &str, body: &str) -> Note {
         confidence: 0.8,
         pinned: false,
         lock: Vec::new(),
+        paths: Vec::new(),
     };
     let at = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
     Note {

@@ -35,6 +35,10 @@ pub struct NoteInput {
     /// Left out of the stored JSON when empty, so older notes are unchanged.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lock: Vec<String>,
+    /// Code paths the note governs: globs relative to a repository's root
+    /// (see [`crate::paths`]). Left out of the stored JSON when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<String>,
 }
 
 impl NoteInput {
@@ -89,6 +93,18 @@ impl NoteInput {
             self.source.as_ref().is_none_or(|s| s.len() <= 2048),
             "source is too long"
         );
+        anyhow::ensure!(
+            self.paths.len() <= crate::paths::MAX_PATHS,
+            "a note anchors to at most {} paths",
+            crate::paths::MAX_PATHS
+        );
+        if let Some((glob, why)) = self
+            .paths
+            .iter()
+            .find_map(|glob| crate::paths::invalid(glob).map(|why| (glob, why)))
+        {
+            anyhow::bail!("path {glob:?} {why}");
+        }
         anyhow::ensure!(
             self.lock
                 .iter()
@@ -215,6 +231,7 @@ mod tests {
             confidence: 0.8,
             pinned: false,
             lock: vec![],
+            paths: Vec::new(),
         };
         let first = input.id();
         input.domain = "a".into();

@@ -88,6 +88,8 @@ pub struct SaveArgs {
     pub aliases: Option<Vec<String>>,
     /// Topic labels, e.g. ["webhooks"]. On update, omit to keep them; [] removes them.
     pub tags: Option<Vec<String>>,
+    /// Code paths this memory governs, as globs relative to the repository root, e.g. ["src/vault/**"]: a decision or convention about that code. Opening a matching file then brings this memory up. On update, omit to keep them; [] removes them.
+    pub paths: Option<Vec<String>>,
     /// Where the fact comes from: a URL or document you read, or "user" when the user stated it. Omit to let the server record the client and date. Never invent paths, dates, or session ids.
     pub source: Option<String>,
 }
@@ -159,6 +161,8 @@ pub struct ListArgs {
     pub origin: Option<NoteOrigin>,
     /// Only notes with this tag, e.g. "decision".
     pub tag: Option<String>,
+    /// Only notes anchored to this file, a path relative to the repository root, e.g. "src/vault/place.rs".
+    pub path: Option<String>,
     /// Notes per page, 1-200. Default 50.
     #[schemars(range(min = 1, max = 200))]
     pub limit: Option<i64>,

@@ -8,6 +8,11 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Notes anchor to the code they govern with `paths`, globs relative to a
+  repository's root (`src/vault/**`), set with `memory_save` or in
+  frontmatter. A code map lookup names the notes anchored to its file, and
+  `memory_list` takes `path` to list them. The note doesn't describe the code;
+  it says which code a decision governs.
 - `memory_get` takes `count_use`. A read with `count_use: false` isn't counted
   as use, so agents that read notes only to compare, deduplicate, or audit
   them don't keep those notes from aging out.

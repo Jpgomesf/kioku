@@ -496,38 +496,73 @@ fn list_filters_by_status_origin_and_tag_and_pages_by_offset() {
     let mut retired = crate::testing::note("retired-note", "relay");
     retired.status = Status::Legacy;
 
-    assert!(listed(&decision, ListStatus::Active, None, None));
+    assert!(listed(&decision, ListStatus::Active, None, None, None));
     assert!(listed(
         &decision,
         ListStatus::Active,
         Some(NoteOrigin::Agent),
-        Some("decision")
+        Some("decision"),
+        None
     ));
     assert!(!listed(
         &decision,
         ListStatus::Active,
         Some(NoteOrigin::File),
+        None,
         None
     ));
-    assert!(!listed(&decision, ListStatus::Active, None, Some("gotcha")));
+    assert!(!listed(
+        &decision,
+        ListStatus::Active,
+        None,
+        Some("gotcha"),
+        None
+    ));
     assert!(listed(
         &imported,
         ListStatus::Active,
         Some(NoteOrigin::File),
+        None,
         None
     ));
     assert!(!listed(
         &imported,
         ListStatus::Active,
         Some(NoteOrigin::Agent),
+        None,
         None
     ));
-    assert!(!listed(&retired, ListStatus::Active, None, None));
+    assert!(!listed(&retired, ListStatus::Active, None, None, None));
     assert!(
-        listed(&retired, ListStatus::Legacy, None, None)
-            && listed(&retired, ListStatus::All, None, None)
+        listed(&retired, ListStatus::Legacy, None, None, None)
+            && listed(&retired, ListStatus::All, None, None, None)
     );
-    assert!(!listed(&decision, ListStatus::Legacy, None, None));
+    assert!(!listed(&decision, ListStatus::Legacy, None, None, None));
+
+    // A path filter keeps the notes anchored to that file, by glob.
+    let mut anchored = crate::testing::note("anchored-note", "relay");
+    anchored.input.paths = vec!["src/vault/**".to_owned()];
+    assert!(listed(
+        &anchored,
+        ListStatus::Active,
+        None,
+        None,
+        Some("src/vault/place.rs")
+    ));
+    assert!(!listed(
+        &anchored,
+        ListStatus::Active,
+        None,
+        None,
+        Some("src/main.rs")
+    ));
+    assert!(!listed(
+        &decision,
+        ListStatus::Active,
+        None,
+        None,
+        Some("src/vault/place.rs")
+    ));
 
     let rows = || (0..5).collect::<Vec<i32>>();
     assert_eq!(page(rows(), 0, 2), (vec![0, 1], Some(2)));

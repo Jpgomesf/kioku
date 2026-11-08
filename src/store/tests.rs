@@ -39,6 +39,7 @@ async fn history_checks(store: &Store) -> Result<()> {
         confidence: 0.8,
         pinned: false,
         lock: Vec::new(),
+        paths: Vec::new(),
     };
     let note = store.upsert(&input).await?;
     // Writes that change nothing add nothing.
@@ -139,6 +140,7 @@ async fn lifecycle_checks(store: &Store) -> Result<()> {
         confidence: 0.8,
         pinned: false,
         lock: Vec::new(),
+        paths: Vec::new(),
     };
     let note = store.upsert(&input).await?;
     store.mark_synced(note.id, note.revision).await?;
@@ -232,6 +234,7 @@ async fn lifecycle_checks(store: &Store) -> Result<()> {
         .upsert(&NoteInput {
             key: "sealed".into(),
             lock: vec!["local".into()],
+            paths: Vec::new(),
             ..other.clone()
         })
         .await?;

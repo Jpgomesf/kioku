@@ -66,7 +66,10 @@ impl MemoryServer {
             .repo
             .relative(&file)
             .ok_or_else(|| UserError::NotFound(format!("{} does not exist", file.display())))?;
-        let map = self.app.codemap_lookup(place, &relative).await?;
+        let map = self
+            .app
+            .codemap_lookup(place, &relative, Some(&self.caller().viewer))
+            .await?;
         let mut value = serde_json::to_value(map)?;
         value["untrusted_evidence"] = json!(true);
         Ok(value)

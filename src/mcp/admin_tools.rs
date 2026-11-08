@@ -63,10 +63,17 @@ pub(super) fn listed(
     status: ListStatus,
     origin: Option<NoteOrigin>,
     tag: Option<&str>,
+    path: Option<&str>,
 ) -> bool {
     status.admits(note.status)
         && origin.is_none_or(|origin| note_origin(note) == origin)
         && tag.is_none_or(|tag| note.input.tags.iter().any(|t| t.eq_ignore_ascii_case(tag)))
+        && path.is_none_or(|path| {
+            note.input
+                .paths
+                .iter()
+                .any(|glob| crate::paths::matches(glob, path))
+        })
 }
 
 /// The rows from `offset`, at most `limit` of them, and the offset of the
@@ -353,6 +360,11 @@ impl MemoryServer {
         let limit = clamp(args.limit.unwrap_or(50), 1, 200, "limit", &mut notes);
         let offset = clamp(args.offset.unwrap_or(0), 0, i64::MAX, "offset", &mut notes);
         let tag = args.tag.as_deref().map(str::trim).filter(|t| !t.is_empty());
+        let path = args
+            .path
+            .as_deref()
+            .map(|p| p.trim().trim_start_matches("./"))
+            .filter(|p| !p.is_empty());
         let mut rows: Vec<(String, Note, usize)> = Vec::new();
         for domain in &domains {
             let mut stored = self.app.store.notes(Some(domain), include_legacy).await?;
@@ -376,7 +388,7 @@ impl MemoryServer {
                 }
             }
             for note in stored {
-                if listed(&note, status, args.origin, tag) {
+                if listed(&note, status, args.origin, tag, path) {
                     let links = neighbors.get(&note.id).map_or(0, HashSet::len);
                     rows.push((domain.clone(), note, links));
                 }
@@ -399,6 +411,9 @@ impl MemoryServer {
                 });
                 if !note.input.tags.is_empty() {
                     item["tags"] = json!(note.input.tags);
+                }
+                if !note.input.paths.is_empty() {
+                    item["paths"] = json!(note.input.paths);
                 }
                 item
             })
@@ -458,6 +473,9 @@ impl MemoryServer {
             "truncated": graph["truncated"],
             "history": history,
         });
+        if !note.input.paths.is_empty() {
+            out["paths"] = json!(note.input.paths);
+        }
         // Without a vector, search finds the note only by keyword and link.
         if !self.app.embedder_reads(&note.input) {
             out["not_sent_to_embedder"] = json!(true);

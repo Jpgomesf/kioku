@@ -513,6 +513,7 @@ impl Maker<'_> {
                 confidence: concept.confidence(),
                 pinned: concept.pinned,
                 lock: concept.lock.clone(),
+                paths: Vec::new(),
             },
             deprecated: concept.deprecated(),
         }

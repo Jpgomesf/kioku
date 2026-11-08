@@ -676,6 +676,7 @@ fn plain_input(body: &str, tags: &[&str]) -> NoteInput {
         confidence: 0.8,
         pinned: false,
         lock: vec![],
+        paths: Vec::new(),
     }
 }
 
