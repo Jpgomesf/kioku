@@ -227,15 +227,32 @@ class Checks:
     def __init__(self):
         self.count = 0
 
-    def check(self, name: str, condition: bool) -> None:
+    def check(self, name: str, condition: bool, detail: str = "") -> None:
+        """Count a passing check, or fail with its name and `detail`, which
+        must never hold a server payload."""
         if not condition:
-            raise SmokeFailure(name)
+            raise SmokeFailure(f"{name}; {detail}" if detail else name)
         self.count += 1
         print(f"ok {self.count:02d} - {name}", flush=True)
 
 
 def keys(results: list[dict]) -> list[str]:
     return [r["key"] for r in results]
+
+
+def ranking(results: list[dict]) -> str:
+    """Detailed search results as keys, match kinds and signals, for a failure
+    message. Titles and snippets are left out."""
+    def value(number: object) -> str:
+        return "-" if number is None else str(number)
+
+    shown = []
+    for result in results:
+        signals = result.get("signals", {})
+        shown.append(f"{result['key']} ({result.get('match')}, score {value(result.get('score'))}, "
+                     f"dense {value(signals.get('dense'))}, lexical {value(signals.get('lexical'))}, "
+                     f"retention {value(signals.get('retention'))})")
+    return "top results: " + ("; ".join(shown) or "none")
 
 
 def run(client: StdioClient, checks: Checks, notes_root: Path, hydration_key: str, trace_path: Path) -> None:
@@ -1032,9 +1049,22 @@ def run_okf(binary: Path, values: dict[str, str], root: Path, timeout: float, ch
                      and {f"{kb_name}/questions/Q-1", f"{kb_name}/architecture#replay"} <= set(by_id[0].get("links", [])))
         checks.check("its source is the concept's own file in the bundle",
                      str(by_id[0].get("source", "")).endswith(f"okf-bundle/{kb_name}/decisions/DEC-1-current.md"))
-        found = client.call("memory_search", {"query": word, "domain": domain})["results"]
-        checks.check("search finds the section that holds a fact, keyed by its anchor",
-                     bool(found) and found[0]["key"] == f"{kb_name}/architecture#replay")
+        # Only the section holds the word, so it is the word's only keyword
+        # match. When the section has no meaning (dense) rank of its own,
+        # fusion gives the top meaning match the same relevance, and retention
+        # or the note id orders the two. That happens in CI, where vectors are
+        # hashed words: the section's cosine with the word (about 0.13) is
+        # under the dense floor, while a note whose word shares the random
+        # word's hash bucket can clear it.
+        found = client.call("memory_search", {"query": word, "domain": domain, "response_format": "detailed"})["results"]
+        section = f"{kb_name}/architecture#replay"
+        ranked = keys(found)
+        place = ranked.index(section) if section in ranked else None
+        checks.check("search finds the section that holds a fact, keyed by its anchor, as the word's only keyword match",
+                     [r["key"] for r in found if r["signals"].get("lexical") is not None] == [section], ranking(found))
+        tied = (place == 1 and found[0]["match"] == "search" and found[0]["signals"].get("dense") is not None
+                and found[1]["signals"].get("dense") is None)
+        checks.check("only a meaning match tied with that section ranks above it", place == 0 or tied, ranking(found))
         status = lambda key: client.call("memory_inspect", {"key": key, "domain": domain})["status"]
         checks.check("a deprecated concept's note is legacy", status(f"{kb_name}/decisions/DEC-0-old") == "legacy")
         _, text, error = client.call_raw("memory_import", {"path": "okf-bundle", "domain": domain})
