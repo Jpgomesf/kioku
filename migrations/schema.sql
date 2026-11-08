@@ -74,15 +74,17 @@ WHERE latest.revision IS DISTINCT FROM n.revision OR latest.status IS DISTINCT F
 -- to a domain's notes or links bumps the domain's versions below, from
 -- triggers, so writes by any process or version of Kioku count. Each note also
 -- records the transaction that last wrote it, so a cache reloads only the
--- notes written since its snapshot. Needs PostgreSQL 14 or later.
+-- notes written since its snapshot. Needs PostgreSQL 13 or later.
+--
+-- This file runs whenever a process starts, so the column and triggers are
+-- created only when missing: ALTER TABLE and CREATE TRIGGER lock the table even
+-- when they would change nothing.
 CREATE TABLE IF NOT EXISTS memory_search_versions (
     domain TEXT PRIMARY KEY,
     notes BIGINT NOT NULL DEFAULT 0,
     links BIGINT NOT NULL DEFAULT 0,
     deletes BIGINT NOT NULL DEFAULT 0
 );
-ALTER TABLE memory_notes ADD COLUMN IF NOT EXISTS written_by xid8;
-CREATE INDEX IF NOT EXISTS memory_notes_written_by ON memory_notes(domain, written_by);
 
 CREATE OR REPLACE FUNCTION memory_notes_stamp() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
@@ -106,20 +108,42 @@ BEGIN
     RETURN NULL;
 END $$;
 
-CREATE OR REPLACE TRIGGER memory_notes_stamp BEFORE INSERT OR UPDATE ON memory_notes
-    FOR EACH ROW EXECUTE FUNCTION memory_notes_stamp();
-CREATE OR REPLACE TRIGGER memory_notes_inserted AFTER INSERT ON memory_notes
-    REFERENCING NEW TABLE AS changed FOR EACH STATEMENT EXECUTE FUNCTION memory_notes_changed();
-CREATE OR REPLACE TRIGGER memory_notes_updated AFTER UPDATE ON memory_notes
-    REFERENCING NEW TABLE AS changed FOR EACH STATEMENT EXECUTE FUNCTION memory_notes_changed();
-CREATE OR REPLACE TRIGGER memory_notes_deleted AFTER DELETE ON memory_notes
-    REFERENCING OLD TABLE AS changed FOR EACH STATEMENT EXECUTE FUNCTION memory_notes_changed();
-CREATE OR REPLACE TRIGGER memory_edges_inserted AFTER INSERT ON memory_edges
-    REFERENCING NEW TABLE AS changed FOR EACH STATEMENT EXECUTE FUNCTION memory_edges_changed();
-CREATE OR REPLACE TRIGGER memory_edges_updated AFTER UPDATE ON memory_edges
-    REFERENCING NEW TABLE AS changed FOR EACH STATEMENT EXECUTE FUNCTION memory_edges_changed();
-CREATE OR REPLACE TRIGGER memory_edges_deleted AFTER DELETE ON memory_edges
-    REFERENCING OLD TABLE AS changed FOR EACH STATEMENT EXECUTE FUNCTION memory_edges_changed();
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = 'memory_notes'::regclass
+                   AND attname = 'written_by' AND NOT attisdropped) THEN
+        ALTER TABLE memory_notes ADD COLUMN written_by xid8;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'memory_notes_stamp') THEN
+        CREATE TRIGGER memory_notes_stamp BEFORE INSERT OR UPDATE ON memory_notes
+            FOR EACH ROW EXECUTE FUNCTION memory_notes_stamp();
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'memory_notes_inserted') THEN
+        CREATE TRIGGER memory_notes_inserted AFTER INSERT ON memory_notes
+            REFERENCING NEW TABLE AS changed FOR EACH STATEMENT EXECUTE FUNCTION memory_notes_changed();
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'memory_notes_updated') THEN
+        CREATE TRIGGER memory_notes_updated AFTER UPDATE ON memory_notes
+            REFERENCING NEW TABLE AS changed FOR EACH STATEMENT EXECUTE FUNCTION memory_notes_changed();
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'memory_notes_deleted') THEN
+        CREATE TRIGGER memory_notes_deleted AFTER DELETE ON memory_notes
+            REFERENCING OLD TABLE AS changed FOR EACH STATEMENT EXECUTE FUNCTION memory_notes_changed();
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'memory_edges_inserted') THEN
+        CREATE TRIGGER memory_edges_inserted AFTER INSERT ON memory_edges
+            REFERENCING NEW TABLE AS changed FOR EACH STATEMENT EXECUTE FUNCTION memory_edges_changed();
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'memory_edges_updated') THEN
+        CREATE TRIGGER memory_edges_updated AFTER UPDATE ON memory_edges
+            REFERENCING NEW TABLE AS changed FOR EACH STATEMENT EXECUTE FUNCTION memory_edges_changed();
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'memory_edges_deleted') THEN
+        CREATE TRIGGER memory_edges_deleted AFTER DELETE ON memory_edges
+            REFERENCING OLD TABLE AS changed FOR EACH STATEMENT EXECUTE FUNCTION memory_edges_changed();
+    END IF;
+END $$;
+CREATE INDEX IF NOT EXISTS memory_notes_written_by ON memory_notes(domain, written_by);
 
 -- The code map: what each source file of a repository is for and what it
 -- defines, for small models that read code. Its own layer: no vectors, so note
