@@ -16,7 +16,7 @@ use anyhow::Result;
 use tokio::sync::{OwnedRwLockReadGuard, RwLock};
 
 use crate::rank::index::DomainIndex;
-use crate::store::SearchVersion;
+use crate::store::{DeltaPart, SearchVersion};
 
 use super::App;
 
@@ -98,27 +98,57 @@ impl App {
         Ok(Ready { indexes, refreshed })
     }
 
-    /// Catch `cached` up with its domain; returns how many notes were read.
-    /// A domain that grew past the note limit is refused, and its index is
-    /// dropped.
+    /// Catch `cached` up with its domain, applying the notes as they arrive;
+    /// returns how many were read. A domain that grew past the note limit is
+    /// refused, and an index the refresh had begun to change is dropped.
     async fn refresh(&self, domain: &str, cached: &mut Option<Cached>) -> Result<usize> {
-        let since = cached.as_ref().map(|c| (c.snapshot.as_str(), c.version));
-        let delta = self.store.search_delta(domain, since).await?;
-        let mut current = match cached.take() {
-            Some(old) if !delta.full => old,
-            _ => Cached::default(),
+        let mut old = cached.take();
+        let since = old.as_ref().map(|c| (c.snapshot.clone(), c.version));
+        let since = since
+            .as_ref()
+            .map(|(snapshot, version)| (snapshot.as_str(), *version));
+        let mut changed: Option<DomainIndex> = None;
+        let mut read = 0;
+        let delta = self
+            .store
+            .search_delta(domain, since, |delta, part| {
+                let index = changed.get_or_insert_with(|| match old.take() {
+                    Some(old) if !delta.full => old.index,
+                    _ => DomainIndex::default(),
+                });
+                match part {
+                    DeltaPart::Notes(rows) => {
+                        read += rows.len();
+                        index.apply(rows, |row| {
+                            !self.embedder.reads_locked(&row.domain, &row.lock)
+                        });
+                        self.store.check_domain_size(index.len())
+                    }
+                    DeltaPart::Links(links) => {
+                        index.replace_links(&links);
+                        Ok(())
+                    }
+                }
+            })
+            .await;
+        let delta = match delta {
+            Ok(delta) => delta,
+            Err(error) => {
+                if changed.is_none() {
+                    *cached = old;
+                }
+                return Err(error);
+            }
         };
-        let read = delta.rows.len();
-        current.index.apply(delta.rows, |row| {
-            !self.embedder.reads_locked(&row.domain, &row.lock)
+        let index = changed.unwrap_or_else(|| match old {
+            Some(old) if !delta.full => old.index,
+            _ => DomainIndex::default(),
         });
-        self.store.check_domain_size(current.index.len())?;
-        if let Some(edges) = &delta.edges {
-            current.index.replace_links(edges);
-        }
-        current.version = delta.version;
-        current.snapshot = delta.snapshot;
-        *cached = Some(current);
+        *cached = Some(Cached {
+            index,
+            version: delta.version,
+            snapshot: delta.snapshot,
+        });
         Ok(read)
     }
 }
@@ -502,6 +532,51 @@ mod tests {
         assert!(app.store.notes(Some("relay"), true).await.is_err());
         app.store = app.store.with_max_notes(3);
         assert_eq!(results(&app, &["relay"], "ledger").await?.stats.notes, 3);
+        Ok(())
+    }
+
+    /// Creates and drops its own database on the server in MEMORY_TEST_DATABASE_URL.
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL; set MEMORY_TEST_DATABASE_URL"]
+    async fn a_domain_larger_than_a_batch_is_read_in_batches() -> Result<()> {
+        let scratch = ScratchDatabase::create().await?;
+        let outcome = batch_checks(&scratch.url).await;
+        scratch.drop_database().await?;
+        outcome
+    }
+
+    async fn batch_checks(url: &str) -> Result<()> {
+        let app = offline(url).await?;
+        // More notes than one batch holds, written at once as an import would.
+        by_hand(
+            url,
+            "INSERT INTO memory_notes (id, domain, note_key, input)
+             SELECT gen_random_uuid(), 'bulk', 'note-' || i, jsonb_build_object(
+                 'domain', 'bulk', 'key', 'note-' || i, 'title', 'Note ' || i,
+                 'body', 'Bulk entry ' || i || CASE WHEN i % 700 = 0 THEN ' marker' ELSE '' END)
+             FROM generate_series(1, 2100) AS i",
+        )
+        .await?;
+        let first = results(&app, &["bulk"], "marker").await?;
+        assert_eq!((first.stats.refreshed, first.stats.notes), (2100, 2100));
+        let mut found = keys(&first.hits);
+        found.sort_unstable();
+        assert_eq!(found, ["note-1400", "note-2100", "note-700"]);
+
+        // Every note's text changes: the refresh replaces it batch by batch.
+        by_hand(
+            url,
+            "UPDATE memory_notes SET revision = revision + 1, input = jsonb_set(input, '{body}',
+                 to_jsonb('Rewritten entry ' || note_key || CASE WHEN note_key = 'note-5' THEN ' beacon' ELSE '' END))",
+        )
+        .await?;
+        let rewritten = results(&app, &["bulk"], "beacon").await?;
+        assert_eq!(keys(&rewritten.hits), ["note-5"]);
+        assert_eq!(
+            (rewritten.stats.refreshed, rewritten.stats.notes),
+            (2100, 2100)
+        );
+        assert!(results(&app, &["bulk"], "marker").await?.hits.is_empty());
         Ok(())
     }
 }

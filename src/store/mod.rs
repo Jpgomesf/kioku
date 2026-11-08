@@ -20,7 +20,7 @@ mod code;
 mod search;
 
 pub use code::CodeMapChange;
-pub use search::{HitFields, SearchDelta, SearchVersion};
+pub use search::{DeltaPart, HitFields, SearchDelta, SearchVersion};
 
 /// Most notes a domain may hold when it is loaded whole, by search, saves,
 /// imports, and repair, and a vault-wide search in all.

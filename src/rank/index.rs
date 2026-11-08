@@ -20,7 +20,7 @@ use uuid::Uuid;
 
 use crate::graph;
 use crate::lifecycle::{self, Usage};
-use crate::model::{Edge, SearchFields, Status};
+use crate::model::{SearchFields, Status};
 
 use super::lexical::{idf, normalize_label, note_terms, term_score};
 
@@ -150,22 +150,18 @@ impl DomainIndex {
         }
     }
 
-    /// Replace the domain's links.
-    pub fn replace_links(&mut self, edges: &[Edge]) {
+    /// Replace the domain's links, each its source, target, and weight.
+    pub fn replace_links(&mut self, links: &[(Uuid, Uuid, f64)]) {
         let mut raw: HashMap<Uuid, Vec<(Uuid, f64)>> = HashMap::new();
-        for edge in edges {
-            raw.entry(edge.source)
-                .or_default()
-                .push((edge.target, edge.weight));
-            raw.entry(edge.target)
-                .or_default()
-                .push((edge.source, edge.weight));
+        for (source, target, weight) in links {
+            raw.entry(*source).or_default().push((*target, *weight));
+            raw.entry(*target).or_default().push((*source, *weight));
         }
         self.links = raw
             .into_iter()
             .map(|(id, links)| (id, graph::link_weights(links, id)))
             .collect();
-        self.link_count = edges.len();
+        self.link_count = links.len();
     }
 
     fn group_for(&mut self, status: Status, lock: &[String]) -> usize {

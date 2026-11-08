@@ -4,16 +4,25 @@
 //! `migrations/schema.sql`.
 
 use std::collections::HashMap;
+use std::future::poll_fn;
+use std::pin::Pin;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
+use futures_core::Stream;
 use sqlx::Row;
 use sqlx::postgres::PgRow;
 use uuid::Uuid;
 
 use crate::lifecycle::Usage;
-use crate::model::{Edge, SearchFields, Status};
+use crate::model::{SearchFields, Status};
 
-use super::{Store, decode_edges};
+use super::Store;
+
+/// Notes a refresh hands over at a time, so a domain's text is never all in
+/// memory at once.
+const BATCH: usize = 1_000;
+/// Most links a domain may hold, as [`Store::edges`] allows.
+const MAX_LINKS: usize = 1_000_000;
 
 /// How many times a domain's notes, links, and deletions have changed. Each
 /// count only grows while the table lasts, so a cache built at one version is
@@ -33,18 +42,25 @@ impl SearchVersion {
     }
 }
 
-/// What a cache must apply to catch up with a domain.
+/// What a cache catches up with: the version and snapshot it reads at, and
+/// whether it must start over.
 pub struct SearchDelta {
     pub version: SearchVersion,
     /// The snapshot the rows were read in; the next refresh reads what was
     /// written after it.
     pub snapshot: String,
-    /// The domain's notes (`full`), or those written since the old snapshot.
-    pub rows: Vec<SearchFields>,
-    /// The domain's links, when they changed or `full`.
-    pub edges: Option<Vec<Edge>>,
-    /// The cache must start over: it had nothing, or notes were deleted.
+    /// The cache must start over: it had nothing, notes were deleted, or a
+    /// count went back.
     pub full: bool,
+}
+
+/// What a refresh reads, in order: batches of notes, the domain's (`full`)
+/// or those written since the cache's snapshot, then the domain's links if
+/// they changed or `full`.
+pub enum DeltaPart {
+    Notes(Vec<SearchFields>),
+    /// Each link as its source, target, and weight.
+    Links(Vec<(Uuid, Uuid, f64)>),
 }
 
 /// A search hit's display fields, read after ranking.
@@ -69,6 +85,16 @@ const FIELDS: &str =
         COALESCE((input->>'pinned')::boolean, false) AS pinned,
         input->'confidence' AS confidence
     FROM memory_notes";
+
+/// The next row of a query read as its rows arrive.
+async fn next_row<S>(rows: &mut S) -> Result<Option<PgRow>>
+where
+    S: Stream<Item = sqlx::Result<PgRow>> + Unpin,
+{
+    Ok(poll_fn(|cx| Pin::new(&mut *rows).poll_next(cx))
+        .await
+        .transpose()?)
+}
 
 fn decode_fields(row: &PgRow) -> Result<SearchFields> {
     // Parsed as JSON, as reading the whole note does, so the retention prior
@@ -131,15 +157,17 @@ impl Store {
             .collect()
     }
 
-    /// Read what a cache of `domain` needs, in one snapshot: everything when
-    /// `since` is `None`, notes were deleted since it, or a count went back,
-    /// otherwise only the notes written after the cache's snapshot and, if
-    /// they changed, the links. Like every load of a whole domain, it refuses
-    /// one of more notes than the limit.
+    /// Read what a cache of `domain` needs, in one snapshot, and hand it to
+    /// `apply` part by part as it arrives: everything when `since` is `None`,
+    /// notes were deleted since it, or a count went back, otherwise only the
+    /// notes written after the cache's snapshot and, if they changed, the
+    /// links. Like every load of a whole domain, it refuses one of more notes
+    /// than the limit. An error from `apply` stops the read.
     pub async fn search_delta(
         &self,
         domain: &str,
         since: Option<(&str, SearchVersion)>,
+        mut apply: impl FnMut(&SearchDelta, DeltaPart) -> Result<()>,
     ) -> Result<SearchDelta> {
         let mut tx = self.pool.begin().await?;
         sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
@@ -166,19 +194,21 @@ impl Store {
         .transpose()?
         .unwrap_or_default();
         let since = since.filter(|(_, old)| old.deletes == version.deletes && version.covers(old));
-        let full = since.is_none();
-        let rows = match since {
-            None => {
+        let delta = SearchDelta {
+            version,
+            snapshot,
+            full: since.is_none(),
+        };
+        let notes = match since {
+            None => Some(
                 sqlx::query(sqlx::AssertSqlSafe(format!(
                     "{FIELDS} WHERE domain = $1 LIMIT $2"
                 )))
                 .bind(domain)
-                .bind(self.load_limit())
-                .fetch_all(&mut *tx)
-                .await?
-            }
-            Some((_, old)) if old.notes == version.notes => Vec::new(),
-            Some((old_snapshot, _)) => {
+                .bind(self.load_limit()),
+            ),
+            Some((_, old)) if old.notes == version.notes => None,
+            Some((old_snapshot, _)) => Some(
                 sqlx::query(sqlx::AssertSqlSafe(format!(
                     "{FIELDS} WHERE domain = $1
                      AND written_by >= pg_snapshot_xmin($2::pg_snapshot)
@@ -187,35 +217,52 @@ impl Store {
                 )))
                 .bind(domain)
                 .bind(old_snapshot)
-                .bind(self.load_limit())
-                .fetch_all(&mut *tx)
-                .await?
-            }
+                .bind(self.load_limit()),
+            ),
         };
-        // Notes written since a cache's snapshot are all in the domain, so
-        // more of them than the limit is a domain over it too.
-        self.check_domain_size(rows.len())?;
-        let edges = if since.is_none_or(|(_, old)| old.links != version.links) {
-            let rows = sqlx::query(
-                "SELECT e.source, e.target, e.kind, e.weight FROM memory_edges e
+        if let Some(query) = notes {
+            let mut rows = query.fetch(&mut *tx);
+            let mut batch = Vec::with_capacity(BATCH);
+            let mut read = 0;
+            while let Some(row) = next_row(&mut rows).await? {
+                // Notes written since a cache's snapshot are all in the
+                // domain, so more of them than the limit is a domain over it.
+                read += 1;
+                self.check_domain_size(read)?;
+                batch.push(decode_fields(&row)?);
+                if batch.len() == BATCH {
+                    let full = std::mem::replace(&mut batch, Vec::with_capacity(BATCH));
+                    apply(&delta, DeltaPart::Notes(full))?;
+                }
+            }
+            if !batch.is_empty() {
+                apply(&delta, DeltaPart::Notes(batch))?;
+            }
+        }
+        if since.is_none_or(|(_, old)| old.links != version.links) {
+            let mut rows = sqlx::query(
+                "SELECT e.source, e.target, e.weight FROM memory_edges e
                  JOIN memory_notes s ON s.id = e.source JOIN memory_notes t ON t.id = e.target
                  WHERE s.domain = $1 AND t.domain = $1",
             )
             .bind(domain)
-            .fetch_all(&mut *tx)
-            .await?;
-            Some(decode_edges(&rows)?)
-        } else {
-            None
-        };
+            .fetch(&mut *tx);
+            let mut links = Vec::new();
+            while let Some(row) = next_row(&mut rows).await? {
+                ensure!(
+                    links.len() < MAX_LINKS,
+                    "Graph has too many edges; choose a narrower domain"
+                );
+                links.push((
+                    row.try_get("source")?,
+                    row.try_get("target")?,
+                    row.try_get("weight")?,
+                ));
+            }
+            apply(&delta, DeltaPart::Links(links))?;
+        }
         tx.commit().await?;
-        Ok(SearchDelta {
-            version,
-            snapshot,
-            rows: rows.iter().map(decode_fields).collect::<Result<_>>()?,
-            edges,
-            full,
-        })
+        Ok(delta)
     }
 
     /// The display fields of `ids`, in no particular order.
