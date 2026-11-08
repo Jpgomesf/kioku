@@ -8,7 +8,12 @@ results.
 make eval                                   # bundled dataset, isolated storage
 ./bin/kioku --env-file .env eval --dataset evals/demo/dataset.json --k 3
 ./bin/kioku --env-file .env eval --format json --output report.json
+./bin/kioku --env-file .env bench --notes 10000   # the same queries among 9,976 synthetic notes
 ```
+
+`kioku bench` grows the bundled dataset's domain with synthetic distractor
+notes in isolated storage and times the graded queries warm and as the first
+query of a new process ([docs/evaluation.md](../docs/evaluation.md#scale)).
 
 ## Datasets
 

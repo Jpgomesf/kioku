@@ -342,8 +342,11 @@ it, and prints the settings to put in `.env`; close MCP clients first.
   keep working, but expect changes before 1.0.
 - **Platforms.** The prebuilt binary is for macOS on Apple Silicon only;
   elsewhere `make install` compiles. CI tests on Linux; Windows is untested.
-- **Scale.** Every search loads the domain's notes for BM25. That is fine for
-  hundreds of notes; latency at 1k to 10k isn't measured yet.
+- **Scale.** Each server process indexes a domain on its first search there and
+  reuses the index after that: a warm search takes 10 to 16 ms from 1,000 to
+  100,000 notes, but the first search in a new process, which is what a hook
+  gets, takes 26 ms at 1,000 notes and 1.8 s at 100,000
+  ([docs/evaluation.md](docs/evaluation.md#scale)).
 - **Note size.** A note must fit the embedding model's context window, about
   6 KB of English text for `nomic-embed-text`. OKF imports split long concepts.
 - **Client reach.** The hooks and three of the six skills need Claude Code. The

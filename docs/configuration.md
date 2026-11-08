@@ -26,6 +26,8 @@ only:
 
 `make stop` stops them and keeps the volumes. Back up PostgreSQL together with
 your notes; the Qdrant index is derived data that `kioku repair --all` rebuilds.
+Another PostgreSQL works too if it is version 13 or later: the schema keeps
+search caches fresh with triggers.
 
 ## Embeddings on the Apple GPU
 
