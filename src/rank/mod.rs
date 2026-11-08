@@ -14,6 +14,7 @@
 //!   rose to the top of unrelated queries. Graph expansion therefore only
 //!   fills reserved trailing slots and never displaces the direct matches.
 
+pub mod index;
 mod lexical;
 
 pub use lexical::{fold, tokenize};

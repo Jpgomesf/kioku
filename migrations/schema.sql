@@ -69,6 +69,58 @@ LEFT JOIN LATERAL (
 ) latest ON true
 WHERE latest.revision IS DISTINCT FROM n.revision OR latest.status IS DISTINCT FROM n.status;
 
+-- Search caches. Each server process keeps an index of every domain it has
+-- searched, and checks per search whether the domain changed since. Every write
+-- to a domain's notes or links bumps the domain's versions below, from
+-- triggers, so writes by any process or version of Kioku count. Each note also
+-- records the transaction that last wrote it, so a cache reloads only the
+-- notes written since its snapshot. Needs PostgreSQL 14 or later.
+CREATE TABLE IF NOT EXISTS memory_search_versions (
+    domain TEXT PRIMARY KEY,
+    notes BIGINT NOT NULL DEFAULT 0,
+    links BIGINT NOT NULL DEFAULT 0,
+    deletes BIGINT NOT NULL DEFAULT 0
+);
+ALTER TABLE memory_notes ADD COLUMN IF NOT EXISTS written_by xid8;
+CREATE INDEX IF NOT EXISTS memory_notes_written_by ON memory_notes(domain, written_by);
+
+CREATE OR REPLACE FUNCTION memory_notes_stamp() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    NEW.written_by := pg_current_xact_id();
+    RETURN NEW;
+END $$;
+
+CREATE OR REPLACE FUNCTION memory_notes_changed() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    INSERT INTO memory_search_versions AS v (domain, notes, deletes)
+    SELECT DISTINCT domain, 1, CASE WHEN TG_OP = 'DELETE' THEN 1 ELSE 0 END FROM changed ORDER BY domain
+    ON CONFLICT (domain) DO UPDATE SET notes = v.notes + 1, deletes = v.deletes + EXCLUDED.deletes;
+    RETURN NULL;
+END $$;
+
+CREATE OR REPLACE FUNCTION memory_edges_changed() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    INSERT INTO memory_search_versions AS v (domain, links)
+    SELECT DISTINCT n.domain, 1 FROM changed c JOIN memory_notes n ON n.id = c.source ORDER BY n.domain
+    ON CONFLICT (domain) DO UPDATE SET links = v.links + 1;
+    RETURN NULL;
+END $$;
+
+CREATE OR REPLACE TRIGGER memory_notes_stamp BEFORE INSERT OR UPDATE ON memory_notes
+    FOR EACH ROW EXECUTE FUNCTION memory_notes_stamp();
+CREATE OR REPLACE TRIGGER memory_notes_inserted AFTER INSERT ON memory_notes
+    REFERENCING NEW TABLE AS changed FOR EACH STATEMENT EXECUTE FUNCTION memory_notes_changed();
+CREATE OR REPLACE TRIGGER memory_notes_updated AFTER UPDATE ON memory_notes
+    REFERENCING NEW TABLE AS changed FOR EACH STATEMENT EXECUTE FUNCTION memory_notes_changed();
+CREATE OR REPLACE TRIGGER memory_notes_deleted AFTER DELETE ON memory_notes
+    REFERENCING OLD TABLE AS changed FOR EACH STATEMENT EXECUTE FUNCTION memory_notes_changed();
+CREATE OR REPLACE TRIGGER memory_edges_inserted AFTER INSERT ON memory_edges
+    REFERENCING NEW TABLE AS changed FOR EACH STATEMENT EXECUTE FUNCTION memory_edges_changed();
+CREATE OR REPLACE TRIGGER memory_edges_updated AFTER UPDATE ON memory_edges
+    REFERENCING NEW TABLE AS changed FOR EACH STATEMENT EXECUTE FUNCTION memory_edges_changed();
+CREATE OR REPLACE TRIGGER memory_edges_deleted AFTER DELETE ON memory_edges
+    REFERENCING OLD TABLE AS changed FOR EACH STATEMENT EXECUTE FUNCTION memory_edges_changed();
+
 -- The code map: what each source file of a repository is for and what it
 -- defines, for small models that read code. Its own layer: no vectors, so note
 -- search never sees it. `domain` is where the checkout's folder is placed, so

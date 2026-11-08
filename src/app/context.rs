@@ -667,6 +667,7 @@ mod tests {
                 config.embedding_dim,
             )?,
             embedder: crate::embedding::Embedder::new(&config)?,
+            cache: Default::default(),
             store,
             config,
         };

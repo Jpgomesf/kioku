@@ -17,8 +17,10 @@ use uuid::Uuid;
 use crate::model::{Edge, Note, NoteInput, NoteRevision, Status};
 
 mod code;
+mod search;
 
 pub use code::CodeMapChange;
+pub use search::{HitFields, SearchDelta, SearchVersion};
 
 const MAX_NOTES: i64 = 10_000;
 const MUTATION_LOCK: i64 = 0x4d454d4f525931;

@@ -214,6 +214,25 @@ pub struct VectorHit {
     pub revision: i64,
 }
 
+/// What search needs of a note: the text BM25 reads, the labels exact
+/// matches compare, who may see it, its vector state, and its usage for the
+/// retention prior. The rest of the note stays in PostgreSQL.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SearchFields {
+    pub id: Uuid,
+    pub domain: String,
+    pub key: String,
+    pub title: String,
+    pub aliases: Vec<String>,
+    pub tags: Vec<String>,
+    pub body: String,
+    pub lock: Vec<String>,
+    pub status: Status,
+    pub revision: i64,
+    pub vector_synced: bool,
+    pub usage: crate::lifecycle::Usage,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
