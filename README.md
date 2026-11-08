@@ -1,631 +1,377 @@
-# Kioku (記憶)
+<h1 align="center">Kioku (記憶)</h1>
 
-[![CI](https://github.com/Jpgomesf/kioku/actions/workflows/ci.yml/badge.svg)](https://github.com/Jpgomesf/kioku/actions/workflows/ci.yml)
+<p align="center"><b>Long-term memory for coding agents, served over MCP.</b></p>
 
-Long-term memory for coding agents, served over [MCP](https://modelcontextprotocol.io).
-Kioku keeps curated notes (decisions, architecture, conventions, verified fixes,
-preferences) and lets any agent find and read just the ones a task needs,
-instead of re-reading a whole docs folder every session.
+<p align="center">
+  <a href="https://github.com/Jpgomesf/kioku/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Jpgomesf/kioku/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
+  <a href="Cargo.toml"><img alt="Rust 1.94+" src="https://img.shields.io/badge/rust-1.94%2B-orange.svg"></a>
+</p>
 
-- **Hybrid retrieval with a link graph.** Embeddings and BM25 are fused with
-  Reciprocal Rank Fusion; explicit links between notes pull in related context
-  without pushing direct matches down. Exact keys, titles, and aliases always
-  win.
-- **Works with any model.** The same server serves a quantized local model and
-  frontier models through Claude Code, Codex, Kilo, Gemini CLI, Cursor, or any
-  stdio MCP client: three core tools, flat schemas, keys instead of UUIDs,
-  lenient arguments, and actionable errors. See [docs/clients.md](docs/clients.md).
-- **Measured, not assumed.** `kioku eval` scores retrieval on graded queries;
-  behavior checks score what agents actually do. See
-  [docs/evaluation.md](docs/evaluation.md).
-- **Local and inspectable.** PostgreSQL holds the notes, Qdrant the vectors,
-  Ollama computes embeddings. Notes can live as Markdown files you edit and
-  review. Nothing is ever hard-deleted, and the server runs no language model.
+Kioku is a local-first memory server for coding agents. Agents save the
+decisions, verified fixes, conventions and gotchas that the code can't show,
+and find them again in later sessions through keyword, meaning and link
+search. It runs on your machine and sends nothing out by default: a note
+reaches a model only when an agent reads it, and vaults and locks decide which
+model providers may read what.
 
-```mermaid
-flowchart LR
-    Agent[Agent: Claude Code, Codex, Kilo, ...] <-->|MCP over stdio| Kioku[kioku serve]
-    Notes[Markdown notes] -->|memory_import| Kioku
-    Kioku <-->|notes, links, lifecycle| PG[(PostgreSQL)]
-    Kioku <-->|vectors| Q[(Qdrant)]
-    Kioku -->|embeddings| O[Ollama]
-```
+<!-- Demo: a GIF or screenshot of an agent recalling a past decision in a new
+session, with the Kioku Viewer's graph of the same notes beside it. -->
+
+## Why Kioku
+
+- **Agents forget between sessions.** A `CLAUDE.md` holds a few rules, old
+  transcripts are too long to reread, and the reasons behind a choice get lost.
+- **Curated beats extracted.** Kioku keeps short notes that a person confirmed
+  or a test verified, one fact each. Published benchmarks found
+  model-extracted memory weak at keeping facts current
+  ([evidence](docs/design.md#why-not-let-a-model-build-the-graph)).
+- **Memory should come to the agent.** Agents often skip an optional lookup,
+  so the Claude Code plugin brings notes in at session start, with each prompt
+  and when a file opens.
+- **Measured, not assumed.** Ranking changes are scored on graded queries, and
+  each number below comes with the command that reproduces it.
+
+## Features
+
+- **Hybrid retrieval with a link graph.** BM25 and vectors fused with
+  Reciprocal Rank Fusion, exact labels first; curated links bring in the note a
+  result builds on, without pushing direct matches down.
+- **Works with any model.** Three core tools, flat schemas, short keys instead
+  of UUIDs and errors that say what to fix, so quantized local models cope too.
+- **Vaults and provider locks.** One vault per company or part of your life,
+  chosen by folder or git remote; locks decide which providers may read what.
+- **Plugins for Claude Code and Codex.** Hooks bring notes into every session
+  and save what it settled; six skills save, check, sync, audit and tidy notes.
+- **A code map for small local models.** Each file's purpose, definitions and
+  neighbours, plus the decisions anchored to it.
+- **An evaluation harness.** Retrieval scored with ablations and confidence
+  intervals, and behavior checks that score what agents do with the tools.
+- **Markdown and OKF import.** Keep notes as files you review, or import an
+  Open Knowledge Format bundle as it is.
+- **A desktop viewer (early).** [Kioku Viewer](viewer/README.md) browses notes,
+  the link graph and vault access on macOS.
 
 ## Quick start
 
-Requirements: Docker with Compose, a Rust toolchain (1.94 or newer), and
-Python 3 (used once to generate credentials).
+You need Docker with Compose, Rust 1.94 or newer, Python 3 (used once to
+generate credentials) and, for the last step, Claude Code.
 
 ```sh
 git clone https://github.com/Jpgomesf/kioku && cd kioku
-make start     # PostgreSQL, Qdrant, Ollama on loopback ports; creates a private .env
-make install   # builds bin/kioku; on a Mac with Apple Silicon, make install-prebuilt downloads CI's build of main instead
+make start      # PostgreSQL, Qdrant and Ollama on 127.0.0.1; writes a private .env
+make install    # builds bin/kioku; on Apple Silicon, make install-prebuilt downloads CI's build instead
 ./bin/kioku doctor
-./bin/kioku ingest --path examples/notes --domain demo
-./bin/kioku search "Which service replaces the old indexing worker?" --domain demo
+claude mcp add --scope user kioku -e MEMORY_PROVIDER=anthropic -- "$PWD/scripts/mcp.sh"
 ```
 
-`make start` writes `.env` (mode 0600) with unique credentials on first run and
-never evaluates it as shell code. The services bind to 127.0.0.1 only:
+Next, add the hooks and skills from
+[kioku-skills](https://github.com/Jpgomesf/kioku-skills) so memory reaches
+Claude unasked ([how](#claude-code-hooks-and-skills)). Other clients connect
+the same way ([docs/clients.md](docs/clients.md)).
 
-| Service | Address | Volume |
-|---|---|---|
-| PostgreSQL | `127.0.0.1:15432` | `local-memory_postgres_data` |
-| Qdrant | `http://127.0.0.1:16333` | `local-memory_qdrant_data` |
-| Ollama | `http://127.0.0.1:11435` | `local-memory_ollama_models` |
+## How it works
 
-`make stop` stops them and keeps the volumes. Back up PostgreSQL together with
-your notes; the Qdrant index is derived data that `kioku repair --all` rebuilds.
+```mermaid
+flowchart LR
+    subgraph session["Agent session: Claude Code, Codex, Kilo, ..."]
+        agent["Agent"]
+        plugins["kioku-skills<br/>hooks and skills"]
+    end
+    plugins -->|"notes in, saves prompted"| agent
+    agent <-->|"MCP over stdio"| server["kioku serve"]
+    plugins -->|"short-lived server, CLI"| server
+    files["Markdown notes,<br/>OKF bundles"] -->|import| server
+    server <-->|"notes, links, history"| pg[("PostgreSQL<br/>source of truth")]
+    server <-->|vectors| qdrant[("Qdrant<br/>rebuildable index")]
+    server -->|"text to embed"| embedder["Embedder<br/>Ollama or hosted"]
+```
 
-### Embeddings on the Apple GPU
+A search scores every note in the domain with BM25 over its key, title,
+aliases, tags and body, asks Qdrant for vector similarity, and fuses the two
+rankings with Reciprocal Rank Fusion. Personalized PageRank from the top
+matches then fills the last slot with a linked note, marked `linked_from`. The
+server runs no language model: it returns short previews, and the agent reads
+the one or two notes it needs within a byte budget.
+[docs/design.md](docs/design.md#how-retrieval-works) has the details.
 
-Docker on macOS can't use the GPU, so the bundled Ollama container embeds on
-the CPU. That's fine for everyday saves, but importing thousands of notes keeps
-every core busy for minutes. An Ollama installed on the Mac itself runs on the
-GPU:
+## Why PostgreSQL and Qdrant, not a graph database
+
+- **PostgreSQL is the source of truth.** Notes, links, feedback, lifecycle and
+  an append-only revision history, with transactions, constraints and plain
+  backups. Each client's server writes through one advisory lock.
+- **Qdrant is derived.** `kioku repair --all` rebuilds it, and `kioku reindex`
+  moves to another embedding model in a new collection without touching
+  PostgreSQL. pgvector would also work at this scale; Qdrant costs one more
+  service.
+- **The graph is small and curated.** Explicit `related` links, walked
+  in-process. That needs no graph engine and no query language. The cost: no
+  graph queries, and no bi-temporal facts like
+  [Graphiti](https://github.com/getzep/graphiti)'s.
+- **Model-built graphs don't pay off for recall.** In published benchmarks,
+  plain BM25 kept updated facts better than Mem0 and Zep (48.0 against 18.0
+  and 7.0 on single-hop questions;
+  [Hu et al.](https://arxiv.org/abs/2507.05257)). Global GraphRAG answered 19%
+  of unanswerable queries correctly against 96% for plain RAG
+  ([Han et al.](https://arxiv.org/abs/2502.11371)). Microsoft's GraphRAG took
+  115.5M input tokens to index 11,656 passages
+  ([Gutiérrez et al.](https://arxiv.org/abs/2502.14802)).
+- **When a graph store wins:** entities extracted from text at scale, facts
+  with validity windows, or multi-hop traversal as the main workload. Even
+  then, [Apache AGE](https://github.com/apache/age) adds Cypher to PostgreSQL.
+
+The full rationale and its sources: [docs/design.md](docs/design.md).
+
+## Results
+
+Kioku's own retrieval set: 24 fictional notes and 40 graded queries in nine
+categories (exact labels, identifiers, paraphrases, Portuguese and English,
+multi-hop links, supersession, legacy history, distractors, abstention), k = 5,
+`nomic-embed-text` through Ollama. Reproduce it in isolated storage with:
 
 ```sh
-brew install ollama && brew services start ollama
-# in .env:
-EMBEDDING_URL=http://127.0.0.1:11434
-make start               # now starts only PostgreSQL and Qdrant, and pulls the model natively
-make stop-docker-ollama  # the container is no longer used
+make eval
 ```
 
-`ollama ps` should show `100% GPU`. The vector index stays valid: it depends
-on the model and prompts, not on where they run, and the same model gives the
-same vectors (cosine similarity above 0.9999 between the two runtimes).
-
-### Hosted embeddings
-
-To run no embedding model at all, use a hosted service with an
-OpenAI-compatible `/embeddings` endpoint, such as
-[OpenRouter](https://openrouter.ai/collections/embedding-models) or OpenAI:
-
-```sh
-# in .env
-EMBEDDING_PROVIDER=openai                      # the API's shape, whoever serves it
-EMBEDDING_URL=https://openrouter.ai/api/v1     # or https://api.openai.com/v1
-EMBEDDING_MODEL=openai/text-embedding-3-small  # OpenRouter's name for it; OpenAI's is text-embedding-3-small
-EMBEDDING_DIM=1536                             # the model's vector size
-EMBEDDING_API_KEY=...
-ALLOW_REMOTE_EMBEDDINGS=true
-EMBEDDING_READER=openai                        # who reads the text you send; see below
-```
-
-`make start` then starts only PostgreSQL and Qdrant. Kioku picks query and
-document prompts from the model's name (`qwen/qwen3-embedding-8b` gets
-Qwen3's), and a wrong `EMBEDDING_DIM` stops the first embedding with a clear
-error. An install that already has an index moves in three steps: copy
-`.env` to `hosted.env` and change the embedding settings and
-`QDRANT_COLLECTION` there; compare the model on the bundled retrieval set
-with `./bin/kioku --env-file hosted.env eval`; then run
-`./bin/kioku reindex --to-env-file hosted.env`, which embeds every note again
-before switching, and make `hosted.env` your `.env`.
-
-**What the service may read.** The service reads every text it embeds, so
-Kioku treats it like a model of the provider named in `EMBEDDING_READER`:
-`local` by default for an address on this machine, `other` for any other.
-Through OpenRouter the text passes both OpenRouter and the model's host, so
-name the host's provider only if you trust both.
-
-- A service read only locally (`local`) receives every note, as before.
-- Any other receives a note only if that provider may read it. Without
-  vaults, a note whose `lock` leaves the provider out is kept from it. With
-  vaults, the note's vault must list the provider, no area lock may leave it
-  out, and the note's own lock, if any, must name it.
-- A note kept from the service has no vector. Search finds it by keyword,
-  label, and link, with its keyword rank standing in for the meaning rank it
-  can't have; `memory_inspect` marks it `not_sent_to_embedder`, and imports
-  and `kioku repair` count such notes.
-- Queries go to the service too, unless it may read none of the domains
-  searched.
-- After changing which providers a vault lists, or its locks, run
-  `./bin/kioku repair --all`: it embeds the notes the service may now read
-  and removes the vectors of those it no longer may.
-
-## Connect a client
-
-Every client launches [`scripts/mcp.sh`](scripts/mcp.sh), which runs
-`bin/kioku serve` with this checkout's `.env`. Use the absolute path:
-
-```sh
-# Claude Code
-claude mcp add --scope user kioku -- /absolute/path/to/kioku/scripts/mcp.sh
-
-# Codex CLI / IDE / app
-codex mcp add kioku -- /absolute/path/to/kioku/scripts/mcp.sh
-```
-
-Kilo (`~/.config/kilo/kilo.jsonc`):
-
-```json
-{"mcp": {"kioku": {"type": "local", "command": ["/absolute/path/to/kioku/scripts/mcp.sh"], "enabled": true}}}
-```
-
-Then tell agents which memory domain belongs to each project, in its
-`AGENTS.md` or `CLAUDE.md`:
-
-```markdown
-The Kioku memory domain for this project is `my-project`.
-```
-
-With vaults, skip that line: the instructions name the session's vault
-instead (see [Vaults and locks](#vaults-and-locks)).
-
-The server's instructions carry the usage policy to every client, so no
-client-specific prompt files are needed. [docs/clients.md](docs/clients.md)
-covers more clients, tool profiles, and tuning for small local models.
-
-Skills and hooks that work with this memory, such as saving what a session
-settled, checking stored decisions and auditing notes, live in the
-[kioku-skills](https://github.com/Jpgomesf/kioku-skills) plugin marketplace.
-They find this checkout through `KIOKU_HOME`:
-
-```sh
-# Claude Code: the skills, and hooks that bring memory into every session
-claude plugin marketplace add Jpgomesf/kioku-skills
-claude plugin install kioku-memory@kioku-skills
-claude plugin install kioku-hooks@kioku-skills
-
-# Codex: add the marketplace, then install kioku-memory from /plugins
-codex plugin marketplace add Jpgomesf/kioku-skills
-```
-
-## Tools
-
-The default `core` profile exposes three tools; `MEMORY_TOOLS=all` (or
-`scripts/mcp.sh --tools all`) adds the rest, and a list such as
-`core,memory_import` picks individual tools.
-
-| Tool | Profile | What it does |
-|---|---|---|
-| `memory_search` | core | Ranked previews (key, title, snippet, score) for a question |
-| `memory_get` | core | Full text of chosen memories by key, with aliases and links, within a byte budget; counts as use unless `count_use` is false |
-| `memory_save` | core | Create or update one memory by key, optionally anchored to code `paths`; refuses credentials and file-backed notes; reports its links and similar notes |
-| `memory_inspect` | all | Aliases, provenance, lifecycle, usage, links, and recent history of one memory |
-| `memory_feedback` | all | Record that a memory proved right or wrong |
-| `memory_retire` / `memory_restore` | all | Move a memory to legacy and back; nothing is deleted |
-| `memory_import` | all | Import Markdown notes from `MEMORY_NOTES_ROOT` |
-| `memory_maintenance` | all | Preview or apply monthly aging |
-| `memory_stats` | all | Counts by status and domain, index health |
-| `memory_list` | all | Page through a domain's notes (key, title, status, tags, paths, origin, links to active notes, last update), filtered by status, origin, tag, or a file the notes are anchored to |
-| `code_map` | all | A source file's purpose, main definitions with line numbers, and up to 5 files around it, for clients of small local models (see [Code map](#code-map)) |
-
-**What a save reports.** Besides the key and revision, `memory_save` returns
-`links`, the number of active notes the saved note links to or is linked
-from. Its `next` field gives advice:
-- **A new note that links to nothing,** in a domain that has other notes, is
-  reachable by search but never through the graph. `next` says to add the
-  notes it builds on, narrows, or replaces to `related`.
-- **A new note close in meaning** to up to three stored notes it doesn't link
-  to gets them listed under `similar`, with their similarity.
-  - If one already holds the fact, update that note instead.
-  - If the new note refines or replaces one, link it.
-  - Similarity is cosine over the stored vectors. The threshold,
-    `MEMORY_SIMILAR_NOTE_SCORE` (default 0.9), suits nomic-embed-text: in a
-    dense single-project knowledge base, pairs at 0.9 or more were mostly
-    restatements, refinements, and replacements, and few were unrelated.
-  - Models whose similarities run lower need a lower value.
-- `hint` still only says that `related` holds references that didn't resolve.
-
-**Updating a note's aliases.** A save replaces a note's `aliases` with the
-list it sends; leaving the field out keeps them. To add one, read the note
-with `memory_get` and send its whole list plus the new alias. Every memory
-`memory_get` returns carries `aliases`, `[]` when there are none, so a client
-can tell a note without aliases from an older server that doesn't send them.
-Aliases count toward `max_bytes` and are never cut: the text shrinks to make
-room, and a note whose aliases don't fit is left out, with `truncated` set.
-
-Two prompts, `recall` and `remember`, give users explicit shortcuts in clients
-that support MCP prompts. Tools from earlier versions (`rag_search`,
-`rag_context`, `memory_upsert`, ...) are still accepted under their old names.
-
-## Notes
-
-A note is one focused fact with a stable key. Markdown notes use YAML
-frontmatter; editing the file and importing it again updates the same memory:
-
-```markdown
----
-key: jobs-worker
-title: Jobs worker owns background indexing
-domain: my-project
-aliases: [indexing worker, worker de indexação]
-related: [local-stack, batch-worker-retirement]
-tags: [service, indexing]
-paths: [services/jobs-worker/**]
-confidence: 0.9
-pinned: false
----
-
-The jobs-worker is the current owner of background document indexing.
-It replaces the retired batch-worker.
-```
-
-- `related` links resolve within the domain by key, then title, then alias;
-  `[[wiki links]]` work. Missing or ambiguous references are reported.
-- `lock: local` (or a list of providers) limits which models may read the
-  note. It takes effect with a vaults file; see
-  [Vaults and locks](#vaults-and-locks). A `lock` that lists no provider
-  (`lock: []`, `lock:`), or a near miss such as `Lock`, `locks`, or `locked`,
-  fails the file instead of importing the note unlocked.
-- `paths` anchors the note to the code it governs: globs relative to the
-  repository root, one or a list. `*` stays within a folder, `**` spans
-  folders, and a bare folder covers everything under it. A file's code map
-  entry names the notes anchored to it, and `memory_list` filters by file with
-  `path`. An anchor says which code a decision governs; it never describes the
-  code.
-- Saving a key again replaces its text, but nothing is lost: every save,
-  edit, retirement, and restore appends the note's content and status to
-  `memory_note_revisions`, and `memory_inspect` lists the ten latest entries.
-- Import with `memory_import` (paths stay inside `MEMORY_NOTES_ROOT`) or
-  `kioku ingest --path DIR --domain DOMAIN`. A file's path is its provenance;
-  agents can't overwrite file-backed notes through `memory_save`.
-- A file that can't be imported (unreadable, bad frontmatter, another domain,
-  a key another file or source owns, too long to embed) is skipped and listed
-  under `failed` with the reason; the other files import. Only when every
-  file fails is the import an error, and then nothing is written. With
-  vaults, a session's `memory_import` lists only failures of notes it may
-  see; the rest are counted in `failed_count` but not named (see
-  [Vaults and locks](#vaults-and-locks)).
-- Each note must fit the embedding model's context window (about 6 KB of
-  English text for `nomic-embed-text`); `memory_save` rejects a longer note
-  before anything is saved, with a request to split it.
-
-### Open Knowledge Format bundles
-
-`kioku ingest` reads an [Open Knowledge Format](https://github.com/GoogleCloudPlatform/open-knowledge-format)
-(OKF v0.2) bundle as it is, with no converted copy. A folder whose `index.md`
-declares `okf_version` is read as a bundle (`--format okf` forces it):
-
-```sh
-kioku ingest --path ~/work/company-kb --domain company/kb
-```
-
-- **Keys.** Each concept becomes a note keyed by its concept ID, the file's
-  path in the bundle without `.md` (`kb/decisions/ADR-350-cites`). A
-  producer `id` and `aliases` become aliases, so `memory_get ADR-350` works.
-  The source is the concept's own file, so a re-import after `git pull`
-  re-embeds only what changed.
-- **Links.** Bundle-relative (`/kb/x.md`) and relative links become `related`
-  links. In the stored text a link keeps its words, plus the target's id when
-  they lack it. A list item that is only links becomes a list of ids. Links to
-  concepts the bundle lacks are kept as words and counted, as the spec asks.
-  `index.md` and `log.md` are skipped: the graph replaces them.
-- **Long concepts.** A concept over 4,000 bytes becomes a hub note and one note
-  per section, keyed `<concept ID>#<anchor>` with GitHub's heading anchor, so
-  a link to `/kb/architecture.md#router` reaches the section about the router.
-  Sections split at their headings, then by paragraph and table row (tables
-  keep their header).
-- **Facts line.** A concept's note (or hub) opens with its type and id, its
-  lifecycle, the trust tier `verified` gives (unverified, machine-confirmed,
-  human-reviewed), `stale_after`, the producer's other plain fields (a
-  decision's status and who made it, say), who wrote it, and its `resource`.
-  A section opens with a shorter line: type and id, the concept it belongs
-  to, lifecycle, trust, and `stale_after`. Trust also sets the note's
-  confidence. Profile fields need no setup in Kioku.
-- **Lifecycle.** The bundle decides: concepts with `status: deprecated` are
-  legacy notes, the rest are active, and a note whose concept or section left
-  the bundle (or a bundle moved since its last import) becomes legacy too,
-  never deleted. The report's `okf` part counts what was read, and, for the
-  lifecycle, `retired` (now deprecated), `restored` (no longer deprecated),
-  and `removed` (gone from the bundle).
-- A bundle names no domain of its own, so only the command line imports one.
-  `memory_import` refuses a path in a bundle, and a Markdown import that
-  meets a bundle inside its folder lists it under `failed` instead of reading
-  it. `lock` and `pinned` in a concept's frontmatter work as in any note, and
-  a link to a locked concept keeps only its author's words, so the target's
-  title or id never reaches a note that more providers may read.
-
-## Code map
-
-The code map tells a small model what a source file is for before it reads
-it: the file's purpose, its main definitions with line numbers, and up to five
-files it imports or that import it. It is a layer of its own, apart from
-notes: rows in PostgreSQL (`code_map_repos`, `code_map_files`) with no
-vectors, so note search never returns them. Each checkout has its own map, in
-the domain its folder places local models in, so vaults and locks apply as
-they do to notes. Files under a folder that another vault or area places stay
-out of it.
-
-```sh
-kioku codemap update --repo ~/code/app          # files changed since the last update; all of them the first time
-kioku codemap update --repo ~/code/app --full   # parse every file again
-kioku codemap show ~/code/app/src/billing.py    # what a model gets for one file
-```
-
-- **Parsing** is line-based, for Rust, Python, TypeScript and JavaScript, Go,
-  Terraform and HCL, SQL, and shell. A definition is found by how its line
-  starts, and imports are resolved to other tracked files, so packages and
-  standard modules drop out. Files over 512 KB are left out.
-- **Purposes.** A file's doc comment (`//!`, a module docstring, a leading
-  comment block) is its purpose. For the rest, `--summarizer <program>` runs a
-  program that reads `{"repo": ..., "files": [{"path", "language", "text"}]}`
-  on stdin and prints `{"purposes": [{"path", "purpose"}]}`.
-  - `--summarizer-provider` names whose model the program calls. Kioku sends
-    it code only from vaults that let that provider read, and never a file
-    that looks like it holds a credential.
-  - Only one-line purposes for files it asked about are kept.
-  - `--summary-limit` (default 50) caps the files per update: files that
-    changed come first, then files with no purpose yet.
-- **Freshness.** `update` reads files as committed at HEAD, and parses only
-  those that changed since the last update. When files were added, deleted,
-  or renamed, it parses every file, because other files' imports may now
-  resolve differently, and saves only the entries that changed. A lookup
-  parses a file again when its working tree differs from what the map
-  describes, and keeps its model-written purpose.
-- **Reading it.** The `code_map` tool takes a path, absolute or relative to
-  the session's folder. It is outside the core profile (`--tools
-  core,code_map`), for clients of small local models, where a plugin can call
-  it when the model opens a file. Without a vaults file, it reads only files
-  inside the session's folder.
-- **Anchored notes.** A lookup also names up to ten notes whose `paths` match
-  the file: the decisions, conventions, and gotchas that govern it, among the
-  notes the caller may read.
-
-## How retrieval works
-
-1. **Signals.** Qdrant returns cosine similarity for current vectors; BM25 runs
-   over keys, titles, aliases, tags, and bodies, with accent folding and
-   identifiers such as `TW-4290` kept whole. Notes the vector index hasn't
-   caught up with still match by keyword.
-2. **Fusion.** Reciprocal Rank Fusion combines the rankings without
-   calibrating their score scales. A note whose key, title, or alias equals the
-   query ranks first.
-3. **Graph expansion.** Personalized PageRank from the top matches, with a 0.5
-   restart probability, fills the last result slot with a linked note, marked
-   `linked_from`. It never displaces direct matches.
-4. **Lifecycle.** Retention (confidence, feedback, usage, and age) breaks near
-   ties. Nothing ages out on its own: maintenance, when you run it, moves
-   stale, unpinned notes to a reversible `legacy` status that default search
-   skips.
-
-The design follows measurements, summarized in the next section.
-
-## Evaluation
-
-`make eval` builds isolated storage, imports a 24-note fixture corpus, and
-scores 40 graded queries across nine categories (exact labels, identifiers,
-paraphrases, Portuguese/English, multi-hop links, supersession, legacy history,
-distractors, abstention), plus whether 1,500-byte context packs contain the
-answer. With `nomic-embed-text` (k = 5):
-
-| Ranking | Recall | MRR | nDCG | Hit@1 | Packs with the answer |
+| Ranking | Recall@5 | MRR | nDCG@5 | Hit@1 | Packs with the answer (1,500 bytes) |
 |---|---|---|---|---|---|
 | Previous release (linear score with PageRank) | 0.773 | 0.544 | 0.541 | 0.222 | 14/32 |
 | Vector only | 0.884 | 0.894 | 0.865 | 0.861 | |
 | Hybrid (vector + BM25) | 0.935 | 0.958 | 0.919 | 0.861 | |
-| **Hybrid + graph expansion (current)** | **0.958** | **0.958** | **0.928** | **0.861** | **31/32** |
+| **Hybrid + graph expansion (default)** | **0.958** | **0.958** | **0.928** | **0.861** | **31/32** |
 
-The same run with `qwen3-embedding:0.6b` reaches recall 1.000, nDCG 0.975, and
-32/32, mostly from better Portuguese/English matching. Compare models on your
-own notes and switch with `kioku reindex` when one wins. The dataset is small
-and synthetic, so treat these as regression guards rather than general claims;
-[docs/evaluation.md](docs/evaluation.md) has the method, the caveats, and the
-behavior checks for agents.
+The same run reports graph ablations, with 95% bootstrap intervals:
 
-## Configuration
-
-`.env` (see [`.env.example`](.env.example)) or environment variables. Values in
-the file named by `--env-file` win over inherited variables.
-
-| Variable | Default | Purpose |
+| Links | nDCG@5 (95% CI) | Multi-hop queries with every hop in the top 5 |
 |---|---|---|
-| `DATABASE_URL` | (required) | PostgreSQL connection |
-| `QDRANT_URL`, `QDRANT_COLLECTION`, `QDRANT_API_KEY` | `http://127.0.0.1:16333`, `local_memory_v1` | Vector index; non-local URLs must use https |
-| `EMBEDDING_PROVIDER` | `ollama` | `ollama` or `openai` (any OpenAI-compatible `/embeddings`) |
-| `EMBEDDING_URL`, `EMBEDDING_MODEL`, `EMBEDDING_DIM` | `http://127.0.0.1:11435`, `nomic-embed-text`, `768` | Embedding service; non-local URLs need `ALLOW_REMOTE_EMBEDDINGS=true` |
-| `EMBEDDING_QUERY_PREFIX`, `EMBEDDING_DOCUMENT_PREFIX` | per model family | Override query/document prompts |
-| `MEMORY_DEFAULT_DOMAIN` | `local` | Domain used when a call names none |
-| `MEMORY_NOTES_ROOT` | unset | Absolute folder `memory_import` may read |
-| `MEMORY_TOOLS` | `core` | `core`, `all`, or a comma-separated list |
-| `MEMORY_HALF_LIFE_DAYS`, `MEMORY_LEGACY_THRESHOLD` | `90`, `0.2` | Aging policy |
-| `MEMORY_BACKGROUND_UPKEEP` | `true` | Daily index repair while serving, and a log of notes aging would retire |
-| `MEMORY_TRACE_FILE`, `MEMORY_TRACE_RUN` | unset | Record every tool call as JSONL; `{vault}` in the path gives each vault its own file |
-| `MEMORY_TRACE_CONTENT`, `MEMORY_TRACE_SALT` | `full`, random | `redacted` or `hashed` keep keys, domains, and timing but drop query and note text |
-| `MEMORY_PRINCIPAL`, `MEMORY_SCOPES`, `MEMORY_DOMAINS` | `local`, `read,write,admin`, `*` | Access profile for a stdio server ([Access control](#access-control)) |
-| `MEMORY_ACCESS_FILE` | unset | Who may connect to `serve --http` |
-| `MEMORY_VAULTS_FILE` | `~/.config/kioku/vaults.toml` | Vault rules ([Vaults and locks](#vaults-and-locks)); no file means no vaults |
-| `MEMORY_PROVIDER` | unset | The client's model provider; set it in each client's MCP config, never in `.env` |
-| `KIOKU_SESSION_DIR` | the working directory | The folder that places a session in a vault; set it per client |
-| `MEMORY_LOG_FORMAT` | `text` | `json` for one JSON object per log line; filter with `RUST_LOG` |
+| Stored | 0.928 [0.854, 0.977] | 4/4 |
+| None | 0.919 [0.842, 0.973] | 3/4 |
+| Shuffled (5 seeds) | 0.919 [0.842, 0.973] | 75% |
 
-## Access control
+- **Another model:** `./bin/kioku eval --embedding-model qwen3-embedding:0.6b --embedding-dim 1024`
+  reaches recall 1.000, nDCG 0.975 and 32/32, mostly from better Portuguese
+  and English matching.
+- **In CI:** a weekly job reruns the set on a GitHub-hosted Linux runner (CPU)
+  and fails below recall 0.93 or nDCG 0.90, on hub exposure above 3×, or on a
+  leaked superseded note.
+- **Not measured yet:** BM25 alone, a no-memory baseline (the
+  [answer harness](evals/answers/README.md) is ready, with no published
+  results), and Kioku's effect on coding tasks.
+- **Caveats:** the set is small and synthetic, and its author also tuned the
+  ranking, so treat the numbers as regression guards. Kioku hasn't run LoCoMo
+  or LongMemEval. Method and per-category scores:
+  [docs/evaluation.md](docs/evaluation.md).
 
-Each MCP client starts its own `kioku serve`, so a client's MCP config can give
-it a narrower profile. Scopes gate tools (`read`: search, get, inspect, stats;
-`write`: save, feedback; `admin`: retire, restore, import, maintenance), and
-domain patterns gate every read and write. Tools outside the scopes aren't
-listed at all.
+## How it compares
 
-```jsonc
-// Kilo with a local model: read and save, personal domains only
-"environment": { "MEMORY_SCOPES": "read,write", "MEMORY_DOMAINS": "personal-*,kioku", "MEMORY_DEFAULT_DOMAIN": "kioku" }
-```
+Each cell for another project comes from its own README, checked on
+2026-11-08.
 
-Patterns are globs (`work-*`) or anchored regexes (`re:client-(acme|globex)`),
-matched in linear time. A bad pattern, or a default domain outside the
-patterns, stops the server at startup.
+| | Kioku | [basic-memory](https://github.com/basicmachines-co/basic-memory) | [Mem0](https://github.com/mem0ai/mem0) | [Graphiti](https://github.com/getzep/graphiti) (Zep) | [cognee](https://github.com/topoteretes/cognee) |
+|---|---|---|---|---|---|
+| Storage | PostgreSQL, plus a Qdrant index rebuilt from it | Markdown files and a SQLite index; Postgres optional | Hosted platform, or a self-hosted server | Neo4j, FalkorDB or Amazon Neptune | Relational, vector and graph stores; all three can share one Postgres (graph part is a demo) |
+| Who writes memory | The agent, one confirmed fact at a time, or you in Markdown | You and the agent, as Markdown | An LLM extracts it from conversations | An LLM builds a graph from episodes | Extraction into entities and relationships |
+| Runs fully offline | Yes, with the bundled Ollama | Yes, "air-gapped friendly" | Needs an LLM; OpenAI by default | Defaults to OpenAI; local models through Ollama | Yes: local extraction and embedding models, no API key |
+| Graph | Curated links between notes | Wiki links in the Markdown | Entity linking across memories | Bi-temporal knowledge graph | Knowledge graph |
+| Evals published | Retrieval on its own 24-note set, with ablations | None in its README | LoCoMo, LongMemEval and BEAM, for its managed platform | None in its README; see the Zep paper | BEAM |
+| Agent integration | MCP server; Claude Code and Codex plugins | MCP server | SDKs, a CLI and agent skills | Reference MCP server | MCP server; Claude Code and Codex plugins |
+| License | MIT | AGPL-3.0 | Apache-2.0 | Apache-2.0 | Apache-2.0 |
 
-### Local HTTP
+**When to choose which**
 
-Clients that can't spawn a process, or that should share one server, can use
-MCP Streamable HTTP. It's a cargo feature, so default builds open no port:
+- **Kioku:** coding agents across many repositories that need the decisions
+  and gotchas the code can't show, kept local, one vault per company or client.
+- **basic-memory:** a knowledge base you read and write as Markdown files, in
+  your editor or Obsidian, next to the AI.
+- **Mem0:** memory about the users of your own AI application, extracted
+  automatically, with a managed platform.
+- **Graphiti or Zep:** facts that change over time and relationships between
+  entities, on a graph database you run (Graphiti) or a managed service (Zep).
+- **cognee:** turning documents and data into a knowledge graph to query.
 
-```sh
-cargo build --release --features http
-./target/release/kioku token kilo-qwen --scopes read,write --domains 'personal-*,kioku'
-# prints the token once, plus a [[principal]] entry with its SHA-256 for the access file
-./target/release/kioku serve --http 127.0.0.1:7373 --access-file ~/.config/kioku/access.toml
-```
+**When not to use Kioku**
 
-The server binds only to loopback addresses and requires a bearer token on
-every request, even from 127.0.0.1. It rejects foreign `Host` headers and any
-browser `Origin` that isn't allowed with `--allowed-origin`, which blocks DNS
-rebinding from web pages. Tokens resolve to a principal before any tool runs,
-and `tools/list` differs per principal. That token check is the only code that
-knows about credentials, so an OAuth provider can replace it later without
-changing tools.
+- You want everything captured from every conversation, unreviewed. Kioku
+  saves what a session settled, and automatic capture needs Claude Code.
+- Your questions are mostly multi-hop over entities, or about what was true
+  when. A graph store fits better.
+- You need a shared service for a team. Kioku serves each client over stdio, or
+  over HTTP on loopback only.
+- One project with a handful of rules. A `CLAUDE.md` or `AGENTS.md` is simpler.
 
-## Vaults and locks
+## Using Kioku well
 
-A vault holds everything about one company or one part of your life, such as
-`personal` and `work`. Its areas are domains. Vaults never see each
-other, in either direction. A lock limits which model providers may read an
-area or a note.
+**Recall** before work that depends on earlier decisions. **Work** with notes
+as evidence, and check the code when a value matters. **Save** once when the
+user confirms a decision or a test proves a fix. **Maintain** now and then.
+[docs/usage.md](docs/usage.md) has the details.
 
-Vaults are off until `~/.config/kioku/vaults.toml` exists (or the file named
-by `MEMORY_VAULTS_FILE`). Without that file, Kioku works exactly as before.
-When a client starts Kioku without `HOME`, `~` is the account's home folder;
-if even that is unknown, Kioku warns that it runs without vaults.
-
-```toml
-[[vault]]
-name = "personal"
-paths = ["~"]                         # folders that place a session here
-domains = ["personal", "personal/*", "kioku", "local"]
-providers = ["local", "anthropic"]    # who may read this vault
-default_domain = "personal"
-
-[[vault]]
-name = "work"
-paths = ["~/work"]
-git_remotes = ["github.com/acme-corp/*"]   # a match wins over paths
-domains = ["work", "work/*"]
-providers = ["local", "anthropic", "openai"]
-default_domain = "work"
-
-[[area]]
-domain = "personal/kioku"
-paths = ["~/projects/personal/mcp/kioku"]
-
-[[lock]]
-domains = ["personal/citizenship"]    # only local models may read these notes
-providers = ["local"]
-```
-
-**Editing the file.** A mistake in it stops Kioku for every new session, so
-`scripts/vaults.py` makes each change on a copy.
-- **What it checks.** The installed binary validates the copy, and the script
-  shows where each folder the change affects would place a session. It does
-  that by asking a Kioku server started there.
-- **What it writes.** It prints the diff, and only with `--apply` backs up the
-  old file to `backups/` beside it and replaces it.
-- **New sessions** see the change. Running ones must reconnect Kioku (in
-  Claude Code, `/mcp`).
+### Claude Code: hooks and skills
 
 ```sh
-scripts/vaults.py check                                   # is the file valid?
-scripts/vaults.py where ~/projects/personal/notes ~/work  # where would sessions land?
-scripts/vaults.py add-area personal/notes ~/projects/personal/notes --apply
-scripts/vaults.py sync-areas --apply                      # an area for each repo under ~/projects/personal that has none
-scripts/vaults.py add-vault work --path ~/work --domain work --domain 'work/*' --allow local --allow anthropic
-scripts/vaults.py add-lock --domain personal/citizenship --allow local
-scripts/vaults.py remove-area personal/notes --apply
+claude plugin marketplace add Jpgomesf/kioku-skills
+claude plugin install kioku-memory@kioku-skills
+claude plugin install kioku-hooks@kioku-skills
 ```
 
-- **Folders must exist** for `add-area` and `add-vault`, unless you pass
-  `--allow-missing`.
-- **Placement is checked as provider `anthropic`,** or as one the vault admits.
-- **Re-embedding:** after changing a vault's providers or a lock, run
-  `kioku repair --all`. That's needed only with a hosted embedding service
-  (`EMBEDDING_READER` other than `local`).
+Both plugins find this checkout through `KIOKU_HOME`: set it in your shell
+profile and under `env` in `~/.claude/settings.json`. The hooks:
 
-**Placement.** A session's folder is `KIOKU_SESSION_DIR`, or else the folder
-the client started Kioku in.
+| When | What happens |
+|---|---|
+| Session start | The session's vault and area, its newest notes, what background reviews saved, and the items waiting for your decision |
+| Each prompt | Notes for IDs the prompt names, and up to three notes it is about, each once per session |
+| Opening a file | The notes anchored to that file through `paths`, and knowledge-base notes about it |
+| After a commit, or every 8 prompts | Claude is asked to save what that stretch settled; a commit also updates the code map |
+| Compaction and session end | A background Sonnet reviews the transcript and saves what qualifies |
 
-- If that folder is in a git repository whose remote matches a vault's
-  `git_remotes`, that vault wins. Remotes are compared as `host/owner/repo` in
-  lowercase, `origin` first. Kioku reads `.git/config` itself; it needs no
-  network and no `git`. An SSH remote through a `Host` alias in
-  `~/.ssh/config` (`git@github-work:acme-corp/api.git`) also matches as its
-  `HostName` (`github.com/acme-corp/api`). Kioku doesn't follow `Include`
-  or `Match` there, nor git's `insteadOf` rewrites; for those, a host-agnostic
-  glob such as `*/acme-corp/*` matches the remote on any host.
-- Otherwise the vault with the longest matching `paths` entry wins.
-- Inside an area's folder, calls without a domain use that area. At the
-  vault's root they use `default_domain`, and `memory_search` without a domain
-  searches every domain of the vault at once. Each result then names its
-  domain.
-- The server's instructions name the session's vault, or its area, and tell
-  the agent to search without a domain, so it doesn't guess one from the
-  folder name. A project's `AGENTS.md` needs no domain line.
-- A session that no vault covers gets no memories. Every tool returns a
-  `refused` error that names its folder and the vaults file.
+The skills:
 
-**Providers.** Each client declares the provider of its model with
-`MEMORY_PROVIDER`: `local`, `anthropic`, `openai`, `moonshot`, `deepseek`,
-`google`, or `other`. A client without it gets no memories. Set it in the
-client's MCP config env, never in `.env`: values in `.env` override the
-client's, so every client would claim the same provider. Kioku logs a warning
-when `.env` sets `MEMORY_PROVIDER` or `KIOKU_SESSION_DIR`.
-[docs/clients.md](docs/clients.md#vaults-and-providers) shows each client.
+| Skill | Use it when | Example |
+|---|---|---|
+| `checkpoint` | Before you compact or end a session, or when you say "remember this" | `/kioku-memory:checkpoint the retry decision` |
+| `decide` | A design, data-model, tooling or convention choice comes up | `/kioku-memory:decide which amount refund retries charge` |
+| `memory-refresh` | A note turns out stale, or before you rely on notes older than a refactor | `/kioku-memory:memory-refresh work/payments` |
+| `project-sync` | A project's notes are behind its commits, PRs and threads, or it has none | `/kioku-memory:project-sync personal/notes dry-run` |
+| `reflect` | You want a health check, or an audit for contradictions that changes nothing | `/kioku-memory:reflect work/payments health` |
+| `dream` | An area's notes need splitting, merging, linking and one hub per topic | `/kioku-memory:dream personal/notes` |
 
-**What a session sees.** The domains of its vault, narrowed by
-`MEMORY_DOMAINS` if that is set, minus areas whose lock leaves out its
-provider. The vault must list the provider too. A note can also carry its own
-lock in frontmatter (`lock: local`, or `lock: [local, anthropic]`);
-`memory_save` keeps a note's lock but can't set one.
+What each skill saves at once and what waits for you:
+[docs/usage.md](docs/usage.md#which-skill-when).
 
-- A note a session may not see is missing everywhere: search, `memory_get`,
-  `memory_inspect`, `memory_list`, links, `memory_stats`, import reports, the
-  unresolved links and similar notes a save reports, and the older `rag_*`
-  tools. Hidden notes never shift
-  the ranking of visible ones; the vector index leaves them out of its
-  candidates.
-- Domain lists (a vault-wide search's `domains`, the hint when a domain has
-  no memories, `memory_stats`) name only domains that hold a note the session
-  may see. A vault-wide search also leaves out domains whose notes are all
-  retired, unless it sets `include_legacy`.
-- `memory_save` and `memory_import` may write only to visible domains.
-- `memory_import` reads only files whose frontmatter names their `domain`.
-  One notes folder serves every vault, so a file without one could belong to
-  any vault and is skipped rather than imported into the session's domain.
-- An import's report names only notes the session may see. Files of other
-  vaults or locked notes, and files whose vault can't be told (no `domain`,
-  unreadable, or unparseable), are counted in `failed_count` but not named,
-  and a `hint` says so.
-- `memory_stats` counts only what the session may see.
-- `memory_maintenance` is refused, because it ages every vault. Run
-  `kioku maintenance` instead.
-- The CLI is not restricted. It is your own shell.
+### Codex, other clients and local models
 
-Mistakes in the vaults file stop the server at startup. A domain that matches
-no vault is invisible. A domain that matches two vaults is a configuration
-error, reported when a session meets it. Locks apply only with a vaults file,
-because only then do clients declare a provider.
+- **Codex** installs `kioku-memory` from the same marketplace
+  (`codex plugin marketplace add Jpgomesf/kioku-skills`, then `/plugins`).
+  `checkpoint`, `decide` and `memory-refresh` work there; the other three
+  skills and the hooks need Claude Code.
+- **Other clients** get the memory policy from the server's instructions.
+  Without vaults, name each project's domain in its `AGENTS.md`:
+  `The Kioku memory domain for this project is my-project.`
+- **Small local models** rarely search on their own, so push memory to them:
+  the code map (`scripts/mcp.sh --tools core,code_map`) for each file they
+  read, and a context pack (`kioku context "<prompt>"`) for each prompt
+  ([docs/usage.md](docs/usage.md#small-local-models)).
 
-Over HTTP, each `[[principal]]` in the access file names its `provider` and
-`vault`; `kioku token NAME --provider anthropic --vault personal` writes both.
-In vault mode, a token without both gets nothing. HTTP sessions sit at their
-vault's root.
+### Tool habits
 
-`MEMORY_TRACE_FILE=/path/trace-{vault}.jsonl` gives each vault its own trace
-file, and every record names its vault. Sessions that were refused write to
-`trace-_unplaced.jsonl`. Without vaults, `{vault}` becomes `default`.
+- Follow `memory_search`'s `next` field: it names the `memory_get` call for
+  the best one or two results.
+- Pass `"count_use": false` when reading only to compare or audit, so unused
+  notes still age.
+- When a reply says `truncated`, raise `max_bytes` (default 2,000, up to
+  8,000) or ask for fewer keys.
+- A save replaces `aliases`: send `memory_get`'s list plus the new alias.
+- Anchor decisions to code with `paths` globs; `memory_list {"path": ...}`
+  lists a file's notes.
+- Audit with `memory_list` (filter by `origin`, `tag`, `status` or `path`) and
+  `memory_inspect`. Retire only with the user's go-ahead; `memory_restore`
+  reverses it.
 
-## Operations
+### Notes that are easy to find
+
+- One fact per note, under a stable kebab-case key, subject first.
+- A title that states the claim, aliases for every ID people search for, and
+  one kind tag such as `decision`, `convention` or `gotcha`.
+- A body of one to three sentences: the fact, why it holds, where it applies,
+  and for a decision, the options rejected.
+- One to three `related` links in the same domain. Never descriptions of code,
+  progress, transcripts or secrets.
+
+### Keeping memory healthy
+
+- `/kioku-memory:reflect <domain> health` monthly, with a retrieval dataset per
+  area to catch regressions.
+- The pending list holds what waits for your decision; session start shows it.
+- A weekly scheduled `dream` keeps areas tidy.
+- Nothing ages on its own. `kioku maintenance --dry-run` previews which stale,
+  unpinned notes would move to legacy, and `kioku pin` protects a note.
+
+## Reference
+
+| Tool | Profile | What it does |
+|---|---|---|
+| `memory_search` | core | Ranked previews (key, title, snippet, score) for a question |
+| `memory_get` | core | Full text of chosen notes by key, with aliases and links, within a byte budget |
+| `memory_save` | core | Create or update one note by key, optionally anchored to code `paths`; refuses credentials and file-backed notes |
+| `memory_inspect` | all | Aliases, provenance, lifecycle, usage, links, and recent history of one note |
+| `memory_list` | all | Page through a domain's notes, filtered by status, origin, tag, or anchored file |
+| `memory_feedback` | all | Record that a note proved right or wrong |
+| `memory_retire` / `memory_restore` | all | Move a note to legacy and back; nothing is deleted |
+| `memory_import` | all | Import Markdown notes from `MEMORY_NOTES_ROOT` |
+| `memory_maintenance` | all | Preview or apply aging |
+| `memory_stats` | all | Counts by status and domain, index health |
+| `code_map` | all | A source file's purpose, definitions and neighbours, for small local models |
+
+`core` is the default. `MEMORY_TOOLS=all` (or `scripts/mcp.sh --tools all`)
+adds the rest, and a list such as `core,memory_import` picks tools. Two MCP
+prompts, `recall` and `remember`, are shortcuts in clients that support them,
+and tools from earlier versions (`rag_search`, `rag_context`, `memory_upsert`,
+...) still work under their old names.
 
 ```sh
+./bin/kioku ingest --path examples/notes --domain demo   # try it with the example notes
+./bin/kioku search "Which service replaces the old indexing worker?" --domain demo
 ./bin/kioku doctor                 # check services and embeddings
 ./bin/kioku stats                  # counts and pending index work
 ./bin/kioku repair [--all]         # re-index missing (or all) vectors
-./bin/kioku maintenance --dry-run  # preview monthly aging
-./bin/kioku maintenance            # apply it: stale, unpinned notes move to legacy
-./bin/kioku pin KEY --domain D     # protect a memory from aging
+./bin/kioku maintenance --dry-run  # preview aging; without --dry-run, apply it
+./bin/kioku pin KEY --domain D     # protect a note from aging
 ./bin/kioku reindex --embedding-model qwen3-embedding:0.6b --embedding-dim 1024 --collection local_memory_v2
-./bin/kioku reindex --to-env-file hosted.env   # another service: its settings, including a new collection
 ```
 
-`reindex` embeds every memory into a new collection, switches the database to
-it, and prints the settings to put in `.env`; close MCP clients first. While
-it runs, the server repairs the index in the background and logs a warning
-naming the notes whose retention fell below `MEMORY_LEGACY_THRESHOLD`, but
-never retires them: only `kioku maintenance` or `memory_maintenance` with
-`dry_run: false` does.
+`reindex` embeds every note into a new collection, switches the database to
+it, and prints the settings to put in `.env`; close MCP clients first.
+`./bin/kioku --help` lists every command.
 
-## Development
+| Topic | Where |
+|---|---|
+| Using Kioku well: hooks, skills, tool habits, note writing, upkeep | [docs/usage.md](docs/usage.md) |
+| Connecting each client, tool profiles, local models | [docs/clients.md](docs/clients.md) |
+| Services, embeddings on the Apple GPU or a hosted service, every variable | [docs/configuration.md](docs/configuration.md) |
+| Vaults, areas, placement and provider locks | [docs/vaults.md](docs/vaults.md) |
+| Scopes, domain patterns and the local HTTP transport | [docs/access-control.md](docs/access-control.md) |
+| The note format and OKF bundles | [docs/notes.md](docs/notes.md) |
+| The code map | [docs/code-map.md](docs/code-map.md) |
+| Retrieval, storage choices and their evidence | [docs/design.md](docs/design.md) |
+| Evaluation method and results | [docs/evaluation.md](docs/evaluation.md) |
+
+## Limitations and status
+
+- **Version 0.2.** The tool contract is snapshot-tested and older tool names
+  keep working, but expect changes before 1.0.
+- **Platforms.** The prebuilt binary is for macOS on Apple Silicon only;
+  elsewhere `make install` compiles. CI tests on Linux; Windows is untested.
+- **Scale.** Every search loads the domain's notes for BM25. That is fine for
+  hundreds of notes; latency at 1k to 10k isn't measured yet.
+- **Note size.** A note must fit the embedding model's context window, about
+  6 KB of English text for `nomic-embed-text`. OKF imports split long concepts.
+- **Client reach.** The hooks and three of the six skills need Claude Code. The
+  viewer is an unreleased 0.1, built from source.
+
+## FAQ
+
+**What leaves my machine?** With the default local embedder, nothing that
+Kioku sends: the services listen on 127.0.0.1 and the server runs no language
+model. A hosted embedder receives the notes its provider may read
+([docs/configuration.md](docs/configuration.md#hosted-embeddings)). Your
+agent's model provider sees the notes the agent reads, and vaults and locks
+decide which providers may. The kioku-hooks review runs `claude -p`, so it
+reads transcripts with the same provider as your Claude Code session.
+
+**Can I change the embedding model?** Yes. Compare one on the bundled set, or
+your own, with `kioku eval --embedding-model <name> --embedding-dim <size>`,
+then move with `kioku reindex`, which keeps the old collection for rollback.
+
+**How do I back it up?** Back up PostgreSQL, which holds the notes, links,
+history and feedback, together with any Markdown notes. The Qdrant index is
+derived; `kioku repair --all` rebuilds it.
+
+**Which clients work?** Any MCP client that starts a stdio server;
+[docs/clients.md](docs/clients.md) covers Claude Code, Codex, Kilo, Gemini CLI,
+Qwen Code and Cursor. Others can use [local HTTP](docs/access-control.md#local-http).
+
+## Contributing
 
 ```sh
 make check   # fmt, clippy with warnings denied, unit and contract tests
@@ -638,9 +384,8 @@ The model-facing contract (tool names, schemas, descriptions, annotations,
 instructions) is snapshot-tested in `tests/snapshots/`; changing it is a
 deliberate `KIOKU_BLESS=1 cargo test`. CI runs formatting, clippy and tests
 with and without the HTTP feature, the minimum Rust version, cargo-deny, and
-the stdio and HTTP smoke tests against real PostgreSQL and Qdrant; a weekly
-workflow runs the retrieval eval with a real embedding model and fails on
-hub-note exposure or superseded-note leaks.
+the smoke tests against real PostgreSQL and Qdrant. The viewer has its own
+checks: `make viewer-check`.
 
 ## Security
 
