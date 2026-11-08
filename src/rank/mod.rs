@@ -37,7 +37,7 @@ pub const DENSE_FLOOR: f64 = 0.2;
 
 /// Restart probability for graph expansion. A high restart keeps probability
 /// mass close to the seeds, as in HippoRAG 2, so hubs cannot dominate.
-const EXPANSION_RESTART: f64 = 0.5;
+pub const EXPANSION_RESTART: f64 = 0.5;
 
 /// Number of top-ranked notes whose links seed graph expansion.
 const EXPANSION_SEEDS: usize = 3;
@@ -112,56 +112,150 @@ pub struct RankInput<'a> {
     pub half_life_days: f64,
 }
 
+/// The retrieval signals of one query over the ranked notes.
+pub struct Signals<'a> {
+    /// Cosine similarity per note from the vector index, already checked for
+    /// freshness by the caller.
+    pub dense: &'a HashMap<Uuid, f64>,
+    /// BM25 score of each ranked note that shares a term with the query, in
+    /// any order. Empty when lexical matching is off.
+    pub lexical: Vec<(Uuid, f64)>,
+    /// Ranked notes whose key, title, or alias equals the query, sorted.
+    pub exact: Vec<Uuid>,
+}
+
+/// What ranking needs to know about the notes it ranks: those the caller may
+/// see, in the searched lifecycle status.
+pub trait Candidates {
+    /// Whether `id` is one of the ranked notes.
+    fn contains(&self, id: Uuid) -> bool;
+    /// Whether `id` has no vector by design, because the embedding service
+    /// may not read it.
+    fn unembedded(&self, id: Uuid) -> bool;
+    /// `id`'s lifecycle retention in [0, 1].
+    fn retention(&self, id: Uuid) -> f64;
+    /// `id`'s links among the ranked notes, as [`graph::link_weights`] builds
+    /// them, or `None` if they aren't loaded.
+    fn links(&self, id: Uuid) -> Option<Vec<(Uuid, f64)>>;
+}
+
 /// Rank notes for a query. Returns at most `input.limit` results.
 pub fn rank(input: &RankInput<'_>, options: RankOptions) -> Vec<Ranked> {
     if input.limit == 0 || input.notes.is_empty() {
         return Vec::new();
     }
-    let by_id: HashMap<Uuid, &Note> = input.notes.iter().map(|n| (n.id, n)).collect();
-
-    let dense: Vec<(Uuid, f64)> = sorted_desc(
-        input
-            .dense
-            .iter()
-            .filter(|(id, score)| {
-                by_id.contains_key(id) && score.is_finite() && **score >= DENSE_FLOOR
-            })
-            .map(|(id, score)| (*id, *score)),
-    );
-    let lexical: Vec<(Uuid, f64)> = if options.lexical {
-        sorted_desc(Bm25::new(input.notes).scores(input.query))
-    } else {
-        Vec::new()
+    let notes = NoteSet::new(input);
+    let signals = Signals {
+        dense: input.dense,
+        lexical: if options.lexical {
+            Bm25::new(input.notes).scores(input.query)
+        } else {
+            Vec::new()
+        },
+        exact: exact_matches(input.notes, input.query),
     };
-    let signals = 1 + usize::from(options.lexical);
-    let mut fused: HashMap<Uuid, f64> = HashMap::new();
-    for list in [&dense, &lexical] {
-        for (rank, (id, _)) in list.iter().enumerate() {
-            *fused.entry(*id).or_default() += rrf(rank);
+    rank_with(&signals, &notes, input.limit, options)
+}
+
+/// Rank from signals the caller computed. Graph expansion walks
+/// `notes.links`, which must know the links of every note it reaches.
+pub fn rank_with(
+    signals: &Signals<'_>,
+    notes: &impl Candidates,
+    limit: usize,
+    options: RankOptions,
+) -> Vec<Ranked> {
+    let direct = Direct::new(signals, notes, options);
+    if !options.graph || graph_slots(limit) == 0 || direct.is_empty() {
+        return direct.truncate(limit);
+    }
+    let mut walk = graph::LocalPagerank::new(&direct.seeds(), EXPANSION_RESTART);
+    let missing = walk.run(|id| notes.links(id));
+    debug_assert!(missing.is_empty(), "every reached note's links are known");
+    direct.expand(&walk.into_masses(), notes, limit)
+}
+
+/// The direct matches of a query in rank order, before graph expansion:
+/// exact label matches first, then fused relevance with the retention prior.
+pub struct Direct {
+    ordered: Vec<Ranked>,
+    fused: HashMap<Uuid, f64>,
+    dense: HashMap<Uuid, f64>,
+    lexical: HashMap<Uuid, f64>,
+    best_possible: f64,
+}
+
+impl Direct {
+    pub fn new(signals: &Signals<'_>, notes: &impl Candidates, options: RankOptions) -> Self {
+        let dense: Vec<(Uuid, f64)> = sorted_desc(
+            signals
+                .dense
+                .iter()
+                .filter(|(id, score)| {
+                    notes.contains(**id) && score.is_finite() && **score >= DENSE_FLOOR
+                })
+                .map(|(id, score)| (*id, *score)),
+        );
+        let lexical: Vec<(Uuid, f64)> = if options.lexical {
+            sorted_desc(signals.lexical.iter().copied())
+        } else {
+            Vec::new()
+        };
+        let signal_count = 1 + usize::from(options.lexical);
+        let mut fused: HashMap<Uuid, f64> = HashMap::new();
+        for list in [&dense, &lexical] {
+            for (rank, (id, _)) in list.iter().enumerate() {
+                *fused.entry(*id).or_default() += rrf(rank);
+            }
         }
-    }
-    // A note without a vector by design can't have a dense rank. Its lexical
-    // rank stands in for it, so it competes on the signals that can rank it
-    // instead of losing to every note that has both.
-    for (rank, (id, _)) in lexical.iter().enumerate() {
-        if input.unembedded.contains(id) {
-            *fused.entry(*id).or_default() += rrf(rank);
+        // A note without a vector by design can't have a dense rank. Its lexical
+        // rank stands in for it, so it competes on the signals that can rank it
+        // instead of losing to every note that has both.
+        for (rank, (id, _)) in lexical.iter().enumerate() {
+            if notes.unembedded(*id) {
+                *fused.entry(*id).or_default() += rrf(rank);
+            }
         }
-    }
-    let exact = exact_matches(input.notes, input.query);
-    for id in &exact {
-        fused.entry(*id).or_default();
-    }
-    if fused.is_empty() {
-        return Vec::new();
+        for id in &signals.exact {
+            fused.entry(*id).or_default();
+        }
+        let mut direct = Self {
+            ordered: Vec::new(),
+            fused,
+            dense: dense.into_iter().collect(),
+            lexical: lexical.into_iter().collect(),
+            best_possible: signal_count as f64 * rrf(0),
+        };
+        if direct.fused.is_empty() {
+            return direct;
+        }
+        let mut ordered: Vec<Ranked> = signals
+            .exact
+            .iter()
+            .map(|id| direct.make(*id, MatchKind::Exact, None, notes))
+            .collect();
+        let mut rest: Vec<Ranked> = direct
+            .fused
+            .keys()
+            .filter(|id| !signals.exact.contains(id))
+            .map(|id| direct.make(*id, MatchKind::Search, None, notes))
+            .collect();
+        rest.sort_by(|a, b| b.score.total_cmp(&a.score).then_with(|| a.id.cmp(&b.id)));
+        ordered.extend(rest);
+        direct.ordered = ordered;
+        direct
     }
 
-    let dense_by_id: HashMap<Uuid, f64> = dense.iter().copied().collect();
-    let lexical_by_id: HashMap<Uuid, f64> = lexical.iter().copied().collect();
-    let best_possible = signals as f64 * rrf(0);
-    let make = |id: Uuid, kind: MatchKind, linked_from: Option<Uuid>| {
-        let retention = lifecycle::retention(by_id[&id], input.now, input.half_life_days);
-        let relevance = (fused.get(&id).copied().unwrap_or(0.0) / best_possible).clamp(0.0, 1.0);
+    fn make(
+        &self,
+        id: Uuid,
+        kind: MatchKind,
+        linked_from: Option<Uuid>,
+        notes: &impl Candidates,
+    ) -> Ranked {
+        let retention = notes.retention(id);
+        let relevance =
+            (self.fused.get(&id).copied().unwrap_or(0.0) / self.best_possible).clamp(0.0, 1.0);
         let score = if kind == MatchKind::Exact {
             1.0
         } else {
@@ -172,63 +266,143 @@ pub fn rank(input: &RankInput<'_>, options: RankOptions) -> Vec<Ranked> {
             score,
             kind,
             linked_from,
-            dense: dense_by_id.get(&id).copied(),
-            lexical: lexical_by_id.get(&id).copied(),
+            dense: self.dense.get(&id).copied(),
+            lexical: self.lexical.get(&id).copied(),
             retention,
         }
-    };
-
-    // Exact matches first, then fused relevance with the retention prior.
-    let mut ordered: Vec<Ranked> = exact
-        .iter()
-        .map(|id| make(*id, MatchKind::Exact, None))
-        .collect();
-    let mut rest: Vec<Ranked> = fused
-        .keys()
-        .filter(|id| !exact.contains(id))
-        .map(|id| make(*id, MatchKind::Search, None))
-        .collect();
-    rest.sort_by(|a, b| b.score.total_cmp(&a.score).then_with(|| a.id.cmp(&b.id)));
-    ordered.extend(rest);
-
-    let slots = graph_slots(input.limit);
-    if !options.graph || slots == 0 {
-        ordered.truncate(input.limit);
-        return ordered;
     }
 
-    // Keep the direct head intact and fill the reserved slots with linked notes.
-    let head_len = input.limit - slots;
-    let seeds: Vec<Uuid> = ordered.iter().take(EXPANSION_SEEDS).map(|r| r.id).collect();
-    let weights: HashMap<Uuid, f64> = seeds
-        .iter()
-        .map(|id| {
-            (
-                *id,
-                fused.get(id).copied().unwrap_or(0.0).max(f64::MIN_POSITIVE),
-            )
-        })
-        .collect();
-    let ppr = graph::personalized_pagerank(input.notes, input.edges, &weights, EXPANSION_RESTART);
-    let head: HashSet<Uuid> = ordered.iter().take(head_len).map(|r| r.id).collect();
-    let mut linked: Vec<(Uuid, f64)> = sorted_desc(
-        ppr.into_iter()
-            .filter(|(id, mass)| *mass > 1e-12 && !head.contains(id) && !seeds.contains(id)),
-    );
-    linked.truncate(slots);
-    let adjacency = adjacency(input.edges);
-    let mut results: Vec<Ranked> = ordered.iter().take(head_len).cloned().collect();
-    for (id, _) in &linked {
-        let from = seeds
+    pub fn is_empty(&self) -> bool {
+        self.ordered.is_empty()
+    }
+
+    /// The top matches whose links seed graph expansion, weighted by their
+    /// fused relevance.
+    pub fn seeds(&self) -> HashMap<Uuid, f64> {
+        self.ordered
             .iter()
-            .find(|seed| adjacency.get(seed).is_some_and(|n| n.contains(id)))
-            .copied();
-        results.push(make(*id, MatchKind::Link, from));
+            .take(EXPANSION_SEEDS)
+            .map(|r| {
+                let weight = self.fused.get(&r.id).copied().unwrap_or(0.0);
+                (r.id, weight.max(f64::MIN_POSITIVE))
+            })
+            .collect()
     }
-    let taken: HashSet<Uuid> = results.iter().map(|r| r.id).collect();
-    results.extend(ordered.into_iter().filter(|r| !taken.contains(&r.id)));
-    results.truncate(input.limit);
-    results
+
+    /// The first `limit` direct matches.
+    pub fn truncate(mut self, limit: usize) -> Vec<Ranked> {
+        self.ordered.truncate(limit);
+        self.ordered
+    }
+
+    /// Keep the direct head intact and fill the reserved trailing slots with
+    /// the linked notes of highest PageRank `masses`.
+    pub fn expand(
+        self,
+        masses: &HashMap<Uuid, f64>,
+        notes: &impl Candidates,
+        limit: usize,
+    ) -> Vec<Ranked> {
+        let slots = graph_slots(limit);
+        let head_len = limit - slots;
+        let seeds: Vec<Uuid> = self
+            .ordered
+            .iter()
+            .take(EXPANSION_SEEDS)
+            .map(|r| r.id)
+            .collect();
+        let head: HashSet<Uuid> = self.ordered.iter().take(head_len).map(|r| r.id).collect();
+        let mut linked: Vec<(Uuid, f64)> = sorted_desc(
+            masses
+                .iter()
+                .map(|(id, mass)| (*id, *mass))
+                .filter(|(id, mass)| {
+                    *mass > 1e-12
+                        && !head.contains(id)
+                        && !seeds.contains(id)
+                        && notes.contains(*id)
+                }),
+        );
+        linked.truncate(slots);
+        let seed_links: Vec<(Uuid, Vec<(Uuid, f64)>)> = seeds
+            .iter()
+            .map(|seed| (*seed, notes.links(*seed).unwrap_or_default()))
+            .collect();
+        let mut results: Vec<Ranked> = self.ordered.iter().take(head_len).cloned().collect();
+        for (id, _) in &linked {
+            let from = seed_links
+                .iter()
+                .find(|(_, links)| links.iter().any(|(other, _)| other == id))
+                .map(|(seed, _)| *seed);
+            results.push(self.make(*id, MatchKind::Link, from, notes));
+        }
+        let taken: HashSet<Uuid> = results.iter().map(|r| r.id).collect();
+        results.extend(self.ordered.into_iter().filter(|r| !taken.contains(&r.id)));
+        results.truncate(limit);
+        results
+    }
+}
+
+/// [`Candidates`] over a list of notes and their links.
+struct NoteSet<'a> {
+    by_id: HashMap<Uuid, &'a Note>,
+    links: HashMap<Uuid, Vec<(Uuid, f64)>>,
+    unembedded: &'a HashSet<Uuid>,
+    now: DateTime<Utc>,
+    half_life_days: f64,
+}
+
+impl<'a> NoteSet<'a> {
+    fn new(input: &RankInput<'a>) -> Self {
+        let by_id: HashMap<Uuid, &Note> = input.notes.iter().map(|n| (n.id, n)).collect();
+        let mut raw: HashMap<Uuid, Vec<(Uuid, f64)>> = HashMap::new();
+        for edge in input.edges {
+            let (Some(source), Some(target)) = (by_id.get(&edge.source), by_id.get(&edge.target))
+            else {
+                continue;
+            };
+            if source.input.domain != target.input.domain {
+                continue;
+            }
+            raw.entry(edge.source)
+                .or_default()
+                .push((edge.target, edge.weight));
+            raw.entry(edge.target)
+                .or_default()
+                .push((edge.source, edge.weight));
+        }
+        let links = raw
+            .into_iter()
+            .map(|(id, links)| (id, graph::link_weights(links, id)))
+            .collect();
+        Self {
+            by_id,
+            links,
+            unembedded: input.unembedded,
+            now: input.now,
+            half_life_days: input.half_life_days,
+        }
+    }
+}
+
+impl Candidates for NoteSet<'_> {
+    fn contains(&self, id: Uuid) -> bool {
+        self.by_id.contains_key(&id)
+    }
+
+    fn unembedded(&self, id: Uuid) -> bool {
+        self.unembedded.contains(&id)
+    }
+
+    fn retention(&self, id: Uuid) -> f64 {
+        self.by_id.get(&id).map_or(0.0, |note| {
+            lifecycle::retention(note, self.now, self.half_life_days)
+        })
+    }
+
+    fn links(&self, id: Uuid) -> Option<Vec<(Uuid, f64)>> {
+        Some(self.links.get(&id).cloned().unwrap_or_default())
+    }
 }
 
 /// One reserved graph slot for small result lists, more for larger ones.
@@ -244,15 +418,6 @@ fn sorted_desc(items: impl IntoIterator<Item = (Uuid, f64)>) -> Vec<(Uuid, f64)>
     let mut items: Vec<_> = items.into_iter().collect();
     items.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     items
-}
-
-fn adjacency(edges: &[Edge]) -> HashMap<Uuid, HashSet<Uuid>> {
-    let mut map: HashMap<Uuid, HashSet<Uuid>> = HashMap::new();
-    for edge in edges {
-        map.entry(edge.source).or_default().insert(edge.target);
-        map.entry(edge.target).or_default().insert(edge.source);
-    }
-    map
 }
 
 /// Notes whose key, title, or alias equals the query after case and accent folding.
