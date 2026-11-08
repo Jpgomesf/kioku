@@ -302,7 +302,9 @@ impl App {
                 self.vector.upsert(&note, vector).await
             } else {
                 // No vector: search finds it by keyword, label, and link.
-                self.vector.delete(&[note.id]).await
+                self.vector
+                    .upsert_unembedded(std::slice::from_ref(&note))
+                    .await
             };
             match written {
                 Ok(()) => self.store.mark_synced(note.id, note.revision).await?,
@@ -413,7 +415,11 @@ impl App {
         let indexed = match vector {
             Some(vector) => self.vector.upsert(&updated, vector).await,
             None if embeds => self.vector.set_status(id, updated.status).await,
-            None => self.vector.delete(&[id]).await,
+            None => {
+                self.vector
+                    .upsert_unembedded(std::slice::from_ref(&updated))
+                    .await
+            }
         };
         indexed.context(
             "the status changed in PostgreSQL, but the vector index could not be updated; it will be repaired automatically",

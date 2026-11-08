@@ -10,6 +10,7 @@ mod cache;
 mod codemap;
 mod context;
 mod excerpt;
+mod hybrid;
 mod import;
 mod search;
 mod upkeep;
@@ -22,7 +23,7 @@ pub use codemap::{
 pub use context::{ContextMemory, ContextPack, ContextRequest, SkippedMemory};
 pub use import::{ImportFailure, ImportFormat, ImportReport, ImportedNote, OkfImport};
 pub use search::{SearchHit, SearchRequest, SearchResults, SearchStats, Signals};
-pub use upkeep::{ReindexReport, RepairFailure, RepairReport};
+pub use upkeep::{PayloadReport, ReindexReport, RepairFailure, RepairReport};
 pub use write::{UpsertOutcome, WriteOrigin};
 
 use std::path::Path;

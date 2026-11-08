@@ -20,6 +20,18 @@ pub enum EmbeddingProvider {
     OpenAi,
 }
 
+/// Where keyword search scores BM25.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Lexical {
+    /// In each server process, over its index of every domain it searches.
+    Local,
+    /// In Qdrant, over each point's `lexical` payload, in the same batch
+    /// request as the vector search. Existing points need
+    /// `kioku repair --payloads` once.
+    Qdrant,
+}
+
 /// Text added in front of queries and documents before embedding. Asymmetric
 /// models are trained with these and lose accuracy without them.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -98,6 +110,8 @@ pub struct Config {
     /// (`MEMORY_SIMILAR_NOTE_SCORE`). The default suits nomic-embed-text;
     /// models whose similarities run lower need a lower value.
     pub similar_note_score: f64,
+    /// Where keyword search scores BM25 (`MEMORY_LEXICAL`).
+    pub lexical: Lexical,
     pub default_domain: String,
     pub notes_root: Option<PathBuf>,
     /// Repair the index and log aging candidates in the background while
@@ -266,6 +280,11 @@ impl Config {
             similar_note_score: value("MEMORY_SIMILAR_NOTE_SCORE", "0.9")
                 .parse()
                 .context("MEMORY_SIMILAR_NOTE_SCORE must be a number")?,
+            lexical: match value("MEMORY_LEXICAL", "local").as_str() {
+                "local" => Lexical::Local,
+                "qdrant" => Lexical::Qdrant,
+                other => bail!("MEMORY_LEXICAL must be local or qdrant, got {other:?}"),
+            },
             default_domain: value("MEMORY_DEFAULT_DOMAIN", "local"),
             notes_root: optional("MEMORY_NOTES_ROOT").map(PathBuf::from),
             background_upkeep: value("MEMORY_BACKGROUND_UPKEEP", "true") != "false",
@@ -507,6 +526,13 @@ mod tests {
         assert!(config(&[("MEMORY_NOTES_ROOT", "notes")]).is_err());
         assert!(config(&[("MEMORY_HALF_LIFE_DAYS", "0")]).is_err());
         assert!(config(&[("MEMORY_LEGACY_THRESHOLD", "1")]).is_err());
+        assert_eq!(config(&[]).unwrap().lexical, Lexical::Local);
+        assert_eq!(
+            config(&[("MEMORY_LEXICAL", "qdrant")]).unwrap().lexical,
+            Lexical::Qdrant
+        );
+        let error = config(&[("MEMORY_LEXICAL", "tantivy")]).err().unwrap();
+        assert!(error.to_string().contains("MEMORY_LEXICAL"), "{error}");
     }
 
     #[test]

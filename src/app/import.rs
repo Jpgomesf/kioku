@@ -430,11 +430,11 @@ impl App {
             };
             batch.push((note.clone(), vector));
         }
-        let unsent_ids: Vec<Uuid> = unsent.iter().map(|note| note.id).collect();
+        let unsent_points: Vec<Note> = unsent.iter().map(|note| (*note).clone()).collect();
         self.vector.upsert_many(&batch).await.context(
             "the notes are saved, but the vector index could not be updated; it will be repaired automatically",
         )?;
-        self.vector.delete(&unsent_ids).await.context(
+        self.vector.upsert_unembedded(&unsent_points).await.context(
             "the notes are saved, but the vector index could not be updated; it will be repaired automatically",
         )?;
         for note in batch

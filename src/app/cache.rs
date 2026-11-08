@@ -177,6 +177,7 @@ mod tests {
                 ranking: RankOptions::HYBRID_GRAPH,
                 edges: None,
                 viewer,
+                lexical: None,
             })
             .await?;
         Ok((results.hits, results.stats.refreshed))

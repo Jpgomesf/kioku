@@ -24,7 +24,7 @@ test: ## Unit tests (no services needed), with and without the HTTP transport
 	$(CARGO) test --locked
 	$(CARGO) test --locked --features http
 
-test-db: ## PostgreSQL integration tests; MEMORY_TEST_DATABASE_URL must allow CREATE DATABASE
+test-db: ## PostgreSQL integration tests; MEMORY_TEST_DATABASE_URL must allow CREATE DATABASE, and MEMORY_TEST_QDRANT_URL adds the Qdrant ones
 	$(CARGO) test --locked -- --ignored
 
 smoke: ## End-to-end MCP checks over stdio and HTTP; SMOKE_ENV must name test storage

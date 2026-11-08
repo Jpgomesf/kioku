@@ -7,6 +7,7 @@ use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
 
 use crate::app::{App, ContextRequest, SearchHit, SearchRequest};
+use crate::config::Lexical;
 use crate::model::{Edge, NoteInput};
 use crate::rank::{MatchKind, RankOptions};
 
@@ -15,8 +16,8 @@ use super::graph::{
 };
 use super::metrics::Interval;
 use super::{
-    DEFAULT_VARIANT, Dataset, Query, QueryResult, Summary, VARIANTS, hit_at_1, ndcg_at_k,
-    recall_at_k, reciprocal_rank,
+    DEFAULT_VARIANT, Dataset, QDRANT_VARIANT, Query, QueryResult, Summary, VARIANTS, hit_at_1,
+    ndcg_at_k, recall_at_k, reciprocal_rank,
 };
 
 /// Seeds for each ablation; results are averaged per query across them.
@@ -124,8 +125,8 @@ pub async fn prepare(app: &App, dataset: &Dataset) -> Result<()> {
 pub async fn run(app: &App, dataset: &Dataset, options: &EvalOptions) -> Result<Report> {
     ensure!((1..=20).contains(&options.k), "k must be between 1 and 20");
     let mut variants = Vec::new();
-    for (name, ranking) in VARIANTS {
-        let results = run_queries(app, dataset, options, ranking, None).await?;
+    for (name, ranking, lexical) in VARIANTS {
+        let results = run_queries(app, dataset, options, ranking, None, lexical).await?;
         variants.push(variant_report(name, results));
     }
 
@@ -133,6 +134,7 @@ pub async fn run(app: &App, dataset: &Dataset, options: &EvalOptions) -> Result<
         ("hybrid", "vector"),
         (DEFAULT_VARIANT, "vector"),
         (DEFAULT_VARIANT, "hybrid"),
+        (QDRANT_VARIANT, DEFAULT_VARIANT),
     ]
     .iter()
     .filter_map(|(variant, baseline)| {
@@ -167,6 +169,7 @@ async fn run_queries(
     options: &EvalOptions,
     ranking: RankOptions,
     edges: Option<&[Edge]>,
+    lexical: Option<Lexical>,
 ) -> Result<Vec<QueryResult>> {
     let mut results = Vec::new();
     for query in &dataset.queries {
@@ -181,6 +184,7 @@ async fn run_queries(
                 ranking,
                 edges,
                 viewer: None,
+                lexical,
             })
             .await
             .with_context(|| format!("query {} failed", query.id))?
@@ -325,6 +329,7 @@ async fn graph_report(
                     options,
                     RankOptions::HYBRID_GRAPH,
                     Some(&altered),
+                    None,
                 )
                 .await?,
             );

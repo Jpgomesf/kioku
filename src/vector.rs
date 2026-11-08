@@ -1,5 +1,8 @@
-//! Rebuildable Qdrant index. Never treat its payload as authoritative note text.
+//! Rebuildable Qdrant index. Never treat its payload as authoritative note text:
+//! it holds the note's BM25 terms for keyword search in Qdrant, but PostgreSQL
+//! decides what a search returns.
 use crate::model::{Note, Status, VectorHit};
+use crate::rank;
 use anyhow::{Context, Result, ensure};
 use reqwest::{Client, RequestBuilder, StatusCode};
 use serde_json::{Value, json};
@@ -113,12 +116,23 @@ impl Qdrant {
                 && vectors["distance"].as_str() == Some("Cosine"),
             "Existing Qdrant collection has incompatible dimensions/distance; use a new collection when changing embedding models"
         );
-        for field in ["domain", "status"] {
+        // Keyword search in Qdrant (`MEMORY_LEXICAL=qdrant`) scores BM25 over
+        // `lexical`, which holds Kioku's own tokens: splitting on whitespace
+        // alone keeps them as they are.
+        let lexical =
+            json!({"type": "text", "tokenizer": "whitespace", "lowercase": true, "scoring": true});
+        for (field, schema) in [
+            ("domain", json!("keyword")),
+            ("status", json!("keyword")),
+            ("lock", json!("keyword")),
+            ("labels", json!("keyword")),
+            ("lexical", lexical),
+        ] {
             self.request(
                 reqwest::Method::PUT,
                 &format!("{}/index?wait=true", self.collection_path()),
             )
-            .json(&json!({"field_name":field,"field_schema":"keyword"}))
+            .json(&json!({"field_name": field, "field_schema": schema}))
             .send()
             .await?
             .error_for_status()
@@ -184,26 +198,80 @@ impl Qdrant {
         self.upsert_many(&[(note.clone(), vector)]).await
     }
 
-    /// Write points in batches. Payloads carry only what search filters on.
+    /// Write points in batches.
     pub async fn upsert_many(&self, points: &[(Note, Vec<f32>)]) -> Result<()> {
         for batch in points.chunks(64) {
             let mut body = Vec::with_capacity(batch.len());
             for (note, vector) in batch {
                 self.validate_vector(vector)?;
-                body.push(json!({"id": note.id, "vector": vector, "payload": {
-                    "domain": note.input.domain, "status": note.status.as_str(), "revision": note.revision
-                }}));
+                body.push(json!({"id": note.id, "vector": vector, "payload": payload(note)}));
             }
+            self.put_points(body).await?;
+        }
+        Ok(())
+    }
+
+    /// Write points without a vector for notes the embedding service may not
+    /// read, so keyword search in Qdrant still finds them. Any vector such a
+    /// point had is removed.
+    pub async fn upsert_unembedded(&self, notes: &[Note]) -> Result<()> {
+        for batch in notes.chunks(64) {
+            let body = batch
+                .iter()
+                .map(|note| json!({"id": note.id, "vector": {}, "payload": payload(note)}))
+                .collect();
+            self.put_points(body).await?;
+        }
+        Ok(())
+    }
+
+    async fn put_points(&self, body: Vec<Value>) -> Result<()> {
+        self.request(
+            reqwest::Method::PUT,
+            &format!("{}/points?wait=true", self.collection_path()),
+        )
+        .json(&json!({"points": body}))
+        .send()
+        .await
+        .context("cannot reach Qdrant")?
+        .error_for_status()
+        .context("cannot update Qdrant vectors; the notes remain saved in PostgreSQL")?;
+        Ok(())
+    }
+
+    /// Remove payload `keys` from every point, as points written by an older
+    /// version lack them.
+    #[cfg(test)]
+    pub(crate) async fn delete_payload_keys(&self, keys: &[&str]) -> Result<()> {
+        self.request(
+            reqwest::Method::POST,
+            &format!("{}/points/payload/delete?wait=true", self.collection_path()),
+        )
+        .json(&json!({"keys": keys, "filter": {"must": []}}))
+        .send()
+        .await?
+        .error_for_status()?;
+        Ok(())
+    }
+
+    /// Rewrite the payloads of existing points without touching their
+    /// vectors, as for points written before payloads carried keyword fields.
+    pub async fn set_payloads(&self, notes: &[Note]) -> Result<()> {
+        for batch in notes.chunks(64) {
+            let operations: Vec<Value> = batch
+                .iter()
+                .map(|note| json!({"set_payload": {"payload": payload(note), "points": [note.id]}}))
+                .collect();
             self.request(
-                reqwest::Method::PUT,
-                &format!("{}/points?wait=true", self.collection_path()),
+                reqwest::Method::POST,
+                &format!("{}/points/batch?wait=true", self.collection_path()),
             )
-            .json(&json!({"points": body}))
+            .json(&json!({"operations": operations}))
             .send()
             .await
             .context("cannot reach Qdrant")?
             .error_for_status()
-            .context("cannot update Qdrant vectors; the notes remain saved in PostgreSQL")?;
+            .context("cannot update Qdrant payloads")?;
         }
         Ok(())
     }
@@ -248,28 +316,11 @@ impl Qdrant {
         let value: Value = self.request(reqwest::Method::POST, &format!("{}/points/query", self.collection_path()))
             .json(&json!({"query":vector,"filter":filter,"limit":limit,"with_payload":true,"with_vector":false}))
             .send().await?.error_for_status().context("Qdrant search failed")?.json().await?;
-        let points = value["result"]["points"]
-            .as_array()
-            .context("Qdrant returned an invalid search response")?;
-        points
-            .iter()
-            .map(|point| {
-                let id = Uuid::parse_str(point["id"].as_str().context("Invalid Qdrant point ID")?)?;
-                let score = point["score"].as_f64().context("Invalid Qdrant score")?;
-                let revision = point["payload"]["revision"]
-                    .as_i64()
-                    .context("Missing Qdrant content revision; rebuild this index")?;
-                ensure!(
-                    score.is_finite() && revision >= 1,
-                    "Invalid Qdrant score or revision"
-                );
-                Ok(VectorHit {
-                    id,
-                    score,
-                    revision,
-                })
-            })
-            .collect()
+        parse_points(
+            value["result"]["points"]
+                .as_array()
+                .context("Qdrant returned an invalid search response")?,
+        )
     }
 
     pub async fn set_status(&self, id: Uuid, status: Status) -> Result<()> {
@@ -293,6 +344,165 @@ impl Qdrant {
             .context("Qdrant is not ready")?;
         Ok(())
     }
+}
+
+/// A point's payload: what search filters on, and for keyword search in
+/// Qdrant the note's BM25 terms and exact labels, as Kioku's own tokenizer
+/// produces them. Derived data like the vector: PostgreSQL stays the truth.
+fn payload(note: &Note) -> Value {
+    let input = &note.input;
+    json!({
+        "domain": input.domain,
+        "status": note.status.as_str(),
+        "revision": note.revision,
+        "lock": input.lock,
+        "labels": rank::exact_labels(&input.key, &input.title, &input.aliases),
+        "lexical": rank::lexical_text(&input.key, &input.title, &input.aliases, &input.tags, &input.body),
+    })
+}
+
+/// Which points a keyword-and-vector search may return, and over which its
+/// BM25 statistics run.
+pub struct Scope<'a> {
+    /// The searched domains; never empty.
+    pub domains: &'a [&'a str],
+    pub include_legacy: bool,
+    /// Points never returned or counted: hidden or not yet indexed.
+    pub exclude: &'a [Uuid],
+    /// With vault rules, the caller's provider: notes whose lock leaves it
+    /// out are skipped. `None` sees every lock.
+    pub provider: Option<&'a str>,
+}
+
+/// One query for [`Qdrant::hybrid`].
+pub struct HybridQuery<'a> {
+    pub vector: Option<Vec<f32>>,
+    /// The query's BM25 terms, as Kioku tokenizes them.
+    pub terms: &'a [String],
+    /// The query as exact matches compare labels, if it has any text.
+    pub label: Option<&'a str>,
+    pub dense_limit: usize,
+    pub lexical_limit: usize,
+}
+
+/// Candidates from each signal of [`Qdrant::hybrid`], best first.
+#[derive(Debug, Default)]
+pub struct HybridHits {
+    pub dense: Vec<VectorHit>,
+    pub lexical: Vec<VectorHit>,
+    pub exact: Vec<VectorHit>,
+}
+
+/// BM25's term-frequency saturation and length normalization, as Kioku's own.
+const BM25: (f64, f64) = (1.2, 0.75);
+
+/// Exact label matches returned at most.
+const EXACT_LIMIT: usize = 64;
+
+impl Qdrant {
+    /// Dense, BM25, and exact-label candidates in one batch request. BM25
+    /// statistics are computed over the same points the search may return
+    /// (Qdrant's per-query `idf` corpus), so other domains, hidden notes, and
+    /// retired notes don't change them.
+    pub async fn hybrid(&self, query: &HybridQuery<'_>, scope: &Scope<'_>) -> Result<HybridHits> {
+        let Some(mut filter) =
+            search_filter(Some(scope.domains), scope.include_legacy, scope.exclude)
+        else {
+            return Ok(HybridHits::default());
+        };
+        if let Some(provider) = scope.provider {
+            filter["must"]
+                .as_array_mut()
+                .context("invalid search filter")?
+                .push(json!({"should": [
+                    {"is_empty": {"key": "lock"}},
+                    {"key": "lock", "match": {"value": provider}},
+                ]}));
+        }
+        let fields = json!(["revision"]);
+        let mut searches = Vec::new();
+        let mut kinds = Vec::new();
+        if let Some(vector) = &query.vector {
+            self.validate_vector(vector)?;
+            searches.push(
+                json!({"query": vector, "filter": filter, "limit": query.dense_limit,
+                "with_payload": fields, "with_vector": false}),
+            );
+            kinds.push(0);
+        }
+        if !query.terms.is_empty() {
+            searches.push(json!({
+                "query": {"text": {"query": query.terms.join(" "), "scoring": {"bm25": {"k": BM25.0, "b": BM25.1}}}},
+                "using": "lexical", "filter": filter, "params": {"idf": {"corpus": filter}},
+                "limit": query.lexical_limit, "with_payload": fields,
+            }));
+            kinds.push(1);
+        }
+        if let Some(label) = query.label {
+            let mut exact = filter.clone();
+            exact["must"]
+                .as_array_mut()
+                .context("invalid search filter")?
+                .push(json!({"key": "labels", "match": {"value": label}}));
+            searches.push(json!({"filter": exact, "limit": EXACT_LIMIT, "with_payload": fields}));
+            kinds.push(2);
+        }
+        if searches.is_empty() {
+            return Ok(HybridHits::default());
+        }
+        let value: Value = self
+            .request(
+                reqwest::Method::POST,
+                &format!("{}/points/query/batch", self.collection_path()),
+            )
+            .json(&json!({"searches": searches}))
+            .send()
+            .await?
+            .error_for_status()
+            .context("Qdrant search failed")?
+            .json()
+            .await?;
+        let results = value["result"]
+            .as_array()
+            .context("Qdrant returned an invalid search response")?;
+        let mut hits = HybridHits::default();
+        for (kind, result) in kinds.into_iter().zip(results) {
+            let points = parse_points(
+                result["points"]
+                    .as_array()
+                    .context("Qdrant returned an invalid search response")?,
+            )?;
+            match kind {
+                0 => hits.dense = points,
+                1 => hits.lexical = points,
+                _ => hits.exact = points,
+            }
+        }
+        Ok(hits)
+    }
+}
+
+/// Points of a query response, with their score and indexed revision.
+fn parse_points(points: &[Value]) -> Result<Vec<VectorHit>> {
+    points
+        .iter()
+        .map(|point| {
+            let id = Uuid::parse_str(point["id"].as_str().context("Invalid Qdrant point ID")?)?;
+            let score = point["score"].as_f64().context("Invalid Qdrant score")?;
+            let revision = point["payload"]["revision"]
+                .as_i64()
+                .context("Missing Qdrant content revision; rebuild this index")?;
+            ensure!(
+                score.is_finite() && revision >= 1,
+                "Invalid Qdrant score or revision"
+            );
+            Ok(VectorHit {
+                id,
+                score,
+                revision,
+            })
+        })
+        .collect()
 }
 
 /// The filter of a vector search, or `None` when no domain is allowed.

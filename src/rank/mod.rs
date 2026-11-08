@@ -17,7 +17,7 @@
 pub mod index;
 mod lexical;
 
-pub use lexical::{fold, tokenize};
+pub use lexical::{exact_labels, fold, lexical_text, normalize_label, tokenize};
 
 use std::collections::{HashMap, HashSet};
 
@@ -28,7 +28,7 @@ use crate::graph;
 use crate::lifecycle;
 use crate::model::{Edge, Note};
 
-use lexical::{Bm25, normalize_label};
+use lexical::Bm25;
 
 /// Conventional RRF constant (Cormack, Clarke, and Büttcher, 2009).
 const RRF_K: f64 = 60.0;

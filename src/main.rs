@@ -210,6 +210,11 @@ enum Command {
     Repair {
         #[arg(long)]
         all: bool,
+        /// Instead, rewrite every indexed note's payload without embedding
+        /// anything, so points written by older versions carry what
+        /// MEMORY_LEXICAL=qdrant searches. Run it once before switching.
+        #[arg(long, conflicts_with = "all")]
+        payloads: bool,
     },
     /// Measure retrieval quality on a graded dataset (see evals/README.md).
     Eval(EvalArgs),
@@ -301,6 +306,10 @@ struct BenchArgs {
     /// embedding every note again.
     #[arg(long)]
     reuse_storage: bool,
+    /// Where to score BM25, comma-separated: local, qdrant, or both. Defaults
+    /// to MEMORY_LEXICAL.
+    #[arg(long, value_enum, value_delimiter = ',')]
+    lexical: Vec<LexicalArg>,
     /// Isolated database. Defaults to <database>_eval_<model>_scale<notes>.
     #[arg(long)]
     database: Option<String>,
@@ -318,6 +327,22 @@ struct BenchArgs {
 enum Format {
     Markdown,
     Json,
+}
+
+/// Where `kioku bench` scores BM25.
+#[derive(Clone, Copy, ValueEnum)]
+enum LexicalArg {
+    Local,
+    Qdrant,
+}
+
+impl From<&LexicalArg> for kioku::config::Lexical {
+    fn from(arg: &LexicalArg) -> Self {
+        match arg {
+            LexicalArg::Local => Self::Local,
+            LexicalArg::Qdrant => Self::Qdrant,
+        }
+    }
 }
 
 /// How `kioku ingest` reads its path.
@@ -458,6 +483,7 @@ async fn main() -> Result<()> {
                     },
                     edges: None,
                     viewer: None,
+                    lexical: None,
                 })
                 .await?;
             if explain {
@@ -527,7 +553,14 @@ async fn main() -> Result<()> {
         }
         Command::Retire { id, domain } => app.set_legacy(id, true, domain.as_deref()).await?,
         Command::Restore { id, domain } => app.set_legacy(id, false, domain.as_deref()).await?,
-        Command::Repair { all } => serde_json::to_value(app.repair(all).await?)?,
+        Command::Repair {
+            all: _,
+            payloads: true,
+        } => serde_json::to_value(app.backfill_payloads().await?)?,
+        Command::Repair {
+            all,
+            payloads: false,
+        } => serde_json::to_value(app.repair(all).await?)?,
         Command::Reindex {
             embedding_model,
             embedding_dim,
@@ -766,6 +799,11 @@ async fn run_bench(mut config: Config, args: &BenchArgs) -> Result<()> {
         &eval::ScaleOptions {
             k: args.k,
             repeats: args.repeats,
+            lexical: if args.lexical.is_empty() {
+                vec![config.lexical]
+            } else {
+                args.lexical.iter().map(|l| l.into()).collect()
+            },
         },
     )
     .await?;

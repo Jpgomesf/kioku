@@ -32,14 +32,24 @@ pub use scale::{PathReport, ScaleOptions, ScaleReport, grow, is_prepared, measur
 pub use storage::{isolate_storage, isolated_name, reuse_storage};
 pub use synthetic::GENERATOR;
 
+use crate::config::Lexical;
 use crate::rank::RankOptions;
 
-/// Ranking variants compared by every run. `hybrid+graph` is what MCP clients
-/// get by default (`graph_mode = "rerank"`).
-pub const VARIANTS: [(&str, RankOptions); 3] = [
-    ("vector", RankOptions::VECTOR),
-    ("hybrid", RankOptions::HYBRID),
-    ("hybrid+graph", RankOptions::HYBRID_GRAPH),
+/// Ranking variants compared by every run, each with where it scores BM25
+/// (`None` follows `MEMORY_LEXICAL`). `hybrid+graph` is what MCP clients get
+/// by default (`graph_mode = "rerank"`); the last runs it with BM25 in Qdrant.
+pub const VARIANTS: [(&str, RankOptions, Option<Lexical>); 4] = [
+    ("vector", RankOptions::VECTOR, None),
+    ("hybrid", RankOptions::HYBRID, None),
+    ("hybrid+graph", RankOptions::HYBRID_GRAPH, None),
+    (
+        QDRANT_VARIANT,
+        RankOptions::HYBRID_GRAPH,
+        Some(Lexical::Qdrant),
+    ),
 ];
+
+/// The default ranking with BM25 scored in Qdrant.
+const QDRANT_VARIANT: &str = "hybrid+graph, BM25 in Qdrant";
 
 const DEFAULT_VARIANT: &str = "hybrid+graph";

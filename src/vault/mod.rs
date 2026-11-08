@@ -439,6 +439,17 @@ impl Viewer {
     pub fn restricts_notes(&self) -> bool {
         !matches!(self.scope, Scope::Open)
     }
+
+    /// The provider a note's own lock must name for this viewer to read the
+    /// note, or `None` where note locks don't apply (compatibility mode). In
+    /// a visible domain, a note is visible exactly when its lock is empty or
+    /// names this provider, as [`Viewer::sees_locked`] decides.
+    pub fn lock_reader(&self) -> Option<Provider> {
+        match &self.scope {
+            Scope::Vault(placement) => Some(placement.provider),
+            Scope::Open | Scope::Nothing => None,
+        }
+    }
 }
 
 #[cfg(test)]

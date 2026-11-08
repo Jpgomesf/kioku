@@ -193,6 +193,8 @@ jobs:
           --health-retries 20
     env:
       MEMORY_TEST_DATABASE_URL: postgresql://memory:ci-only-postgres-password@127.0.0.1:5432/kioku_test
+      # Tests of BM25 in Qdrant create and delete their own collections here.
+      MEMORY_TEST_QDRANT_URL: http://127.0.0.1:6333
       QDRANT_API_KEY: ci-only-qdrant-api-key
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

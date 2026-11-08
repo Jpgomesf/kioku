@@ -378,7 +378,7 @@ Qwen Code and Cursor. Others can use [local HTTP](docs/access-control.md#local-h
 
 ```sh
 make check   # fmt, clippy with warnings denied, unit and contract tests
-make test-db # PostgreSQL tests (history, aging, store); MEMORY_TEST_DATABASE_URL must allow CREATE DATABASE
+make test-db # PostgreSQL tests (history, aging, store, search); MEMORY_TEST_DATABASE_URL must allow CREATE DATABASE, MEMORY_TEST_QDRANT_URL adds BM25 in Qdrant
 make smoke   # 167 checks over stdio and 20 over HTTP; SMOKE_ENV must name test storage
 make eval    # retrieval quality in isolated storage
 ```

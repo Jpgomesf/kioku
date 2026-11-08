@@ -11,9 +11,9 @@ use sqlx::postgres::PgRow;
 use uuid::Uuid;
 
 use crate::lifecycle::Usage;
-use crate::model::{Edge, SearchFields, Status};
+use crate::model::{Edge, Note, SearchFields, Status};
 
-use super::{Store, decode_edges};
+use super::{Store, decode_edges, decode_note};
 
 /// How many times a domain's notes, links, and deletions have changed. Each
 /// count only grows, so a cache built at one version is current while no
@@ -68,6 +68,16 @@ const FIELDS: &str =
         COALESCE((input->>'pinned')::boolean, false) AS pinned,
         input->'confidence' AS confidence
     FROM memory_notes";
+
+/// [`FIELDS`] without the text, for notes ranked by signals Qdrant computed.
+/// The text columns are empty.
+const CANDIDATE_FIELDS: &str = "SELECT n.id, n.domain, n.status, n.revision, n.vector_synced,
+        n.updated_at, n.last_accessed_at, n.access_count, n.positive_feedback, n.negative_feedback,
+        n.input->>'key' AS key, '' AS title, '' AS body,
+        '{}'::text[] AS aliases, '{}'::text[] AS tags,
+        ARRAY(SELECT jsonb_array_elements_text(COALESCE(n.input->'lock', '[]'))) AS lock,
+        COALESCE((n.input->>'pinned')::boolean, false) AS pinned,
+        n.input->'confidence' AS confidence";
 
 fn decode_fields(row: &PgRow) -> Result<SearchFields> {
     // Parsed as JSON, as reading the whole note does, so the retention prior
@@ -206,6 +216,69 @@ impl Store {
             edges,
             full,
         })
+    }
+
+    /// Up to `limit` notes of `domain` whose keys sort after `after`, in key
+    /// order, for walking a domain of any size.
+    pub async fn notes_page(&self, domain: &str, after: &str, limit: i64) -> Result<Vec<Note>> {
+        let rows = sqlx::query(
+            "SELECT * FROM memory_notes WHERE domain = $1 AND note_key > $2
+             ORDER BY note_key LIMIT $3",
+        )
+        .bind(domain)
+        .bind(after)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(decode_note).collect()
+    }
+
+    /// Notes of `domains` in a searched status whose vector index entry is
+    /// pending, so its payload may be stale.
+    pub async fn unsynced_in(&self, domains: &[String], include_legacy: bool) -> Result<Vec<Uuid>> {
+        Ok(sqlx::query_scalar(
+            "SELECT id FROM memory_notes WHERE NOT vector_synced
+             AND domain = ANY($1) AND ($2 OR status = 'active')",
+        )
+        .bind(domains)
+        .bind(include_legacy)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    /// The ranking fields of `ids` without their text, which ranking by
+    /// signals the vector index computed doesn't need.
+    pub async fn search_candidates(&self, ids: &[Uuid]) -> Result<Vec<SearchFields>> {
+        let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "{CANDIDATE_FIELDS} FROM memory_notes n WHERE n.id = ANY($1)"
+        )))
+        .bind(ids)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(decode_fields).collect()
+    }
+
+    /// Each link touching `ids`, as (the note in `ids`, the link's weight, the
+    /// other note's ranking fields without text).
+    pub async fn search_links(&self, ids: &[Uuid]) -> Result<Vec<(Uuid, f64, SearchFields)>> {
+        let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "{CANDIDATE_FIELDS}, f.near, e.weight FROM memory_edges e
+             CROSS JOIN LATERAL (VALUES (e.source, e.target), (e.target, e.source)) AS f(near, far)
+             JOIN memory_notes n ON n.id = f.far
+             WHERE (e.source = ANY($1) OR e.target = ANY($1)) AND f.near = ANY($1)"
+        )))
+        .bind(ids)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter()
+            .map(|row| {
+                Ok((
+                    row.try_get("near")?,
+                    row.try_get("weight")?,
+                    decode_fields(row)?,
+                ))
+            })
+            .collect()
     }
 
     /// The display fields of `ids`, in no particular order.

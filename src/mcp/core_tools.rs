@@ -146,6 +146,7 @@ impl MemoryServer {
                 ranking,
                 edges: None,
                 viewer: Some(&caller.viewer),
+                lexical: None,
             })
             .await?;
         let hits: Vec<Value> = results

@@ -12,7 +12,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::app::{App, SearchRequest};
-use crate::config::Config;
+use crate::config::{Config, Lexical};
 use crate::graph;
 use crate::model::NoteInput;
 use crate::rank::RankOptions;
@@ -31,6 +31,8 @@ pub struct ScaleOptions {
     pub k: usize,
     /// Warm passes over every query; the percentiles pool all of them.
     pub repeats: usize,
+    /// Where to score BM25; each is measured in turn.
+    pub lexical: Vec<Lexical>,
 }
 
 #[derive(Debug, Serialize)]
@@ -111,8 +113,9 @@ pub async fn grow(app: &App, dataset: &Dataset, notes: usize) -> Result<usize> {
     Ok(distractors)
 }
 
-/// Run every query warm (`repeats` passes after one warm-up pass), then once
-/// each as the first query of a new connection to the same storage.
+/// For each place BM25 can run, run every query warm (`repeats` passes after
+/// one warm-up pass), then once each as the first query of a new connection
+/// to the same storage.
 pub async fn measure(
     config: &Config,
     app: &App,
@@ -120,35 +123,42 @@ pub async fn measure(
     options: &ScaleOptions,
 ) -> Result<Vec<PathReport>> {
     let domain = dataset.domain.as_str();
-    let mut reference: Vec<QueryResult> = Vec::new();
-    for query in &dataset.queries {
-        reference.push(search(app, domain, query, options.k).await?.0);
-    }
-    let mut warm = Samples::default();
-    for pass in 0..options.repeats.max(1) {
-        for (query, expected) in dataset.queries.iter().zip(&reference) {
-            let (result, stages) = search(app, domain, query, options.k).await?;
-            warm.add(result, stages, expected, pass == 0);
+    let mut paths = Vec::new();
+    for lexical in &options.lexical {
+        let lexical = Some(*lexical);
+        let name = match lexical {
+            Some(Lexical::Qdrant) => "BM25 in Qdrant",
+            _ => "BM25 in process",
+        };
+        let mut reference: Vec<QueryResult> = Vec::new();
+        for query in &dataset.queries {
+            reference.push(search(app, domain, query, options.k, lexical).await?.0);
         }
-    }
-    let mut cold = Samples::default();
-    let mut startups = Vec::new();
-    for (query, expected) in dataset.queries.iter().zip(&reference) {
-        let started = Instant::now();
-        let fresh = App::connect(config.clone()).await?;
-        startups.push(elapsed_ms(started));
-        let searched = search(&fresh, domain, query, options.k).await;
-        fresh.store.close().await;
-        let (result, stages) = searched?;
-        cold.add(result, stages, expected, true);
-    }
-    Ok(vec![
-        warm.report("warm", None),
-        cold.report(
-            "first query in a new process",
+        let mut warm = Samples::default();
+        for pass in 0..options.repeats.max(1) {
+            for (query, expected) in dataset.queries.iter().zip(&reference) {
+                let (result, stages) = search(app, domain, query, options.k, lexical).await?;
+                warm.add(result, stages, expected, pass == 0);
+            }
+        }
+        let mut cold = Samples::default();
+        let mut startups = Vec::new();
+        for (query, expected) in dataset.queries.iter().zip(&reference) {
+            let started = Instant::now();
+            let fresh = App::connect(config.clone()).await?;
+            startups.push(elapsed_ms(started));
+            let searched = search(&fresh, domain, query, options.k, lexical).await;
+            fresh.store.close().await;
+            let (result, stages) = searched?;
+            cold.add(result, stages, expected, true);
+        }
+        paths.push(warm.report(&format!("{name}, warm"), None));
+        paths.push(cold.report(
+            &format!("{name}, first query in a new process"),
             Some(percentile(startups, 0.5)),
-        ),
-    ])
+        ));
+    }
+    Ok(paths)
 }
 
 /// Results and stage times of one path, pooled over its passes. Quality
@@ -210,6 +220,7 @@ async fn search(
     domain: &str,
     query: &Query,
     k: usize,
+    lexical: Option<Lexical>,
 ) -> Result<(QueryResult, BTreeMap<String, f64>)> {
     let started = Instant::now();
     let results = app
@@ -222,6 +233,7 @@ async fn search(
             ranking: RankOptions::HYBRID_GRAPH,
             edges: None,
             viewer: None,
+            lexical,
         })
         .await
         .with_context(|| format!("query {} failed", query.id))?;

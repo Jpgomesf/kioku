@@ -21,7 +21,8 @@ pub fn fold(text: &str) -> String {
         .collect()
 }
 
-pub(super) fn normalize_label(text: &str) -> String {
+/// Fold case and accents and collapse whitespace, as exact matches compare labels.
+pub fn normalize_label(text: &str) -> String {
     fold(text).split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
@@ -97,6 +98,43 @@ pub(super) fn note_terms(
         *terms.entry(token).or_default() += 1;
     }
     terms
+}
+
+/// A note's BM25 terms as one whitespace-separated text, each term repeated
+/// as often as it counts, so a full-text index that splits on whitespace
+/// sees the same terms and the same length as [`note_terms`].
+pub fn lexical_text(
+    key: &str,
+    title: &str,
+    aliases: &[String],
+    tags: &[String],
+    body: &str,
+) -> String {
+    let terms: std::collections::BTreeMap<String, u32> =
+        note_terms(key, title, aliases, tags, body)
+            .into_iter()
+            .collect();
+    let mut text = String::new();
+    for (term, frequency) in terms {
+        for _ in 0..frequency {
+            if !text.is_empty() {
+                text.push(' ');
+            }
+            text.push_str(&term);
+        }
+    }
+    text
+}
+
+/// A note's key, title, and aliases as exact matches compare them.
+pub fn exact_labels(key: &str, title: &str, aliases: &[String]) -> Vec<String> {
+    let labels: BTreeSet<String> = [key, title]
+        .into_iter()
+        .chain(aliases.iter().map(String::as_str))
+        .map(normalize_label)
+        .filter(|label| !label.is_empty())
+        .collect();
+    labels.into_iter().collect()
 }
 
 /// Inverse document frequency of a term in `df` of `n` documents.
@@ -207,5 +245,25 @@ mod tests {
     fn folding_ignores_case_and_accents() {
         assert_eq!(fold("Gestão de SEGREDOS"), "gestao de segredos");
         assert_eq!(normalize_label("  Dev   Setup "), "dev setup");
+    }
+
+    #[test]
+    fn lexical_text_holds_the_same_terms_and_length_as_bm25() {
+        let aliases = vec!["Fila de mídia".to_owned()];
+        let tags = vec!["nats".to_owned()];
+        let body = "Consumers set max_deliver to 5; error TW-4290 means Retry-After.";
+        let text = lexical_text("media-queue", "Media stream", &aliases, &tags, body);
+        let terms = note_terms("media-queue", "Media stream", &aliases, &tags, body);
+        let mut counted: HashMap<String, u32> = HashMap::new();
+        for token in text.split_whitespace() {
+            *counted.entry(token.to_owned()).or_default() += 1;
+        }
+        assert_eq!(counted, terms);
+        assert!(text.split(' ').all(|t| !t.is_empty()), "single spaces only");
+        assert!(counted.contains_key("tw-4290") && counted.contains_key("max_deliver"));
+        assert_eq!(
+            exact_labels("media-queue", "Media  Stream", &aliases),
+            ["fila de midia", "media stream", "media-queue"]
+        );
     }
 }

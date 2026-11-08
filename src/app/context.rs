@@ -142,6 +142,7 @@ impl App {
                     ranking: request.ranking,
                     edges: None,
                     viewer: request.viewer,
+                    lexical: None,
                 })
                 .await?
                 .hits;

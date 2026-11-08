@@ -17,6 +17,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+use crate::config::Lexical;
 use crate::error::{invalid, not_found};
 use crate::graph;
 use crate::model::{Edge, Note, Status};
@@ -45,6 +46,9 @@ pub struct SearchRequest<'a> {
     /// Whose view to rank: notes it may not see are left out. `None` (the CLI
     /// and evaluation) sees everything; MCP always passes its session's viewer.
     pub viewer: Option<&'a Viewer>,
+    /// Where to score BM25 instead of `MEMORY_LEXICAL`. Evaluation compares
+    /// both; everything else passes `None`.
+    pub lexical: Option<Lexical>,
 }
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
@@ -124,7 +128,7 @@ pub struct SearchStats {
     pub rank_ms: f64,
 }
 
-fn elapsed_ms(started: Instant) -> f64 {
+pub(super) fn elapsed_ms(started: Instant) -> f64 {
     started.elapsed().as_secs_f64() * 1000.0
 }
 
@@ -228,11 +232,27 @@ impl App {
         domains.dedup();
         let span = tracing::Span::current();
         span.record("domain", domains.join(",").as_str());
-        let mut stats = SearchStats::default();
-        // The query goes to the embedding service only if that service may
-        // read a searched domain; otherwise none of their notes has a vector.
-        // It is embedded while the index is checked.
-        let embedding = domains
+        let results = match request.lexical.unwrap_or(self.config.lexical) {
+            Lexical::Qdrant => self.search_in_qdrant(request, query, &domains).await?,
+            Lexical::Local => self.search_in_process(request, query, &domains).await?,
+        };
+        let stats = &results.stats;
+        span.record("notes", stats.notes);
+        span.record("link_hits", stats.link_hits);
+        span.record("total_ms", elapsed_ms(started));
+        tracing::debug!(?stats, "search finished");
+        Ok(results)
+    }
+
+    /// The query embedded in the background, if the embedding service may read
+    /// a searched domain; otherwise none of their notes has a vector. With
+    /// the time it took.
+    pub(super) fn embed_in_background(
+        &self,
+        query: &str,
+        domains: &[String],
+    ) -> Option<tokio::task::JoinHandle<(Result<Vec<f32>>, f64)>> {
+        domains
             .iter()
             .any(|domain| self.embedder.reads_domain(domain))
             .then(|| {
@@ -242,9 +262,21 @@ impl App {
                     let started = Instant::now();
                     (embedder.embed_query(&text).await, elapsed_ms(started))
                 })
-            });
+            })
+    }
+
+    /// Rank over this process's index of each domain, with BM25 scored here.
+    pub(super) async fn search_in_process(
+        &self,
+        request: &SearchRequest<'_>,
+        query: &str,
+        domains: &[String],
+    ) -> Result<SearchResults> {
+        let mut stats = SearchStats::default();
+        // Embedded while the index is checked.
+        let embedding = self.embed_in_background(query, domains);
         let stage = Instant::now();
-        let ready = match self.search_indexes(&domains).await {
+        let ready = match self.search_indexes(domains).await {
             Ok(ready) => ready,
             Err(error) => {
                 if let Some(task) = &embedding {
@@ -258,7 +290,7 @@ impl App {
         let views: Vec<View<'_>> = ready
             .indexes
             .iter()
-            .zip(&domains)
+            .zip(domains)
             .filter_map(|(cached, domain)| {
                 Some(cached.as_ref()?.index.view(request.include_legacy, |lock| {
                     request
@@ -387,13 +419,13 @@ impl App {
         } else {
             direct.truncate(request.limit)
         };
-        let hits = self.hits(ranked, &candidates, request).await?;
+        let hits = self
+            .hits(ranked, request, |id| {
+                candidates.entry(id).map(|e| e.key.clone())
+            })
+            .await?;
         stats.rank_ms = elapsed_ms(stage);
         stats.link_hits = hits.iter().filter(|h| h.kind == MatchKind::Link).count();
-        span.record("notes", stats.notes);
-        span.record("link_hits", stats.link_hits);
-        span.record("total_ms", elapsed_ms(started));
-        tracing::debug!(?stats, "search finished");
         Ok(SearchResults {
             hits,
             warnings,
@@ -402,13 +434,13 @@ impl App {
     }
 
     /// Read the ranked notes' text for the results. A note that changed since
-    /// the index was checked so that the caller may no longer see it, or that
-    /// left the searched status, is left out.
-    async fn hits(
+    /// it was ranked so that the caller may no longer see it, or that left the
+    /// searched status, is left out. `key_of` names the note a link came from.
+    pub(super) async fn hits(
         &self,
         ranked: Vec<Ranked>,
-        candidates: &Ranking<'_>,
         request: &SearchRequest<'_>,
+        key_of: impl Fn(Uuid) -> Option<String>,
     ) -> Result<Vec<SearchHit>> {
         let ids: Vec<Uuid> = ranked.iter().map(|r| r.id).collect();
         let mut fields: HashMap<Uuid, HitFields> = self
@@ -436,10 +468,7 @@ impl App {
                     snippet: truncate_chars(&note.body, SNIPPET_CHARS),
                     score: r.score,
                     kind: r.kind,
-                    linked_from: r
-                        .linked_from
-                        .and_then(|id| candidates.entry(id))
-                        .map(|e| e.key.clone()),
+                    linked_from: r.linked_from.and_then(&key_of),
                     signals: Signals {
                         dense: r.dense,
                         lexical: r.lexical,

@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::{Datelike, Utc};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -36,6 +36,21 @@ pub struct RepairReport {
     #[serde(skip_serializing_if = "super::is_zero")]
     pub not_sent_to_embedder: usize,
 }
+
+/// What `kioku repair --payloads` rewrote.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct PayloadReport {
+    /// Points whose payload was rewritten; their vectors are untouched.
+    pub payloads: usize,
+    /// Points without a vector written for notes the embedding service may
+    /// not read.
+    pub unembedded: usize,
+    /// Notes waiting for the vector index, left to `kioku repair`.
+    pub pending: usize,
+}
+
+/// Notes read per locked page while rewriting payloads.
+const PAYLOAD_PAGE: i64 = 512;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct ReindexReport {
@@ -97,12 +112,12 @@ impl App {
                 .filter(|n| all || !n.vector_synced)
                 .partition(|n| self.embedder.reads(&n.input));
             if !unsent.is_empty() {
-                // Never sent to the embedding service: drop any vector, then
-                // mark each note synced at the revision read, so a note edited
-                // meanwhile stays pending.
+                // Never sent to the embedding service: keep a point without a
+                // vector, then mark each note synced at the revision read, so a
+                // note edited meanwhile stays pending.
                 let _guard = self.store.mutation_lock().await?;
-                let ids: Vec<Uuid> = unsent.iter().map(|n| n.id).collect();
-                self.vector.delete(&ids).await?;
+                let points: Vec<Note> = unsent.iter().map(|n| (*n).clone()).collect();
+                self.vector.upsert_unembedded(&points).await?;
                 for note in &unsent {
                     self.store.mark_synced(note.id, note.revision).await?;
                 }
@@ -135,6 +150,40 @@ impl App {
                     self.store.mark_synced(note.id, note.revision).await?;
                 }
                 report.reindexed += current.len();
+            }
+        }
+        Ok(report)
+    }
+
+    /// Rewrite the payload of every indexed note's point, as current notes
+    /// write it, without embedding anything: points written before payloads
+    /// carried BM25 terms and exact labels get them, so `MEMORY_LEXICAL=qdrant`
+    /// can find them. Notes waiting for the index are left to `repair`. Each
+    /// page holds the write lock, so a note can't change between being read
+    /// and its payload written.
+    pub async fn backfill_payloads(&self) -> Result<PayloadReport> {
+        let mut report = PayloadReport::default();
+        for domain in self.store.domains().await? {
+            let mut after = String::new();
+            loop {
+                let _guard = self.store.mutation_lock().await?;
+                let page = self.store.notes_page(&domain, &after, PAYLOAD_PAGE).await?;
+                let Some(last) = page.last() else {
+                    break;
+                };
+                after = last.input.key.clone();
+                let (indexed, pending): (Vec<Note>, Vec<Note>) =
+                    page.into_iter().partition(|n| n.vector_synced);
+                report.pending += pending.len();
+                let (embedded, unembedded): (Vec<Note>, Vec<Note>) = indexed
+                    .into_iter()
+                    .partition(|n| self.embedder.reads(&n.input));
+                self.vector.set_payloads(&embedded).await.context(
+                    "cannot rewrite payloads; if the index lost points, run kioku repair --all",
+                )?;
+                self.vector.upsert_unembedded(&unembedded).await?;
+                report.payloads += embedded.len();
+                report.unembedded += unembedded.len();
             }
         }
         Ok(report)
@@ -189,6 +238,7 @@ impl App {
             for chunk in notes.chunks(REPAIR_BATCH) {
                 let (batch, unsent) = embed(chunk.to_vec()).await?;
                 qdrant.upsert_many(&batch).await?;
+                qdrant.upsert_unembedded(&unsent).await?;
                 indexed.extend(batch.iter().map(|(n, _)| (n.id, (n.revision, n.status))));
                 indexed.extend(unsent.iter().map(|n| (n.id, (n.revision, n.status))));
                 unsent_ids.extend(unsent.iter().map(|n| n.id));
@@ -209,7 +259,7 @@ impl App {
             let (batch, unsent) = embed(chunk.to_vec()).await?;
             // A note edited during the run may have gained or lost a lock.
             let ids: Vec<Uuid> = unsent.iter().map(|n| n.id).collect();
-            qdrant.delete(&ids).await?;
+            qdrant.upsert_unembedded(&unsent).await?;
             qdrant.upsert_many(&batch).await?;
             for (note, _) in &batch {
                 unsent_ids.remove(&note.id);
@@ -327,7 +377,11 @@ impl App {
                         if self.embedder.reads(&note.input) {
                             self.vector.set_status(note.id, status).await?;
                         } else {
-                            self.vector.delete(&[note.id]).await?;
+                            let aged = Note {
+                                status,
+                                ..note.clone()
+                            };
+                            self.vector.upsert_unembedded(&[aged]).await?;
                         }
                         self.store.mark_synced(note.id, note.revision).await?;
                     }
