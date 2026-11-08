@@ -162,12 +162,14 @@ Paths that keep PostgreSQL as the source of truth:
 - **The first search in a process reads the whole domain.** Later searches in
   the same process reuse its index, but a hook that starts a server for one
   search pays for building it every time (26 ms at 1,000 notes, 182 ms at
-  10,000, 1.8 s at 100,000). A process that indexed 100,000 notes peaked at
-  433 MB. Search, saves, imports, and repair load whole domains and refuse one
-  of more than 10,000 notes; the figures at 100,000 come from `kioku bench`,
-  which lifts that limit. BM25 in an index outside the process (see above, or
-  Qdrant's) would remove the first-search cost;
-  [evaluation.md](evaluation.md#scale) has the measurements.
+  10,000, 1.8 s at 100,000). A process that indexes 100,000 notes holds about
+  180 MB, of which the index is about 128 MB; it reads rows a thousand at a
+  time, so their text is never all in memory. Search, saves, imports, and
+  repair load whole domains and refuse one of more than 10,000 notes; the
+  figures at 100,000 come from `kioku bench`, which lifts that limit. BM25 in
+  an index outside the process (see above, or Qdrant's) would remove the
+  first-search cost; [evaluation.md](evaluation.md#scale) has the
+  measurements.
 - **Notes are embedded whole.** Each must fit the embedding model's context
   window. OKF imports split long concepts by section
   ([notes.md](notes.md#open-knowledge-format-bundles)); other notes are

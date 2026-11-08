@@ -243,8 +243,19 @@ measures refuses such a domain.
 - **A new process still reads the whole domain.** Its first search costs
   about what a scan did, and a hook that starts a server for one search pays
   it every time: 26 ms at 1,000 notes, 182 ms at 10,000, 1.8 s at 100,000.
-- **Memory.** A process that searched once peaked at 62 MB with a 10,000-note
-  domain (the scan: 92 MB) and 433 MB at 100,000 (the scan: 777 MB).
+- **Memory.** A process that searched once peaks at 34 MB of resident memory
+  with a 10,000-note domain (the scan: 92 MB) and 180 MB at 100,000 (the scan:
+  777 MB), and a long-lived server stays at 38 MB and 183 MB after warm-up. At
+  100,000 notes the index itself holds about 128 MB: posting lists 59 MB,
+  per-note entries 22 MB, labels for exact matches 21 MB, links 15 MB, and the
+  vocabulary 8 MB. It reads rows a thousand at a time and ranks in full only
+  the matches a search can return. An earlier build that loaded every row at
+  once and ranked every match peaked at 58 MB and 418 MB, and its servers grew
+  to about 600 MB at 100,000, mostly memory the allocator kept after freeing
+  it. These memory figures come from CI's hashing embedder, which the index
+  doesn't depend on; with it, the change also made the first search at
+  100,000 notes faster (1,818 to 1,677 ms) and warm ones too (6.8 to 5.9 ms),
+  with identical rankings and eval.
 - **Quality falls with distractors** in both, the same way: a larger domain
   holds more notes that resemble the answer.
 

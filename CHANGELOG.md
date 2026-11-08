@@ -179,9 +179,13 @@ All notable changes to this project are documented here. The format follows
   The query is embedded while the index is checked, and BM25 runs while
   Qdrant answers. A warm search at 10,000 notes takes 12 ms instead of 214 ms
   (median), and 16 ms instead of 2 s at 100,000; the first search in a new
-  process still reads the domain (182 ms at 10,000 notes). Rankings are
-  unchanged: the bundled eval matches the previous version on every variant,
-  ablation, and context pack, and so does every query of the scale benchmark.
+  process still reads the domain (182 ms at 10,000 notes). The index is read
+  a thousand rows at a time and a search ranks in full only the matches it
+  can return, so a process that searched a 10,000-note domain peaks at 34 MB
+  of resident memory instead of 92 MB, and one that searches 100,000 notes
+  stays near 180 MB instead of 777 MB. Rankings are unchanged: the bundled
+  eval matches the previous version on every variant, ablation, and context
+  pack, and so does every query of the scale benchmark.
 - Graph expansion computes Personalized PageRank by pushing probability out
   from the top matches instead of iterating over every note of the domain, so
   its cost follows the matches' neighbourhood. Masses agree with the global
