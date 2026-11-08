@@ -398,6 +398,23 @@ def run(client: StdioClient, checks: Checks, notes_root: Path, hydration_key: st
     checks.check("reading only unknown keys is a not_found error", missing_error and missing_text.startswith("not_found"))
     as_string = client.call("memory_get", {"keys": json.dumps([ledger["key"]]), "domain": domain})
     checks.check("a JSON-encoded key list is accepted", len(as_string["memories"]) == 1)
+    # memory_save replaces a note's aliases, so memory_get returns them all
+    # for a client to send back with the one it adds.
+    aliased = {
+        "domain": domain, "key": "smoke-aliased", "title": "Renamed ledger service",
+        "body": "The billing ledger service was renamed twice, so search must still find it by its older names. " * 20,
+        "aliases": ["ledger-service-old-name", "billing-ledger-v1", "BLS", "livro-razao", "general-ledger-gl"],
+        "tags": ["smoke-test"], "source": "smoke://fixtures/aliased",
+    }
+    client.call("memory_save", aliased)
+    named = client.call("memory_get", {"keys": [aliased["key"], history_key], "domain": domain})
+    checks.check("memory_get returns a note's aliases, and [] for a note without any",
+                 {m["key"]: m.get("aliases") for m in named["memories"]} == {aliased["key"]: aliased["aliases"], history_key: []})
+    alias_budget = 768
+    tight, raw, error = client.call_raw("memory_get", {"keys": [aliased["key"]], "domain": domain, "max_bytes": alias_budget})
+    checks.check("aliases count toward max_bytes: the text is cut to fit, never the list",
+                 not error and len(raw.encode("utf-8")) <= alias_budget and tight.get("truncated") is True
+                 and [m.get("aliases") for m in tight["memories"]] == [aliased["aliases"]])
 
     negative_before = client.call("memory_inspect", {"key": checkout["key"], "domain": domain})["feedback"]["negative"]
     feedback_args = {"key": checkout["key"], "positive": False, "request_id": "smoke-" + str(uuid.uuid4()), "domain": domain}
