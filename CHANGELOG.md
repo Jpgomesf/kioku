@@ -180,12 +180,10 @@ All notable changes to this project are documented here. The format follows
 - Source split into focused modules (`app/`, `mcp/`, `eval/`, `rank/`,
   `store/`, `markdown`, `lifecycle`, `text`) with no behavior change.
 
-### Known issues
+### Fixed
 
-- The `memory_maintenance` tool description still says the server ages
-  memories daily. Background upkeep now only previews aging, but the
-  description is part of the snapshot-tested tool contract
-  (`tests/snapshots/tools-all.json`), so it changes in a deliberate re-bless.
+- The `memory_maintenance` tool description no longer says the server ages
+  memories daily: background upkeep only previews aging (#13).
 
 ## [0.2.0] - 2026-11-03
 
