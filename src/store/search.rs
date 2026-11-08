@@ -134,7 +134,8 @@ impl Store {
     /// Read what a cache of `domain` needs, in one snapshot: everything when
     /// `since` is `None`, notes were deleted since it, or a count went back,
     /// otherwise only the notes written after the cache's snapshot and, if
-    /// they changed, the links.
+    /// they changed, the links. Like every load of a whole domain, it refuses
+    /// one of more notes than the limit.
     pub async fn search_delta(
         &self,
         domain: &str,
@@ -168,24 +169,32 @@ impl Store {
         let full = since.is_none();
         let rows = match since {
             None => {
-                sqlx::query(sqlx::AssertSqlSafe(format!("{FIELDS} WHERE domain = $1")))
-                    .bind(domain)
-                    .fetch_all(&mut *tx)
-                    .await?
+                sqlx::query(sqlx::AssertSqlSafe(format!(
+                    "{FIELDS} WHERE domain = $1 LIMIT $2"
+                )))
+                .bind(domain)
+                .bind(self.load_limit())
+                .fetch_all(&mut *tx)
+                .await?
             }
             Some((_, old)) if old.notes == version.notes => Vec::new(),
             Some((old_snapshot, _)) => {
                 sqlx::query(sqlx::AssertSqlSafe(format!(
                     "{FIELDS} WHERE domain = $1
                      AND written_by >= pg_snapshot_xmin($2::pg_snapshot)
-                     AND NOT pg_visible_in_snapshot(written_by, $2::pg_snapshot)"
+                     AND NOT pg_visible_in_snapshot(written_by, $2::pg_snapshot)
+                     LIMIT $3"
                 )))
                 .bind(domain)
                 .bind(old_snapshot)
+                .bind(self.load_limit())
                 .fetch_all(&mut *tx)
                 .await?
             }
         };
+        // Notes written since a cache's snapshot are all in the domain, so
+        // more of them than the limit is a domain over it too.
+        self.check_domain_size(rows.len())?;
         let edges = if since.is_none_or(|(_, old)| old.links != version.links) {
             let rows = sqlx::query(
                 "SELECT e.source, e.target, e.kind, e.weight FROM memory_edges e

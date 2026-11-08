@@ -81,6 +81,15 @@ impl DomainIndex {
         self.slots.is_empty()
     }
 
+    /// Notes in a searched status, whoever may see them.
+    pub fn searched(&self, include_legacy: bool) -> usize {
+        self.groups
+            .iter()
+            .filter(|g| include_legacy || g.status == Status::Active)
+            .map(|g| g.notes as usize)
+            .sum()
+    }
+
     /// Links in the domain, before visibility.
     pub fn link_count(&self) -> usize {
         self.link_count

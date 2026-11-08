@@ -244,7 +244,21 @@ impl App {
                 })
             });
         let stage = Instant::now();
-        let ready = match self.search_indexes(&domains).await {
+        let ready = match self.search_indexes(&domains).await.and_then(|ready| {
+            // A vault-wide search ranks at most the note limit in all, as
+            // when its domains were loaded together.
+            if domains.len() > 1 {
+                let notes = ready
+                    .indexes
+                    .iter()
+                    .filter_map(|cached| {
+                        Some(cached.as_ref()?.index.searched(request.include_legacy))
+                    })
+                    .sum();
+                self.store.check_vault_size(notes)?;
+            }
+            Ok(ready)
+        }) {
             Ok(ready) => ready,
             Err(error) => {
                 if let Some(task) = &embedding {

@@ -22,7 +22,9 @@ mod search;
 pub use code::CodeMapChange;
 pub use search::{HitFields, SearchDelta, SearchVersion};
 
-const MAX_NOTES: i64 = 10_000;
+/// Most notes a domain may hold when it is loaded whole, by search, saves,
+/// imports, and repair, and a vault-wide search in all.
+pub const MAX_NOTES: usize = 10_000;
 const MUTATION_LOCK: i64 = 0x4d454d4f525931;
 /// Most history entries one call may return.
 const MAX_REVISIONS: i64 = 100;
@@ -33,6 +35,8 @@ pub struct Store {
     /// Serializes writers inside this process before they take a pooled
     /// connection, so waiters cannot starve the lock holder of connections.
     writer: Arc<tokio::sync::Mutex<()>>,
+    /// [`MAX_NOTES`], unless `kioku bench` raised it for the domain it grows.
+    max_notes: usize,
 }
 
 /// Dropping this guard rolls back its otherwise empty transaction and releases
@@ -54,7 +58,40 @@ impl Store {
         Ok(Self {
             pool,
             writer: Arc::new(tokio::sync::Mutex::new(())),
+            max_notes: MAX_NOTES,
         })
+    }
+
+    /// Load domains of up to `max_notes` notes whole instead of [`MAX_NOTES`].
+    pub fn with_max_notes(mut self, max_notes: usize) -> Self {
+        self.max_notes = max_notes;
+        self
+    }
+
+    /// The row limit that tells a domain over the note limit from one at it.
+    fn load_limit(&self) -> i64 {
+        i64::try_from(self.max_notes.saturating_add(1)).unwrap_or(i64::MAX)
+    }
+
+    /// Refuse a domain of more notes than the limit, as loading it whole does.
+    pub fn check_domain_size(&self, notes: usize) -> Result<()> {
+        ensure!(
+            notes <= self.max_notes,
+            "More than {} memories in this scope; choose a narrower domain before loading the graph",
+            self.max_notes
+        );
+        Ok(())
+    }
+
+    /// Refuse a search of several domains with more notes in all than the
+    /// limit, as loading them together does.
+    pub fn check_vault_size(&self, notes: usize) -> Result<()> {
+        ensure!(
+            notes <= self.max_notes,
+            "More than {} memories in this vault; search one of its domains instead",
+            self.max_notes
+        );
+        Ok(())
     }
 
     pub async fn migrate(&self) -> Result<()> {
@@ -175,13 +212,10 @@ impl Store {
         )
         .bind(domain)
         .bind(include_legacy)
-        .bind(MAX_NOTES + 1)
+        .bind(self.load_limit())
         .fetch_all(&self.pool)
         .await?;
-        ensure!(
-            rows.len() <= MAX_NOTES as usize,
-            "More than {MAX_NOTES} memories in this scope; choose a narrower domain before loading the graph"
-        );
+        self.check_domain_size(rows.len())?;
         rows.iter().map(decode_note).collect()
     }
 
@@ -194,13 +228,10 @@ impl Store {
         )
         .bind(domains)
         .bind(include_legacy)
-        .bind(MAX_NOTES + 1)
+        .bind(self.load_limit())
         .fetch_all(&self.pool)
         .await?;
-        ensure!(
-            rows.len() <= MAX_NOTES as usize,
-            "More than {MAX_NOTES} memories in this vault; search one of its domains instead"
-        );
+        self.check_vault_size(rows.len())?;
         rows.iter().map(decode_note).collect()
     }
 

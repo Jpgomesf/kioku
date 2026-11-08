@@ -14,7 +14,8 @@ All notable changes to this project are documented here. The format follows
   `--notes` notes, then runs the graded queries warm and as the first query of
   a new process, reporting quality, p50 and p95 latency, and time per stage.
   `--reuse-storage` measures again without embedding anything
-  ([docs/evaluation.md](docs/evaluation.md#scale)).
+  ([docs/evaluation.md](docs/evaluation.md#scale)). It lifts the 10,000-note
+  limit for the domain it grows.
 
 - `memory_get` and `memory_inspect` return each note's `aliases`, `[]` when it
   has none, so a client can tell a note without aliases from an older server.
@@ -185,8 +186,8 @@ All notable changes to this project are documented here. The format follows
   from the top matches instead of iterating over every note of the domain, so
   its cost follows the matches' neighbourhood. Masses agree with the global
   computation to within 1e-8.
-- Search no longer refuses domains of more than 10,000 notes. Saves, imports,
-  and repair still load whole domains and keep that limit.
+- Search counts a domain's legacy notes too against its 10,000-note limit, as
+  saves do, since the index holds every note of the domain.
 - The schema needs PostgreSQL 13 or later. The bundled services run 17.
 - The README leads with how to use Kioku well: the memory loop, the
   kioku-skills hooks and skills, tool habits, note writing and upkeep, then

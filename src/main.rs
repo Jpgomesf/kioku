@@ -712,6 +712,8 @@ async fn run_eval(mut config: Config, args: &EvalArgs) -> Result<()> {
 async fn run_bench(mut config: Config, args: &BenchArgs) -> Result<()> {
     let dataset = &eval::Dataset::load(&args.dataset)?;
     let notes = args.notes;
+    // The domain it grows is loaded whole, by search too, at any size.
+    config.max_notes = config.max_notes.max(notes);
     let corpus = dataset
         .corpus
         .as_ref()

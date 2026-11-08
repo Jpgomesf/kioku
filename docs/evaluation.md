@@ -215,9 +215,10 @@ and Ollama with `nomic-embed-text` on the same machine. Warm percentiles pool
 120 searches (three passes over the 40 queries); a new process gives 40
 samples, and spends the startup shown (connecting and checking the schema)
 before its first search. Stage times are means. In the indexed path the query
-is embedded while the index is checked, so `dense` overlaps `load`. The scan at
-100,000 notes ran in a build with the 10,000-note cap lifted, since the version
-it measures refuses such a domain.
+is embedded while the index is checked, so `dense` overlaps `load`.
+`kioku bench` lifts the 10,000-note limit for the domain it grows; the scan at
+100,000 notes ran in a build with that limit lifted, since the version it
+measures refuses such a domain.
 
 | Notes | Search | Recall@5 | nDCG@5 | MRR | p50 ms | p95 ms | Mean ms: startup, load, dense, rank |
 |---|---|---|---|---|---|---|---|

@@ -99,6 +99,8 @@ impl App {
     }
 
     /// Catch `cached` up with its domain; returns how many notes were read.
+    /// A domain that grew past the note limit is refused, and its index is
+    /// dropped.
     async fn refresh(&self, domain: &str, cached: &mut Option<Cached>) -> Result<usize> {
         let since = cached.as_ref().map(|c| (c.snapshot.as_str(), c.version));
         let delta = self.store.search_delta(domain, since).await?;
@@ -110,6 +112,7 @@ impl App {
         current.index.apply(delta.rows, |row| {
             !self.embedder.reads_locked(&row.domain, &row.lock)
         });
+        self.store.check_domain_size(current.index.len())?;
         if let Some(edges) = &delta.edges {
             current.index.replace_links(edges);
         }
@@ -455,6 +458,50 @@ mod tests {
             let emptied = results(&app, &[domain], "ledger").await?;
             assert_eq!(emptied.stats.notes, 0, "{domain}");
         }
+        Ok(())
+    }
+
+    /// Creates and drops its own database on the server in MEMORY_TEST_DATABASE_URL.
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL; set MEMORY_TEST_DATABASE_URL"]
+    async fn search_keeps_the_note_limit() -> Result<()> {
+        let scratch = ScratchDatabase::create().await?;
+        let outcome = limit_checks(&scratch.url).await;
+        scratch.drop_database().await?;
+        outcome
+    }
+
+    async fn limit_checks(url: &str) -> Result<()> {
+        let mut app = offline(url).await?;
+        app.store = app.store.with_max_notes(2);
+        let ledger = input("relay", "ledger", "The ledger retries writes three times.");
+        let audit = input("relay", "audit", "The ledger audit runs nightly.");
+        let queue = input("media", "queue", "Media queue consumers acknowledge.");
+        for note in [&ledger, &audit, &queue] {
+            app.store.upsert(note).await?;
+        }
+        results(&app, &["relay"], "ledger").await?;
+        let vault = results(&app, &["media", "relay"], "ledger").await;
+        let error = vault.err().expect("three notes in all").to_string();
+        assert!(
+            error.contains("More than 2 memories in this vault"),
+            "{error}"
+        );
+
+        // A domain that grows past the limit is refused, as loading it is.
+        let extra = input("relay", "extra", "The ledger keeps every entry.");
+        app.store.upsert(&extra).await?;
+        for _ in 0..2 {
+            let grown = results(&app, &["relay"], "ledger").await;
+            let error = grown.err().expect("three notes in relay").to_string();
+            assert!(
+                error.contains("More than 2 memories in this scope"),
+                "{error}"
+            );
+        }
+        assert!(app.store.notes(Some("relay"), true).await.is_err());
+        app.store = app.store.with_max_notes(3);
+        assert_eq!(results(&app, &["relay"], "ledger").await?.stats.notes, 3);
         Ok(())
     }
 }
