@@ -66,12 +66,16 @@ impl Embedder {
     /// A note it may not read keeps no vector, and search finds it by
     /// keyword, label, and link.
     pub fn reads(&self, input: &NoteInput) -> bool {
+        self.reads_locked(&input.domain, &input.lock)
+    }
+
+    /// [`Embedder::reads`] for a note of `domain` with note lock `lock`.
+    pub fn reads_locked(&self, domain: &str, lock: &[String]) -> bool {
         let reader = self.config.embedding_reader;
         reader == Provider::Local
-            || (self.reads_domain(&input.domain)
-                && (input.lock.is_empty()
-                    || input
-                        .lock
+            || (self.reads_domain(domain)
+                && (lock.is_empty()
+                    || lock
                         .iter()
                         .any(|name| Provider::parse(name).is_ok_and(|p| p == reader))))
     }

@@ -6,6 +6,7 @@
 //! a slow or failing embedding service never blocks other writers and never
 //! leaves a half-saved note behind.
 
+mod cache;
 mod codemap;
 mod context;
 mod excerpt;
@@ -43,6 +44,8 @@ pub struct App {
     pub store: Store,
     pub vector: Qdrant,
     embedder: Embedder,
+    /// This process's search indexes, shared by its clones.
+    cache: std::sync::Arc<cache::SearchCache>,
 }
 
 /// Text embedded for a note: its identifying labels, then the body.
@@ -86,7 +89,9 @@ fn too_long_context(error: anyhow::Error, input: &NoteInput) -> anyhow::Error {
 
 impl App {
     pub async fn connect(config: Config) -> Result<Self> {
-        let store = Store::connect(&config.database_url).await?;
+        let store = Store::connect(&config.database_url)
+            .await?
+            .with_max_notes(config.max_notes);
         store.migrate().await?;
         let vector = Qdrant::new(
             &config.qdrant_url,
@@ -110,6 +115,7 @@ impl App {
             store,
             vector,
             embedder,
+            cache: Default::default(),
         })
     }
 

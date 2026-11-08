@@ -414,6 +414,7 @@ mod tests {
                 config.embedding_dim,
             )?,
             embedder: Embedder::new(&config)?,
+            cache: Default::default(),
             store,
             config,
         };

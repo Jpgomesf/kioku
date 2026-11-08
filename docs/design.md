@@ -18,7 +18,11 @@ choice, so the storage section is the design rationale, with its tradeoffs.
 1. **Signals.** Qdrant returns cosine similarity for current vectors; BM25 runs
    over keys, titles, aliases, tags, and bodies, with accent folding and
    identifiers such as `TW-4290` kept whole. Notes the vector index hasn't
-   caught up with still match by keyword.
+   caught up with still match by keyword. Each server process keeps an index
+   of every domain it searches and, per search, checks one row to learn
+   whether any process wrote to the domain since; it then reads only the
+   notes written after its snapshot. The query is embedded while that check
+   runs.
 2. **Fusion.** Reciprocal Rank Fusion combines the rankings without calibrating
    their score scales. A note whose key, title, or alias equals the query ranks
    first.
@@ -155,11 +159,17 @@ Paths that keep PostgreSQL as the source of truth:
 
 ## Known limits
 
-- **Search loads the whole domain.** Every search reads the domain's notes from
-  PostgreSQL and scores BM25 in memory. That is fine for hundreds of notes.
-  Latency at 1k to 10k notes isn't measured yet. The planned path is BM25 in an
-  index (see above), a domain filter in Qdrant, and only the edge list in memory
-  for PageRank.
+- **The first search in a process reads the whole domain.** Later searches in
+  the same process reuse its index, but a hook that starts a server for one
+  search pays for building it every time (26 ms at 1,000 notes, 182 ms at
+  10,000, 1.8 s at 100,000). A process that indexes 100,000 notes holds about
+  180 MB, of which the index is about 128 MB; it reads rows a thousand at a
+  time, so their text is never all in memory. Search, saves, imports, and
+  repair load whole domains and refuse one of more than 10,000 notes; the
+  figures at 100,000 come from `kioku bench`, which lifts that limit. BM25 in
+  an index outside the process (see above, or Qdrant's) would remove the
+  first-search cost; [evaluation.md](evaluation.md#scale) has the
+  measurements.
 - **Notes are embedded whole.** Each must fit the embedding model's context
   window. OKF imports split long concepts by section
   ([notes.md](notes.md#open-knowledge-format-bundles)); other notes are

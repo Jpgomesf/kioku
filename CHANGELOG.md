@@ -8,6 +8,15 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `kioku bench` times retrieval at scale. It grows the bundled dataset's
+  domain in isolated storage with synthetic distractor notes (English and
+  Portuguese, linked within each of 400 made-up systems, embedded for real) to
+  `--notes` notes, then runs the graded queries warm and as the first query of
+  a new process, reporting quality, p50 and p95 latency, and time per stage.
+  `--reuse-storage` measures again without embedding anything
+  ([docs/evaluation.md](docs/evaluation.md#scale)). It lifts the 10,000-note
+  limit for the domain it grows.
+
 - `memory_get` and `memory_inspect` return each note's `aliases`, `[]` when it
   has none, so a client can tell a note without aliases from an older server.
   A save replaces the list, so an agent that adds an alias reads the current
@@ -157,6 +166,35 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- Search no longer loads and tokenizes its whole domain for every query. Each
+  server process keeps an index of every domain it searches: BM25 postings and
+  statistics, exact labels, retention inputs, and links, read with only the
+  columns ranking needs. Triggers in the schema bump a per-domain version on
+  every write to notes or links, by any process, so a search checks one row
+  and, when it moved, reads only the notes written since the index's snapshot.
+  A deletion, a TRUNCATE, or a note moving to another domain rebuilds the
+  indexes it touches, and so does a count below the index's, as after
+  restoring the database. Statistics are kept per status and lock, so a
+  hidden note still neither matches nor shifts the scores of visible ones.
+  The query is embedded while the index is checked, and BM25 runs while
+  Qdrant answers. A warm search at 10,000 notes takes 12 ms instead of 214 ms
+  (median), and 16 ms instead of 2 s at 100,000; the first search in a new
+  process still reads the domain (182 ms at 10,000 notes). The index is read
+  a thousand rows at a time and a search ranks in full only the matches it
+  can return, so a process that searched a 10,000-note domain peaks at 34 MB
+  of resident memory instead of 92 MB, and one that searches 100,000 notes
+  stays near 180 MB instead of 777 MB. Rankings are unchanged: the bundled
+  eval matches the previous version on every variant, ablation, and context
+  pack, and so does every query of the scale benchmark.
+- Graph expansion computes Personalized PageRank by pushing probability out
+  from the top matches instead of iterating over every note of the domain, so
+  its cost follows the matches' neighbourhood. Masses agree with the global
+  computation to within 1e-8.
+- Search counts a domain's legacy notes too against its 10,000-note limit, as
+  saves do, since the index holds every note of the domain.
+- The schema needs PostgreSQL 13 or later; on an older server, Kioku stops at
+  startup with an error that names the requirement and the server's version.
+  The bundled services run 17.
 - The README leads with how to use Kioku well: the memory loop, the
   kioku-skills hooks and skills, tool habits, note writing and upkeep, then
   results, design choices, a comparison and limits. Its long reference

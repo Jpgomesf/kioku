@@ -187,6 +187,78 @@ exposed note, `error-codes`, appears in unrelated results at 1.9× the uniform
 rate, and slightly more often without links (2.1× for vector only), so its
 reach comes from content similarity, not from the graph.
 
+## Scale
+
+`kioku bench` measures how quality and latency change as a domain grows. It
+imports the bundled dataset into isolated storage, adds synthetic distractor
+notes until the domain holds `--notes` notes, and runs the 40 graded queries as
+MCP clients do by default (hybrid with graph expansion, k = 5): warm, in three
+passes after a warm-up, then once each as the first query of a new process.
+The second is what a hook gets when it starts a short-lived server for one
+search.
+
+```sh
+./bin/kioku bench --notes 10000                  # grows <database>_eval_<model>_scale10000 once
+./bin/kioku bench --notes 10000 --reuse-storage  # measures again without embedding anything
+```
+
+The distractors ([`src/eval/synthetic.rs`](../src/eval/synthetic.rs)) read
+like a platform team's notes about 400 systems the queries never ask about:
+retry policies, alert thresholds, retention, runbooks, error codes, settings,
+metrics, and commands, a quarter of them in Portuguese, each linked to earlier
+notes about the same system. No distractor label equals a query. Every note is
+embedded for real; growing a domain to 100,000 notes with `nomic-embed-text` on
+an Apple M5 Max (Ollama on the GPU) took 13 minutes.
+
+Measured on 2026-11-08 on an Apple M5 Max, with PostgreSQL 17, Qdrant 1.20,
+and Ollama with `nomic-embed-text` on the same machine. Warm percentiles pool
+120 searches (three passes over the 40 queries); a new process gives 40
+samples, and spends the startup shown (connecting and checking the schema)
+before its first search. Stage times are means. In the indexed path the query
+is embedded while the index is checked, so `dense` overlaps `load`.
+`kioku bench` lifts the 10,000-note limit for the domain it grows; the scan at
+100,000 notes ran in a build with that limit lifted, since the version it
+measures refuses such a domain.
+
+| Notes | Search | Recall@5 | nDCG@5 | MRR | p50 ms | p95 ms | Mean ms: startup, load, dense, rank |
+|---|---|---|---|---|---|---|---|
+| 24 | scan per search (before) | 0.958 | 0.930 | 0.958 | 9.2 | 13.3 | –, 0.7, 8.1, 1.0 |
+| 24 | index, warm | 0.958 | 0.930 | 0.958 | 9.6 | 12.9 | –, 0.6, 8.6, 0.7 |
+| 24 | index, first search in a new process | 0.958 | 0.930 | 0.958 | 12.2 | 17.9 | 19, 6.3, 11.1, 1.1 |
+| 1,000 | scan per search (before) | 0.866 | 0.834 | 0.870 | 33.8 | 39.0 | –, 5.3, 13.0, 15.4 |
+| 1,000 | index, warm | 0.866 | 0.834 | 0.870 | 9.8 | 13.6 | –, 0.6, 8.8, 0.8 |
+| 1,000 | index, first search in a new process | 0.866 | 0.834 | 0.870 | 25.7 | 29.0 | 20, 23.4, 13.5, 1.3 |
+| 10,000 | scan per search (before) | 0.796 | 0.743 | 0.771 | 214.4 | 226.6 | –, 51.1, 15.7, 147.3 |
+| 10,000 | index, warm | 0.796 | 0.743 | 0.771 | 11.8 | 16.8 | –, 0.6, 10.1, 2.0 |
+| 10,000 | index, first search in a new process | 0.796 | 0.743 | 0.771 | 181.5 | 184.9 | 31, 176.3, 16.5, 2.4 |
+| 100,000 | scan per search (before) | 0.718 | 0.610 | 0.616 | 2,047.6 | 2,079.5 | –, 497.8, 26.1, 1,516.6 |
+| 100,000 | index, warm | 0.718 | 0.610 | 0.616 | 16.1 | 27.3 | –, 0.6, 11.0, 6.3 |
+| 100,000 | index, first search in a new process | 0.718 | 0.610 | 0.616 | 1,803.6 | 1,853.3 | 207, 1,796.7, 25.3, 7.3 |
+
+- **Rankings are identical.** All 40 queries rank the same with the index as
+  with the scan, warm and in new processes, at every size, and the bundled
+  eval's report is unchanged.
+- **A warm search costs about the embedding.** Of 16 ms at 100,000 notes, BM25
+  takes 0.5 ms, graph expansion 2.3 ms, and the index check 0.6 ms.
+- **A new process still reads the whole domain.** Its first search costs
+  about what a scan did, and a hook that starts a server for one search pays
+  it every time: 26 ms at 1,000 notes, 182 ms at 10,000, 1.8 s at 100,000.
+- **Memory.** A process that searched once peaks at 34 MB of resident memory
+  with a 10,000-note domain (the scan: 92 MB) and 180 MB at 100,000 (the scan:
+  777 MB), and a long-lived server stays at 38 MB and 183 MB after warm-up. At
+  100,000 notes the index itself holds about 128 MB: posting lists 59 MB,
+  per-note entries 22 MB, labels for exact matches 21 MB, links 15 MB, and the
+  vocabulary 8 MB. It reads rows a thousand at a time and ranks in full only
+  the matches a search can return. An earlier build that loaded every row at
+  once and ranked every match peaked at 58 MB and 418 MB, and its servers grew
+  to about 600 MB at 100,000, mostly memory the allocator kept after freeing
+  it. These memory figures come from CI's hashing embedder, which the index
+  doesn't depend on; with it, the change also made the first search at
+  100,000 notes faster (1,818 to 1,677 ms) and warm ones too (6.8 to 5.9 ms),
+  with identical rankings and eval.
+- **Quality falls with distractors** in both, the same way: a larger domain
+  holds more notes that resemble the answer.
+
 ## Reading small samples
 
 - With n queries, one query moves an average by 1/n. Report counts per
@@ -215,7 +287,7 @@ reach comes from content similarity, not from the graph.
 - Four multi-hop queries can't show a graph gain outside noise. More multi-hop
   questions with `required` sets, ideally from real sessions, are the cheapest
   way to make the graph measurements decisive.
-- Search ranks over the whole domain in memory, which is fine for hundreds of
-  notes. Measure latency at 1k-10k notes before relying on larger domains.
+- The first search in a process indexes the whole domain, which is what a
+  short-lived client pays on every search ([Scale](#scale)).
 - The query set should grow with real questions, split into tuning and test
   halves, and include each model's actual search strings from behavior runs.

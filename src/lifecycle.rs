@@ -4,6 +4,33 @@ use chrono::{DateTime, Utc};
 
 use crate::model::Note;
 
+/// What retention depends on: a note's usage record, so a search
+/// index can keep it without the note's text.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Usage {
+    pub pinned: bool,
+    pub confidence: f64,
+    pub updated_at: DateTime<Utc>,
+    pub last_accessed_at: Option<DateTime<Utc>>,
+    pub access_count: i64,
+    pub positive_feedback: i64,
+    pub negative_feedback: i64,
+}
+
+impl Usage {
+    pub fn of(note: &Note) -> Self {
+        Self {
+            pinned: note.input.pinned,
+            confidence: note.input.confidence,
+            updated_at: note.updated_at,
+            last_accessed_at: note.last_accessed_at,
+            access_count: note.access_count,
+            positive_feedback: note.positive_feedback,
+            negative_feedback: note.negative_feedback,
+        }
+    }
+}
+
 /// Retention is separate from query PageRank and is recalculated from original
 /// timestamps, never compounded on the previously stored retention score.
 ///
@@ -14,10 +41,15 @@ use crate::model::Note;
 /// previews should not be counted as consumption by the caller. Pinned notes have
 /// retention 1, which protects their presence without asserting factual certainty.
 pub fn retention(note: &Note, now: DateTime<Utc>, half_life_days: f64) -> f64 {
-    if note.input.pinned {
+    retention_of(&Usage::of(note), now, half_life_days)
+}
+
+/// [`retention`] from a usage record alone.
+pub fn retention_of(note: &Usage, now: DateTime<Utc>, half_life_days: f64) -> f64 {
+    if note.pinned {
         return 1.0;
     }
-    if !note.input.confidence.is_finite() {
+    if !note.confidence.is_finite() {
         return 0.0;
     }
     let half_life_days = if half_life_days.is_finite() && half_life_days > 0.0 {
@@ -37,7 +69,7 @@ pub fn retention(note: &Note, now: DateTime<Utc>, half_life_days: f64) -> f64 {
     let accesses = note.access_count.max(0) as f64;
     let usage = 1.0 + 0.15 * accesses / (accesses + 20.0);
     let decay = 2.0_f64.powf(-age_months * 30.0 / half_life_days);
-    (note.input.confidence.clamp(0.0, 1.0) * feedback * usage * decay).clamp(0.0, 1.0)
+    (note.confidence.clamp(0.0, 1.0) * feedback * usage * decay).clamp(0.0, 1.0)
 }
 
 #[cfg(test)]

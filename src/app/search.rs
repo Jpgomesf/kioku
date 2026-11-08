@@ -1,24 +1,28 @@
 //! Ranked search and graph lookups around a note.
 //!
-//! With a [`Viewer`], notes it may not see are dropped before ranking. The
-//! vector index is told to leave them out of its candidates, and links that
-//! touch them are dropped, so a hidden note can neither be returned nor shift
-//! the ranking of visible ones.
+//! Search ranks over this process's index of each searched domain
+//! ([`super::cache`]), checked against PostgreSQL first. With a [`Viewer`],
+//! notes it may not see are left out of the ranking: they neither match nor
+//! count in BM25's statistics, the vector index is told to leave them out of
+//! its candidates, and graph expansion never walks through them, so a hidden
+//! note can neither be returned nor shift the ranking of visible ones.
 
-use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::time::Instant;
 
-use anyhow::Result;
-use chrono::Utc;
+use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::Serialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::error::{invalid, not_found};
+use crate::graph;
 use crate::model::{Edge, Note, Status};
-use crate::rank::{self, MatchKind, RankInput, RankOptions};
+use crate::rank::index::{Entry, View, corpus_weights};
+use crate::rank::{self, Candidates, Direct, MatchKind, RankOptions, Ranked, tokenize};
+use crate::store::HitFields;
 use crate::text::truncate_chars;
 use crate::vault::Viewer;
 
@@ -103,16 +107,21 @@ pub struct SearchStats {
     pub links: usize,
     /// Results that entered through a link.
     pub link_hits: usize,
+    /// Notes read from PostgreSQL to bring this process's index up to date:
+    /// the whole domain the first time, then only what changed.
+    pub refreshed: usize,
+    /// Checking (and if needed refreshing) the index.
     pub load_ms: f64,
+    /// Embedding the query and the vector index's search. It runs while the
+    /// index is checked and BM25 scores, so it overlaps those stages.
     pub dense_ms: f64,
+    /// BM25 scoring and exact label matches.
+    pub lexical_ms: f64,
+    /// Graph expansion.
+    pub graph_ms: f64,
+    /// Everything after the signals: fusion, graph expansion, and reading
+    /// the hits' text.
     pub rank_ms: f64,
-}
-
-/// Dense scores plus what the vector index returned, for [`SearchStats`].
-struct Dense {
-    scores: HashMap<Uuid, f64>,
-    candidates: usize,
-    stale: usize,
 }
 
 fn elapsed_ms(started: Instant) -> f64 {
@@ -134,6 +143,67 @@ pub(super) fn hide(notes: &mut Vec<Note>, viewer: Option<&Viewer>) -> HashSet<Uu
     hidden
 }
 
+/// The ranked notes of one search, across the views of its domains.
+struct Ranking<'a> {
+    views: &'a [View<'a>],
+    now: DateTime<Utc>,
+    half_life_days: f64,
+    /// Links to rank with instead of the stored ones (evaluation ablations).
+    edges: Option<HashMap<Uuid, Vec<(Uuid, f64)>>>,
+}
+
+impl Ranking<'_> {
+    fn entry(&self, id: Uuid) -> Option<&Entry> {
+        self.views.iter().find_map(|view| view.entry(id))
+    }
+}
+
+impl Candidates for Ranking<'_> {
+    fn contains(&self, id: Uuid) -> bool {
+        self.entry(id).is_some()
+    }
+
+    fn unembedded(&self, id: Uuid) -> bool {
+        self.entry(id).is_some_and(|e| e.unembedded)
+    }
+
+    fn retention(&self, id: Uuid) -> f64 {
+        self.entry(id)
+            .map_or(0.0, |e| e.retention(self.now, self.half_life_days))
+    }
+
+    fn links(&self, id: Uuid) -> Option<Vec<(Uuid, f64)>> {
+        let stored = match &self.edges {
+            Some(edges) => edges.get(&id).map(Vec::as_slice),
+            None => self.views.iter().find_map(|view| view.links(id)),
+        };
+        Some(
+            stored
+                .unwrap_or_default()
+                .iter()
+                .filter(|(other, _)| self.contains(*other))
+                .copied()
+                .collect(),
+        )
+    }
+}
+
+/// Links grouped by note, as [`graph::link_weights`] builds them.
+fn link_map(edges: &[Edge]) -> HashMap<Uuid, Vec<(Uuid, f64)>> {
+    let mut raw: HashMap<Uuid, Vec<(Uuid, f64)>> = HashMap::new();
+    for edge in edges {
+        raw.entry(edge.source)
+            .or_default()
+            .push((edge.target, edge.weight));
+        raw.entry(edge.target)
+            .or_default()
+            .push((edge.source, edge.weight));
+    }
+    raw.into_iter()
+        .map(|(id, links)| (id, graph::link_weights(links, id)))
+        .collect()
+}
+
 impl App {
     #[tracing::instrument(
         name = "search",
@@ -150,25 +220,72 @@ impl App {
             invalid!("limit must be between 1 and 20");
         }
         let domain = self.domain(request.domain);
-        let one = [domain.to_owned()];
-        let domains: &[String] = request.domains.unwrap_or(&one);
+        let mut domains: Vec<String> = match request.domains {
+            Some(domains) => domains.to_vec(),
+            None => vec![domain.to_owned()],
+        };
+        domains.sort();
+        domains.dedup();
         let span = tracing::Span::current();
         span.record("domain", domains.join(",").as_str());
         let mut stats = SearchStats::default();
+        // The query goes to the embedding service only if that service may
+        // read a searched domain; otherwise none of their notes has a vector.
+        // It is embedded while the index is checked.
+        let embedding = domains
+            .iter()
+            .any(|domain| self.embedder.reads_domain(domain))
+            .then(|| {
+                let embedder = self.embedder.clone();
+                let text = query.to_owned();
+                tokio::spawn(async move {
+                    let started = Instant::now();
+                    (embedder.embed_query(&text).await, elapsed_ms(started))
+                })
+            });
         let stage = Instant::now();
-        let restricted = request.viewer.is_some_and(Viewer::restricts_notes);
-        let mut notes = match domains {
-            [domain] => {
-                self.store
-                    .notes(Some(domain), request.include_legacy)
-                    .await?
+        let ready = match self.search_indexes(&domains).await.and_then(|ready| {
+            // A vault-wide search ranks at most the note limit in all, as
+            // when its domains were loaded together.
+            if domains.len() > 1 {
+                let notes = ready
+                    .indexes
+                    .iter()
+                    .filter_map(|cached| {
+                        Some(cached.as_ref()?.index.searched(request.include_legacy))
+                    })
+                    .sum();
+                self.store.check_vault_size(notes)?;
             }
-            several => self.store.notes_in(several, request.include_legacy).await?,
+            Ok(ready)
+        }) {
+            Ok(ready) => ready,
+            Err(error) => {
+                if let Some(task) = &embedding {
+                    task.abort();
+                }
+                return Err(error);
+            }
         };
-        let hidden = hide(&mut notes, request.viewer);
         stats.load_ms = elapsed_ms(stage);
-        stats.notes = notes.len();
-        if notes.is_empty() {
+        stats.refreshed = ready.refreshed;
+        let views: Vec<View<'_>> = ready
+            .indexes
+            .iter()
+            .zip(&domains)
+            .filter_map(|(cached, domain)| {
+                Some(cached.as_ref()?.index.view(request.include_legacy, |lock| {
+                    request
+                        .viewer
+                        .is_none_or(|viewer| viewer.sees_locked(domain, lock))
+                }))
+            })
+            .collect();
+        stats.notes = views.iter().map(View::notes).sum::<u64>() as usize;
+        if stats.notes == 0 {
+            if let Some(task) = &embedding {
+                task.abort();
+            }
             return Ok(SearchResults {
                 hits: Vec::new(),
                 warnings: Vec::new(),
@@ -176,22 +293,73 @@ impl App {
             });
         }
         let mut warnings = Vec::new();
-        let unsynced = notes.iter().filter(|n| !n.vector_synced).count();
+        let unsynced = views.iter().map(View::unsynced).sum::<u64>() as usize;
         stats.unsynced = unsynced;
         if unsynced > 0 {
             warnings.push(format!(
                 "{unsynced} memories in this domain are not in the vector index yet and can only match by keyword; they are re-indexed automatically"
             ));
         }
-        let stage = Instant::now();
-        let dense = match self
-            .dense_scores(query, domains, &notes, &hidden, request)
-            .await
-        {
-            Ok(dense) => {
-                stats.dense_candidates = dense.candidates;
-                stats.dense_stale = dense.stale;
-                dense.scores
+        // Hidden notes are excluded in the vector index itself, so they take
+        // no candidate slot.
+        let mut hidden: Vec<Uuid> = views.iter().flat_map(View::hidden).collect();
+        hidden.sort_unstable();
+        let searched: Vec<&str> = domains.iter().map(String::as_str).collect();
+        let dense = async {
+            let Some(task) = embedding else {
+                return Ok((Vec::new(), 0.0));
+            };
+            let (vector, embed_ms) = task.await.context("the query embedding task failed")?;
+            let started = Instant::now();
+            let hits = self
+                .vector
+                .search(
+                    vector?,
+                    Some(&searched),
+                    request.include_legacy,
+                    &hidden,
+                    (request.limit * 10).clamp(50, 200),
+                )
+                .await?;
+            anyhow::Ok((hits, embed_ms + elapsed_ms(started)))
+        };
+        let lexical = async {
+            let started = Instant::now();
+            let mut scores = Vec::new();
+            if request.ranking.lexical {
+                let terms: BTreeSet<String> = tokenize(query).into_iter().collect();
+                let (weights, average_length) = corpus_weights(&views, &terms);
+                for view in &views {
+                    view.bm25(&weights, average_length, &mut scores);
+                }
+            }
+            let mut exact: Vec<Uuid> = views.iter().flat_map(|view| view.exact(query)).collect();
+            exact.sort();
+            (scores, exact, elapsed_ms(started))
+        };
+        let (dense, (lexical, exact, lexical_ms)) = tokio::join!(dense, lexical);
+        stats.lexical_ms = lexical_ms;
+        let dense: HashMap<Uuid, f64> = match dense {
+            Ok((hits, dense_ms)) => {
+                stats.dense_ms = dense_ms;
+                stats.dense_candidates = hits.len();
+                // PostgreSQL is authoritative even if a vector payload is stale.
+                let scores: HashMap<Uuid, f64> = hits
+                    .into_iter()
+                    .filter(|hit| {
+                        views
+                            .iter()
+                            .find_map(|view| view.entry(hit.id))
+                            .is_some_and(|e| {
+                                e.vector_synced
+                                    && e.revision == hit.revision
+                                    && hit.score.is_finite()
+                            })
+                    })
+                    .map(|hit| (hit.id, hit.score.clamp(0.0, 1.0)))
+                    .collect();
+                stats.dense_stale = stats.dense_candidates - scores.len();
+                scores
             }
             Err(error) if request.ranking.lexical => {
                 tracing::warn!(error = format!("{error:#}"), "dense retrieval failed");
@@ -202,75 +370,38 @@ impl App {
             }
             Err(error) => return Err(error),
         };
-        stats.dense_ms = elapsed_ms(stage);
         let stage = Instant::now();
-        let mut edges: Cow<'_, [Edge]> = match request.edges {
-            Some(edges) => Cow::Borrowed(edges),
-            None if request.ranking.graph => Cow::Owned(match domains {
-                [domain] => self.store.edges(Some(domain)).await?,
-                several => self.store.edges_in(several).await?,
-            }),
-            None => Cow::Borrowed(&[]),
+        let candidates = Ranking {
+            views: &views,
+            now: Utc::now(),
+            half_life_days: self.config.half_life_days,
+            edges: request.edges.map(link_map),
         };
-        if restricted || !hidden.is_empty() {
-            // Keep only links between ranked notes, so none touches a hidden
-            // one, including hidden legacy notes that weren't loaded.
-            let ranked: HashSet<Uuid> = notes.iter().map(|n| n.id).collect();
-            edges = Cow::Owned(
-                edges
-                    .iter()
-                    .filter(|e| ranked.contains(&e.source) && ranked.contains(&e.target))
-                    .cloned()
-                    .collect(),
-            );
-        }
-        let edges: &[Edge] = &edges;
-        stats.links = edges.len();
-        let unembedded: HashSet<Uuid> = notes
-            .iter()
-            .filter(|note| !self.embedder.reads(&note.input))
-            .map(|note| note.id)
-            .collect();
-        let ranked = rank::rank(
-            &RankInput {
-                notes: &notes,
-                edges,
-                dense: &dense,
-                unembedded: &unembedded,
-                query,
-                limit: request.limit,
-                now: Utc::now(),
-                half_life_days: self.config.half_life_days,
-            },
-            request.ranking,
-        );
-        let by_id: HashMap<Uuid, &Note> = notes.iter().map(|n| (n.id, n)).collect();
-        let hits = ranked
-            .into_iter()
-            .filter_map(|r| {
-                let note = by_id.get(&r.id)?;
-                Some(SearchHit {
-                    id: note.id,
-                    key: note.input.key.clone(),
-                    domain: note.input.domain.clone(),
-                    title: note.input.title.clone(),
-                    status: note.status,
-                    source: note.input.source.clone(),
-                    snippet: truncate_chars(&note.input.body, SNIPPET_CHARS),
-                    score: r.score,
-                    kind: r.kind,
-                    linked_from: r
-                        .linked_from
-                        .and_then(|id| by_id.get(&id))
-                        .map(|n| n.input.key.clone()),
-                    signals: Signals {
-                        dense: r.dense,
-                        lexical: r.lexical,
-                        retention: r.retention,
-                    },
-                })
-            })
-            .collect::<Vec<_>>();
+        stats.links = match request.edges {
+            Some(edges) => edges.len(),
+            None => ready
+                .indexes
+                .iter()
+                .filter_map(|cached| Some(cached.as_ref()?.index.link_count()))
+                .sum(),
+        };
+        let signals = rank::Signals {
+            dense: &dense,
+            lexical,
+            exact,
+        };
+        let direct = Direct::new(&signals, &candidates, request.ranking, request.limit);
+        let ranked = if request.ranking.graph && !direct.is_empty() {
+            let started = Instant::now();
+            let mut walk = graph::LocalPagerank::new(&direct.seeds(), rank::EXPANSION_RESTART);
+            walk.run(|id| candidates.links(id));
+            let ranked = direct.expand(&walk.into_masses(), &candidates, request.limit);
+            stats.graph_ms = elapsed_ms(started);
+            ranked
+        } else {
+            direct.truncate(request.limit)
+        };
+        let hits = self.hits(ranked, &candidates, request).await?;
         stats.rank_ms = elapsed_ms(stage);
         stats.link_hits = hits.iter().filter(|h| h.kind == MatchKind::Link).count();
         span.record("notes", stats.notes);
@@ -284,59 +415,53 @@ impl App {
         })
     }
 
-    /// Cosine similarity for notes whose indexed revision is current.
-    /// PostgreSQL is authoritative even if a vector payload is stale. Hidden
-    /// notes are excluded in the index itself, so they take no candidate slot.
-    async fn dense_scores(
+    /// Read the ranked notes' text for the results. A note that changed since
+    /// the index was checked so that the caller may no longer see it, or that
+    /// left the searched status, is left out.
+    async fn hits(
         &self,
-        query: &str,
-        domains: &[String],
-        notes: &[Note],
-        hidden: &HashSet<Uuid>,
+        ranked: Vec<Ranked>,
+        candidates: &Ranking<'_>,
         request: &SearchRequest<'_>,
-    ) -> Result<Dense> {
-        // The query goes to the embedding service only if that service may
-        // read a searched domain; otherwise none of their notes has a vector.
-        if !domains
-            .iter()
-            .any(|domain| self.embedder.reads_domain(domain))
-        {
-            return Ok(Dense {
-                scores: HashMap::new(),
-                candidates: 0,
-                stale: 0,
-            });
-        }
-        let vector = self.embedder.embed_query(query).await?;
-        let domains: Vec<&str> = domains.iter().map(String::as_str).collect();
-        let mut exclude: Vec<Uuid> = hidden.iter().copied().collect();
-        exclude.sort_unstable();
-        let hits = self
-            .vector
-            .search(
-                vector,
-                Some(&domains),
-                request.include_legacy,
-                &exclude,
-                (request.limit * 10).clamp(50, 200),
-            )
-            .await?;
-        let by_id: HashMap<Uuid, &Note> = notes.iter().map(|n| (n.id, n)).collect();
-        let candidates = hits.len();
-        let scores: HashMap<Uuid, f64> = hits
+    ) -> Result<Vec<SearchHit>> {
+        let ids: Vec<Uuid> = ranked.iter().map(|r| r.id).collect();
+        let mut fields: HashMap<Uuid, HitFields> = self
+            .store
+            .search_hits(&ids)
+            .await?
             .into_iter()
-            .filter(|hit| {
-                by_id.get(&hit.id).is_some_and(|note| {
-                    note.vector_synced && note.revision == hit.revision && hit.score.is_finite()
+            .map(|f| (f.id, f))
+            .collect();
+        Ok(ranked
+            .into_iter()
+            .filter_map(|r| {
+                let note = fields.remove(&r.id)?;
+                let visible = request
+                    .viewer
+                    .is_none_or(|viewer| viewer.sees_locked(&note.domain, &note.lock))
+                    && (request.include_legacy || note.status == Status::Active);
+                visible.then(|| SearchHit {
+                    id: note.id,
+                    key: note.key,
+                    domain: note.domain,
+                    title: note.title,
+                    status: note.status,
+                    source: note.source,
+                    snippet: truncate_chars(&note.body, SNIPPET_CHARS),
+                    score: r.score,
+                    kind: r.kind,
+                    linked_from: r
+                        .linked_from
+                        .and_then(|id| candidates.entry(id))
+                        .map(|e| e.key.clone()),
+                    signals: Signals {
+                        dense: r.dense,
+                        lexical: r.lexical,
+                        retention: r.retention,
+                    },
                 })
             })
-            .map(|hit| (hit.id, hit.score.clamp(0.0, 1.0)))
-            .collect();
-        Ok(Dense {
-            stale: candidates - scores.len(),
-            candidates,
-            scores,
-        })
+            .collect())
     }
 
     /// A note and its explicit links. With a viewer, a note it may not see is

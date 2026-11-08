@@ -70,6 +70,46 @@ fn is_stopword(token: &str) -> bool {
     STOPWORDS.contains(&token)
 }
 
+/// A note's term frequencies for BM25: its key, title, aliases, and tags
+/// counted twice, as they are written to identify the note, plus its body.
+pub(super) fn note_terms(
+    key: &str,
+    title: &str,
+    aliases: &[String],
+    tags: &[String],
+    body: &str,
+) -> HashMap<String, u32> {
+    let labels = format!(
+        "{} {} {} {}",
+        key.replace(['-', '_'], " "),
+        title,
+        aliases.join(" "),
+        tags.join(" ")
+    );
+    let label_tokens = tokenize(&labels);
+    let mut terms: HashMap<String, u32> = HashMap::new();
+    for token in label_tokens
+        .iter()
+        .chain(&label_tokens)
+        .cloned()
+        .chain(tokenize(body))
+    {
+        *terms.entry(token).or_default() += 1;
+    }
+    terms
+}
+
+/// Inverse document frequency of a term in `df` of `n` documents.
+pub(super) fn idf(n: f64, df: f64) -> f64 {
+    (1.0 + (n - df + 0.5) / (df + 0.5)).ln()
+}
+
+/// One term's BM25 contribution to a document of `length` terms.
+pub(super) fn term_score(idf: f64, tf: f64, length: f64, average_length: f64) -> f64 {
+    let norm = 1.0 - BM25_B + BM25_B * length / average_length;
+    idf * tf * (BM25_K1 + 1.0) / (tf + BM25_K1 * norm)
+}
+
 /// Okapi BM25 over a note's key, title, aliases, and tags (counted twice, as
 /// they are written to identify the note) plus its body.
 pub(super) struct Bm25 {
@@ -84,23 +124,14 @@ impl Bm25 {
         let mut document_frequency: HashMap<String, u32> = HashMap::new();
         let mut total = 0usize;
         for note in notes {
-            let labels = format!(
-                "{} {} {} {}",
-                note.input.key.replace(['-', '_'], " "),
-                note.input.title,
-                note.input.aliases.join(" "),
-                note.input.tags.join(" ")
+            let input = &note.input;
+            let terms = note_terms(
+                &input.key,
+                &input.title,
+                &input.aliases,
+                &input.tags,
+                &input.body,
             );
-            let label_tokens = tokenize(&labels);
-            let mut terms: HashMap<String, u32> = HashMap::new();
-            for token in label_tokens
-                .iter()
-                .chain(&label_tokens)
-                .cloned()
-                .chain(tokenize(&note.input.body))
-            {
-                *terms.entry(token).or_default() += 1;
-            }
             let length = terms.values().map(|n| *n as usize).sum::<usize>();
             total += length;
             for term in terms.keys() {
@@ -131,10 +162,12 @@ impl Bm25 {
                     continue;
                 };
                 let df = f64::from(self.document_frequency[term]);
-                let idf = (1.0 + (n - df + 0.5) / (df + 0.5)).ln();
-                let tf = f64::from(tf);
-                let norm = 1.0 - BM25_B + BM25_B * *length as f64 / self.average_length;
-                score += idf * tf * (BM25_K1 + 1.0) / (tf + BM25_K1 * norm);
+                score += term_score(
+                    idf(n, df),
+                    f64::from(tf),
+                    *length as f64,
+                    self.average_length,
+                );
             }
             if score > 0.0 {
                 scores.push((*id, score));

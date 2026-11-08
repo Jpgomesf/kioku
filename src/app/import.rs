@@ -23,7 +23,7 @@ use crate::embedding::{self, failed_index, is_too_long};
 use crate::error::{UserError, invalid, not_found};
 use crate::graph::{self, UnresolvedRelation};
 use crate::markdown;
-use crate::model::{NoteInput, Status};
+use crate::model::{Note, NoteInput, Status};
 use crate::okf;
 use crate::vault::Viewer;
 
@@ -529,6 +529,37 @@ impl App {
         report.truncated = report.notes.len() > 20;
         report.notes.truncate(20);
         Ok(report)
+    }
+
+    /// Save notes and their vectors without rebuilding their domains' links,
+    /// so a benchmark can grow a domain past what one load may hold. Each note
+    /// is embedded unless the embedding service may not read it. The caller
+    /// rebuilds the links ([`crate::store::Store::replace_edges`]).
+    pub(crate) async fn save_unlinked(&self, inputs: &[NoteInput]) -> Result<Vec<Note>> {
+        for input in inputs {
+            input.validate()?;
+        }
+        let embedded: Vec<&NoteInput> = inputs.iter().filter(|i| self.embedder.reads(i)).collect();
+        let texts: Vec<String> = embedded.iter().map(|i| document_text(i)).collect();
+        let mut vectors: HashMap<Uuid, Vec<f32>> = embedded
+            .iter()
+            .map(|input| input.id())
+            .zip(self.embedder.embed_documents(&texts).await?)
+            .collect();
+        let _guard = self.store.mutation_lock().await?;
+        let mut saved = Vec::with_capacity(inputs.len());
+        for input in inputs {
+            saved.push(self.store.upsert(input).await?);
+        }
+        let batch: Vec<(Note, Vec<f32>)> = saved
+            .iter()
+            .filter_map(|note| Some((note.clone(), vectors.remove(&note.id)?)))
+            .collect();
+        self.vector.upsert_many(&batch).await?;
+        for note in &saved {
+            self.store.mark_synced(note.id, note.revision).await?;
+        }
+        Ok(saved)
     }
 }
 

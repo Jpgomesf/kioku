@@ -129,6 +129,10 @@ pub struct Config {
     /// The folder that places a stdio session in a vault
     /// (`KIOKU_SESSION_DIR`); without it, the process working directory.
     pub session_dir: Option<PathBuf>,
+    /// Most notes a domain may hold when loaded whole ([`crate::store::MAX_NOTES`]).
+    /// Not read from the environment: only `kioku bench` raises it, for the
+    /// domain it grows.
+    pub max_notes: usize,
 }
 
 /// Where the vaults file is looked for when `MEMORY_VAULTS_FILE` is unset.
@@ -287,6 +291,7 @@ impl Config {
                 .map(|dir| crate::vault::expand_home(&dir, home.as_deref()))
                 .transpose()
                 .context("invalid KIOKU_SESSION_DIR")?,
+            max_notes: crate::store::MAX_NOTES,
         };
         ensure!(
             (1..=8192).contains(&cfg.embedding_dim),

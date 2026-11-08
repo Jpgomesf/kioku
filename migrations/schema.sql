@@ -69,6 +69,125 @@ LEFT JOIN LATERAL (
 ) latest ON true
 WHERE latest.revision IS DISTINCT FROM n.revision OR latest.status IS DISTINCT FROM n.status;
 
+-- Search caches. Each server process keeps an index of every domain it has
+-- searched, and checks per search whether the domain changed since. Every write
+-- to a domain's notes or links bumps the domain's versions below, from
+-- triggers, so writes by any process or version of Kioku count. A note that
+-- moves to another domain counts as deleted from its old one, and TRUNCATE
+-- counts as a deletion in every domain. Each note also records the
+-- transaction that last wrote it, so a cache reloads only the notes written
+-- since its snapshot. Needs PostgreSQL 13 or later.
+--
+-- This file runs whenever a process starts, so the column and triggers are
+-- created only when missing: ALTER TABLE and CREATE TRIGGER lock the table even
+-- when they would change nothing.
+CREATE TABLE IF NOT EXISTS memory_search_versions (
+    domain TEXT PRIMARY KEY,
+    notes BIGINT NOT NULL DEFAULT 0,
+    links BIGINT NOT NULL DEFAULT 0,
+    deletes BIGINT NOT NULL DEFAULT 0
+);
+
+CREATE OR REPLACE FUNCTION memory_notes_stamp() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    NEW.written_by := pg_current_xact_id();
+    RETURN NEW;
+END $$;
+
+CREATE OR REPLACE FUNCTION memory_notes_changed() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    INSERT INTO memory_search_versions AS v (domain, notes, deletes)
+    SELECT DISTINCT domain, 1, CASE WHEN TG_OP = 'DELETE' THEN 1 ELSE 0 END FROM changed ORDER BY domain
+    ON CONFLICT (domain) DO UPDATE SET notes = v.notes + 1, deletes = v.deletes + EXCLUDED.deletes;
+    RETURN NULL;
+END $$;
+
+-- An updated note bumps its domain; one that left a domain (or took another
+-- id) is gone from that domain as if deleted.
+CREATE OR REPLACE FUNCTION memory_notes_updated() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    INSERT INTO memory_search_versions AS v (domain, notes, deletes)
+    SELECT domain, 1, max(gone) FROM (
+        SELECT domain, 0 AS gone FROM changed
+        UNION ALL
+        SELECT o.domain, 1 FROM old_notes o
+        WHERE NOT EXISTS (SELECT 1 FROM changed c WHERE c.id = o.id AND c.domain = o.domain)
+    ) bumped GROUP BY domain ORDER BY domain
+    ON CONFLICT (domain) DO UPDATE SET notes = v.notes + 1, deletes = v.deletes + EXCLUDED.deletes;
+    RETURN NULL;
+END $$;
+
+CREATE OR REPLACE FUNCTION memory_edges_changed() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    INSERT INTO memory_search_versions AS v (domain, links)
+    SELECT DISTINCT n.domain, 1 FROM changed c JOIN memory_notes n ON n.id = c.source ORDER BY n.domain
+    ON CONFLICT (domain) DO UPDATE SET links = v.links + 1;
+    RETURN NULL;
+END $$;
+
+-- TRUNCATE has no transition table, so every domain starts over: those with
+-- versions, and those with notes, read before the truncation.
+CREATE OR REPLACE FUNCTION memory_search_truncated() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    INSERT INTO memory_search_versions AS v (domain, notes, deletes)
+    SELECT domain, 1, 1 FROM (
+        SELECT domain FROM memory_search_versions UNION SELECT domain FROM memory_notes
+    ) known ORDER BY domain
+    ON CONFLICT (domain) DO UPDATE SET notes = v.notes + 1, deletes = v.deletes + 1;
+    RETURN NULL;
+END $$;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = 'memory_notes'::regclass
+                   AND attname = 'written_by' AND NOT attisdropped) THEN
+        ALTER TABLE memory_notes ADD COLUMN written_by xid8;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'memory_notes_stamp') THEN
+        CREATE TRIGGER memory_notes_stamp BEFORE INSERT OR UPDATE ON memory_notes
+            FOR EACH ROW EXECUTE FUNCTION memory_notes_stamp();
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'memory_notes_inserted') THEN
+        CREATE TRIGGER memory_notes_inserted AFTER INSERT ON memory_notes
+            REFERENCING NEW TABLE AS changed FOR EACH STATEMENT EXECUTE FUNCTION memory_notes_changed();
+    END IF;
+    -- Earlier builds created this trigger without the rows before the update.
+    IF EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid = 'memory_notes'::regclass
+               AND tgname = 'memory_notes_updated' AND tgoldtable IS NULL) THEN
+        DROP TRIGGER memory_notes_updated ON memory_notes;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'memory_notes_updated') THEN
+        CREATE TRIGGER memory_notes_updated AFTER UPDATE ON memory_notes
+            REFERENCING OLD TABLE AS old_notes NEW TABLE AS changed
+            FOR EACH STATEMENT EXECUTE FUNCTION memory_notes_updated();
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'memory_notes_deleted') THEN
+        CREATE TRIGGER memory_notes_deleted AFTER DELETE ON memory_notes
+            REFERENCING OLD TABLE AS changed FOR EACH STATEMENT EXECUTE FUNCTION memory_notes_changed();
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'memory_edges_inserted') THEN
+        CREATE TRIGGER memory_edges_inserted AFTER INSERT ON memory_edges
+            REFERENCING NEW TABLE AS changed FOR EACH STATEMENT EXECUTE FUNCTION memory_edges_changed();
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'memory_edges_updated') THEN
+        CREATE TRIGGER memory_edges_updated AFTER UPDATE ON memory_edges
+            REFERENCING NEW TABLE AS changed FOR EACH STATEMENT EXECUTE FUNCTION memory_edges_changed();
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'memory_edges_deleted') THEN
+        CREATE TRIGGER memory_edges_deleted AFTER DELETE ON memory_edges
+            REFERENCING OLD TABLE AS changed FOR EACH STATEMENT EXECUTE FUNCTION memory_edges_changed();
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'memory_notes_truncated') THEN
+        CREATE TRIGGER memory_notes_truncated BEFORE TRUNCATE ON memory_notes
+            FOR EACH STATEMENT EXECUTE FUNCTION memory_search_truncated();
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'memory_edges_truncated') THEN
+        CREATE TRIGGER memory_edges_truncated BEFORE TRUNCATE ON memory_edges
+            FOR EACH STATEMENT EXECUTE FUNCTION memory_search_truncated();
+    END IF;
+END $$;
+CREATE INDEX IF NOT EXISTS memory_notes_written_by ON memory_notes(domain, written_by);
+
 -- The code map: what each source file of a repository is for and what it
 -- defines, for small models that read code. Its own layer: no vectors, so note
 -- search never sees it. `domain` is where the checkout's folder is placed, so

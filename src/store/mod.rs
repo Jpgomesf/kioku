@@ -17,13 +17,20 @@ use uuid::Uuid;
 use crate::model::{Edge, Note, NoteInput, NoteRevision, Status};
 
 mod code;
+mod search;
 
 pub use code::CodeMapChange;
+pub use search::{DeltaPart, HitFields, SearchDelta, SearchVersion};
 
-const MAX_NOTES: i64 = 10_000;
+/// Most notes a domain may hold when it is loaded whole, by search, saves,
+/// imports, and repair, and a vault-wide search in all.
+pub const MAX_NOTES: usize = 10_000;
 const MUTATION_LOCK: i64 = 0x4d454d4f525931;
 /// Most history entries one call may return.
 const MAX_REVISIONS: i64 = 100;
+/// The first PostgreSQL with `xid8` and the snapshot functions search caches
+/// use, as `server_version_num` counts it.
+const MIN_SERVER_VERSION: u32 = 130_000;
 
 #[derive(Clone)]
 pub struct Store {
@@ -31,6 +38,8 @@ pub struct Store {
     /// Serializes writers inside this process before they take a pooled
     /// connection, so waiters cannot starve the lock holder of connections.
     writer: Arc<tokio::sync::Mutex<()>>,
+    /// [`MAX_NOTES`], unless `kioku bench` raised it for the domain it grows.
+    max_notes: usize,
 }
 
 /// Dropping this guard rolls back its otherwise empty transaction and releases
@@ -52,10 +61,49 @@ impl Store {
         Ok(Self {
             pool,
             writer: Arc::new(tokio::sync::Mutex::new(())),
+            max_notes: MAX_NOTES,
         })
     }
 
+    /// Load domains of up to `max_notes` notes whole instead of [`MAX_NOTES`].
+    pub fn with_max_notes(mut self, max_notes: usize) -> Self {
+        self.max_notes = max_notes;
+        self
+    }
+
+    /// The row limit that tells a domain over the note limit from one at it.
+    fn load_limit(&self) -> i64 {
+        i64::try_from(self.max_notes.saturating_add(1)).unwrap_or(i64::MAX)
+    }
+
+    /// Refuse a domain of more notes than the limit, as loading it whole does.
+    pub fn check_domain_size(&self, notes: usize) -> Result<()> {
+        ensure!(
+            notes <= self.max_notes,
+            "More than {} memories in this scope; choose a narrower domain before loading the graph",
+            self.max_notes
+        );
+        Ok(())
+    }
+
+    /// Refuse a search of several domains with more notes in all than the
+    /// limit, as loading them together does.
+    pub fn check_vault_size(&self, notes: usize) -> Result<()> {
+        ensure!(
+            notes <= self.max_notes,
+            "More than {} memories in this vault; search one of its domains instead",
+            self.max_notes
+        );
+        Ok(())
+    }
+
     pub async fn migrate(&self) -> Result<()> {
+        let (number, version): (String, String) = sqlx::query_as(
+            "SELECT current_setting('server_version_num'), current_setting('server_version')",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        check_server_version(&number, &version)?;
         let mut tx = self.pool.begin().await?;
         // Bounded wait: a long repair elsewhere must not hang a client's startup.
         sqlx::query("SET LOCAL lock_timeout = '15s'")
@@ -173,13 +221,10 @@ impl Store {
         )
         .bind(domain)
         .bind(include_legacy)
-        .bind(MAX_NOTES + 1)
+        .bind(self.load_limit())
         .fetch_all(&self.pool)
         .await?;
-        ensure!(
-            rows.len() <= MAX_NOTES as usize,
-            "More than {MAX_NOTES} memories in this scope; choose a narrower domain before loading the graph"
-        );
+        self.check_domain_size(rows.len())?;
         rows.iter().map(decode_note).collect()
     }
 
@@ -192,14 +237,39 @@ impl Store {
         )
         .bind(domains)
         .bind(include_legacy)
-        .bind(MAX_NOTES + 1)
+        .bind(self.load_limit())
         .fetch_all(&self.pool)
         .await?;
-        ensure!(
-            rows.len() <= MAX_NOTES as usize,
-            "More than {MAX_NOTES} memories in this vault; search one of its domains instead"
-        );
+        self.check_vault_size(rows.len())?;
         rows.iter().map(decode_note).collect()
+    }
+
+    /// A value in `memory_settings`, if set.
+    pub async fn setting(&self, key: &str) -> Result<Option<String>> {
+        Ok(
+            sqlx::query_scalar("SELECT value FROM memory_settings WHERE key = $1")
+                .bind(key)
+                .fetch_optional(&self.pool)
+                .await?,
+        )
+    }
+
+    /// Set a value in `memory_settings`.
+    pub async fn set_setting(&self, key: &str, value: &str) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO memory_settings(key, value) VALUES ($1, $2)
+             ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+        )
+        .bind(key)
+        .bind(value)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Close every pooled connection, for a short-lived handle.
+    pub async fn close(&self) {
+        self.pool.close().await;
     }
 
     /// Replace the stored embedding identity after a full reindex.
@@ -538,6 +608,19 @@ async fn record_revision(tx: &mut Transaction<'static, Postgres>, id: Uuid) -> R
     .execute(&mut **tx)
     .await
     .context("cannot record the memory's history")?;
+    Ok(())
+}
+
+/// Refuse a server older than PostgreSQL 13, whose missing `xid8` would
+/// otherwise fail the schema with an error about something else.
+fn check_server_version(number: &str, version: &str) -> Result<()> {
+    let number: u32 = number
+        .parse()
+        .with_context(|| format!("PostgreSQL reported an unexpected version number {number:?}"))?;
+    ensure!(
+        number >= MIN_SERVER_VERSION,
+        "Kioku needs PostgreSQL 13 or later; this server runs PostgreSQL {version}"
+    );
     Ok(())
 }
 

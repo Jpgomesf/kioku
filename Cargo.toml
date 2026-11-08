@@ -16,6 +16,8 @@ anyhow = "1.0.104"
 chrono = { version = "0.4.45", features = ["serde"] }
 clap = { version = "4.6", features = ["derive", "env"] }
 dotenvy = "0.15.7"
+# The Stream trait, to read query rows as they arrive (already in the tree via sqlx).
+futures-core = { version = "0.3.34", default-features = false }
 regex = { version = "1.13.1", default-features = false, features = ["std", "perf", "unicode-perl"] }
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls"] }
 rmcp = { version = "3.8", features = ["transport-io"] }

@@ -1,6 +1,20 @@
 use super::*;
 use crate::testing::ScratchDatabase;
 
+#[test]
+fn a_server_before_postgresql_13_is_refused_by_name() {
+    let error = check_server_version("120022", "12.22 (Debian 12.22-1.pgdg120+1)")
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("PostgreSQL 13 or later") && error.contains("PostgreSQL 12.22 (Debian"),
+        "{error}"
+    );
+    assert!(check_server_version("130000", "13.0").is_ok());
+    assert!(check_server_version("170011", "17.11").is_ok());
+    assert!(check_server_version("seventeen", "17").is_err());
+}
+
 /// Creates and drops its own database on the server in MEMORY_TEST_DATABASE_URL.
 #[tokio::test]
 #[ignore = "requires PostgreSQL; set MEMORY_TEST_DATABASE_URL"]
