@@ -28,6 +28,9 @@ pub const MAX_NOTES: usize = 10_000;
 const MUTATION_LOCK: i64 = 0x4d454d4f525931;
 /// Most history entries one call may return.
 const MAX_REVISIONS: i64 = 100;
+/// The first PostgreSQL with `xid8` and the snapshot functions search caches
+/// use, as `server_version_num` counts it.
+const MIN_SERVER_VERSION: u32 = 130_000;
 
 #[derive(Clone)]
 pub struct Store {
@@ -95,6 +98,12 @@ impl Store {
     }
 
     pub async fn migrate(&self) -> Result<()> {
+        let (number, version): (String, String) = sqlx::query_as(
+            "SELECT current_setting('server_version_num'), current_setting('server_version')",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        check_server_version(&number, &version)?;
         let mut tx = self.pool.begin().await?;
         // Bounded wait: a long repair elsewhere must not hang a client's startup.
         sqlx::query("SET LOCAL lock_timeout = '15s'")
@@ -599,6 +608,19 @@ async fn record_revision(tx: &mut Transaction<'static, Postgres>, id: Uuid) -> R
     .execute(&mut **tx)
     .await
     .context("cannot record the memory's history")?;
+    Ok(())
+}
+
+/// Refuse a server older than PostgreSQL 13, whose missing `xid8` would
+/// otherwise fail the schema with an error about something else.
+fn check_server_version(number: &str, version: &str) -> Result<()> {
+    let number: u32 = number
+        .parse()
+        .with_context(|| format!("PostgreSQL reported an unexpected version number {number:?}"))?;
+    ensure!(
+        number >= MIN_SERVER_VERSION,
+        "Kioku needs PostgreSQL 13 or later; this server runs PostgreSQL {version}"
+    );
     Ok(())
 }
 
