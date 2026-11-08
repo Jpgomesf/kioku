@@ -390,7 +390,7 @@ impl App {
             lexical,
             exact,
         };
-        let direct = Direct::new(&signals, &candidates, request.ranking);
+        let direct = Direct::new(&signals, &candidates, request.ranking, request.limit);
         let ranked = if request.ranking.graph && !direct.is_empty() {
             let started = Instant::now();
             let mut walk = graph::LocalPagerank::new(&direct.seeds(), rank::EXPANSION_RESTART);

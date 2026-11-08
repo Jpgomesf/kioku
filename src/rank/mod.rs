@@ -166,7 +166,7 @@ pub fn rank_with(
     limit: usize,
     options: RankOptions,
 ) -> Vec<Ranked> {
-    let direct = Direct::new(signals, notes, options);
+    let direct = Direct::new(signals, notes, options, limit);
     if !options.graph || graph_slots(limit) == 0 || direct.is_empty() {
         return direct.truncate(limit);
     }
@@ -178,6 +178,7 @@ pub fn rank_with(
 
 /// The direct matches of a query in rank order, before graph expansion:
 /// exact label matches first, then fused relevance with the retention prior.
+/// Only the first ones are ranked in full, as many as a caller can read.
 pub struct Direct {
     ordered: Vec<Ranked>,
     fused: HashMap<Uuid, f64>,
@@ -187,7 +188,14 @@ pub struct Direct {
 }
 
 impl Direct {
-    pub fn new(signals: &Signals<'_>, notes: &impl Candidates, options: RankOptions) -> Self {
+    /// `limit` is the most results the caller takes, through
+    /// [`Direct::truncate`] or [`Direct::expand`].
+    pub fn new(
+        signals: &Signals<'_>,
+        notes: &impl Candidates,
+        options: RankOptions,
+        limit: usize,
+    ) -> Self {
         let dense: Vec<(Uuid, f64)> = sorted_desc(
             signals
                 .dense
@@ -235,16 +243,35 @@ impl Direct {
             .iter()
             .map(|id| direct.make(*id, MatchKind::Exact, None, notes))
             .collect();
-        let mut rest: Vec<Ranked> = direct
+        // Every other match is scored, but only the best `keep` are ranked
+        // in full and sorted: no caller reads past them. The order is total
+        // (score, then id), so they come out as a full sort would put them.
+        let mut rest: Vec<(f64, Uuid)> = direct
             .fused
             .keys()
             .filter(|id| !signals.exact.contains(id))
-            .map(|id| direct.make(*id, MatchKind::Search, None, notes))
+            .map(|id| (direct.search_score(*id, notes.retention(*id)), *id))
             .collect();
-        rest.sort_by(|a, b| b.score.total_cmp(&a.score).then_with(|| a.id.cmp(&b.id)));
-        ordered.extend(rest);
+        let order = |a: &(f64, Uuid), b: &(f64, Uuid)| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1));
+        let keep = limit.max(EXPANSION_SEEDS);
+        if rest.len() > keep {
+            rest.select_nth_unstable_by(keep, order);
+            rest.truncate(keep);
+        }
+        rest.sort_by(order);
+        ordered.extend(
+            rest.into_iter()
+                .map(|(_, id)| direct.make(id, MatchKind::Search, None, notes)),
+        );
         direct.ordered = ordered;
         direct
+    }
+
+    /// A match's fused relevance with the retention prior.
+    fn search_score(&self, id: Uuid, retention: f64) -> f64 {
+        let relevance =
+            (self.fused.get(&id).copied().unwrap_or(0.0) / self.best_possible).clamp(0.0, 1.0);
+        relevance * (1.0 - RETENTION_WEIGHT + RETENTION_WEIGHT * retention)
     }
 
     fn make(
@@ -255,12 +282,10 @@ impl Direct {
         notes: &impl Candidates,
     ) -> Ranked {
         let retention = notes.retention(id);
-        let relevance =
-            (self.fused.get(&id).copied().unwrap_or(0.0) / self.best_possible).clamp(0.0, 1.0);
         let score = if kind == MatchKind::Exact {
             1.0
         } else {
-            relevance * (1.0 - RETENTION_WEIGHT + RETENTION_WEIGHT * retention)
+            self.search_score(id, retention)
         };
         Ranked {
             id,
@@ -654,6 +679,62 @@ mod tests {
         let notes = [a.clone()];
         let dense = HashMap::from([(a.id, 0.1), (ghost, 0.99)]);
         assert!(rank(&input(&notes, &[], &dense, "zzz", 5), RankOptions::VECTOR).is_empty());
+    }
+
+    #[test]
+    fn ranking_only_the_head_gives_what_a_full_sort_gives() {
+        // Hundreds of matches: tied scores, varied retention, links, and an
+        // exact title, so the cut falls among many candidates.
+        let notes: Vec<Note> = (0..400)
+            .map(|i| {
+                let words = "alpha ".repeat(i % 5 + 1);
+                let mut note = note(
+                    &format!("n{i}"),
+                    &format!("Title {}", i % 7),
+                    &format!("shared {words} words {}", i % 3),
+                    &[],
+                );
+                note.access_count = (i % 11) as i64;
+                note.updated_at = now() - chrono::Duration::days((i % 13) as i64 * 10);
+                note
+            })
+            .collect();
+        let edges: Vec<Edge> = (1..notes.len())
+            .step_by(3)
+            .map(|i| link(&notes[i - 1], &notes[i]))
+            .collect();
+        let dense: HashMap<Uuid, f64> = notes
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| i % 4 == 0)
+            .map(|(i, note)| (note.id, 0.2 + (i % 50) as f64 / 100.0))
+            .collect();
+        for query in ["shared alpha", "alpha words", "Title 3"] {
+            for limit in [1, 3, 5, 8, 20] {
+                for options in [RankOptions::HYBRID, RankOptions::HYBRID_GRAPH] {
+                    let input = input(&notes, &edges, &dense, query, limit);
+                    let set = NoteSet::new(&input);
+                    let signals = Signals {
+                        dense: &dense,
+                        lexical: Bm25::new(&notes).scores(query),
+                        exact: exact_matches(&notes, query),
+                    };
+                    let finish = |direct: Direct| {
+                        if !options.graph || graph_slots(limit) == 0 || direct.is_empty() {
+                            return direct.truncate(limit);
+                        }
+                        let mut walk =
+                            graph::LocalPagerank::new(&direct.seeds(), EXPANSION_RESTART);
+                        walk.run(|id| set.links(id));
+                        direct.expand(&walk.into_masses(), &set, limit)
+                    };
+                    let head = finish(Direct::new(&signals, &set, options, limit));
+                    let all = finish(Direct::new(&signals, &set, options, usize::MAX));
+                    assert_eq!(head, all, "{query:?}, limit {limit}");
+                    assert_eq!(head.len(), limit);
+                }
+            }
+        }
     }
 
     #[test]
