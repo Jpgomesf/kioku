@@ -112,7 +112,7 @@ mod tests {
     use anyhow::Result;
 
     use crate::access::Principal;
-    use crate::app::{App, SearchHit, SearchRequest};
+    use crate::app::{App, SearchHit, SearchRequest, SearchResults};
     use crate::config::Config;
     use crate::model::{NoteInput, Status};
     use crate::rank::RankOptions;
@@ -313,6 +313,85 @@ mod tests {
 
         let (_, refreshed) = search(&app, "relay", "media queue", None).await?;
         assert_eq!(refreshed, 0, "nothing changed, nothing read");
+        Ok(())
+    }
+
+    /// A search of `domains` together (one domain alone when it is the only one).
+    async fn results(app: &App, domains: &[&str], query: &str) -> Result<SearchResults> {
+        let several: Vec<String> = domains.iter().map(|d| (*d).to_owned()).collect();
+        app.search(&SearchRequest {
+            query,
+            domain: Some(domains[0]),
+            domains: (domains.len() > 1).then_some(several.as_slice()),
+            limit: 5,
+            include_legacy: false,
+            ranking: RankOptions::HYBRID_GRAPH,
+            edges: None,
+            viewer: None,
+        })
+        .await
+    }
+
+    /// Run SQL as an administrator would, outside Kioku.
+    async fn by_hand(url: &str, sql: &str) -> Result<()> {
+        let pool = sqlx::PgPool::connect(url).await?;
+        sqlx::raw_sql(sqlx::AssertSqlSafe(sql.to_owned()))
+            .execute(&pool)
+            .await?;
+        pool.close().await;
+        Ok(())
+    }
+
+    /// Creates and drops its own database on the server in MEMORY_TEST_DATABASE_URL.
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL; set MEMORY_TEST_DATABASE_URL"]
+    async fn moves_and_truncation_reach_the_index() -> Result<()> {
+        let scratch = ScratchDatabase::create().await?;
+        let outcome = missed_write_checks(&scratch.url).await;
+        scratch.drop_database().await?;
+        outcome
+    }
+
+    async fn missed_write_checks(url: &str) -> Result<()> {
+        let app = offline(url).await?;
+        let mut ledger = input("relay", "ledger", "The ledger retries writes three times.");
+        ledger.related = vec!["audit".into()];
+        let audit = input("relay", "audit", "The ledger audit runs nightly.");
+        let queue = input(
+            "relay",
+            "queue",
+            "Media queue consumers acknowledge in 30 seconds.",
+        );
+        save(&app.store, &[&ledger, &audit, &queue]).await?;
+        let mirror = input("mirror", "mirror", "Mirrors copy every bucket.");
+        save(&app.store, &[&mirror]).await?;
+        let relay = results(&app, &["relay"], "media queue consumers").await?;
+        assert_eq!(keys(&relay.hits), ["queue"]);
+        assert_eq!((relay.stats.notes, relay.stats.links), (3, 1));
+        results(&app, &["mirror"], "mirrors").await?;
+
+        // A note moved to another domain leaves its old domain's index.
+        by_hand(
+            url,
+            r#"UPDATE memory_notes SET domain = 'mirror', input = jsonb_set(input, '{domain}', '"mirror"')
+               WHERE note_key = 'queue'"#,
+        )
+        .await?;
+        let relay = results(&app, &["relay"], "media queue consumers").await?;
+        assert!(!keys(&relay.hits).contains(&"queue"), "{:?}", relay.hits);
+        assert_eq!(relay.stats.notes, 2);
+        let moved = results(&app, &["mirror"], "media queue consumers").await?;
+        assert_eq!(keys(&moved.hits), ["queue"]);
+
+        // TRUNCATE reaches every domain's index.
+        by_hand(url, "TRUNCATE memory_edges").await?;
+        let relay = results(&app, &["relay"], "ledger").await?;
+        assert_eq!((relay.stats.notes, relay.stats.links), (2, 0));
+        by_hand(url, "TRUNCATE memory_notes CASCADE").await?;
+        for domain in ["relay", "mirror"] {
+            let emptied = results(&app, &[domain], "ledger").await?;
+            assert_eq!(emptied.stats.notes, 0, "{domain}");
+        }
         Ok(())
     }
 }
