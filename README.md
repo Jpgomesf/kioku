@@ -157,6 +157,21 @@ The server's instructions carry the usage policy to every client, so no
 client-specific prompt files are needed. [docs/clients.md](docs/clients.md)
 covers more clients, tool profiles, and tuning for small local models.
 
+Skills and hooks that work with this memory, such as saving what a session
+settled, checking stored decisions and auditing notes, live in the
+[kioku-skills](https://github.com/Jpgomesf/kioku-skills) plugin marketplace.
+They find this checkout through `KIOKU_HOME`:
+
+```sh
+# Claude Code: the skills, and hooks that bring memory into every session
+claude plugin marketplace add Jpgomesf/kioku-skills
+claude plugin install kioku-memory@kioku-skills
+claude plugin install kioku-hooks@kioku-skills
+
+# Codex: add the marketplace, then install kioku-memory from /plugins
+codex plugin marketplace add Jpgomesf/kioku-skills
+```
+
 ## Tools
 
 The default `core` profile exposes three tools; `MEMORY_TOOLS=all` (or
