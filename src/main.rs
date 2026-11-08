@@ -213,6 +213,10 @@ enum Command {
     },
     /// Measure retrieval quality on a graded dataset (see evals/README.md).
     Eval(EvalArgs),
+    /// Time retrieval at scale: grow a dataset's domain in isolated storage
+    /// with synthetic notes, then run its graded queries warm and as the
+    /// first query of a new process (see docs/evaluation.md).
+    Bench(BenchArgs),
     /// Switch embedding models: re-embed every memory into a new collection,
     /// then point the database at it. Close MCP clients first.
     Reindex {
@@ -276,6 +280,38 @@ struct EvalArgs {
     /// Vector size of --embedding-model.
     #[arg(long, requires = "embedding_model")]
     embedding_dim: Option<usize>,
+}
+
+#[derive(Args)]
+struct BenchArgs {
+    /// Dataset manifest. It needs a corpus: its notes are the ones the
+    /// graded queries look for among the synthetic ones.
+    #[arg(long, default_value = "evals/retrieval/dataset.json")]
+    dataset: PathBuf,
+    /// Notes in the domain after growing it, the dataset's own included.
+    #[arg(long)]
+    notes: usize,
+    /// Results scored per query.
+    #[arg(long, default_value_t = 5)]
+    k: usize,
+    /// Warm passes over the queries; the latency percentiles pool them all.
+    #[arg(long, default_value_t = 3)]
+    repeats: usize,
+    /// Reuse the storage an earlier run grew to the same size instead of
+    /// embedding every note again.
+    #[arg(long)]
+    reuse_storage: bool,
+    /// Isolated database. Defaults to <database>_eval_<model>_scale<notes>.
+    #[arg(long)]
+    database: Option<String>,
+    /// Isolated Qdrant collection. Defaults to <collection>_eval_<model>_scale<notes>.
+    #[arg(long)]
+    collection: Option<String>,
+    #[arg(long, value_enum, default_value_t = Format::Markdown)]
+    format: Format,
+    /// Also write the full JSON report, including per-query rankings, here.
+    #[arg(long)]
+    output: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -344,6 +380,9 @@ async fn main() -> Result<()> {
     let config = Config::from_env()?;
     if let Command::Eval(args) = &cli.command {
         return run_eval(config, args).await;
+    }
+    if let Command::Bench(args) = &cli.command {
+        return run_bench(config, args).await;
     }
     let app = App::connect(config).await?;
     let output: Value = match cli.command {
@@ -575,7 +614,9 @@ async fn main() -> Result<()> {
                 serde_json::to_value(app.codemap_lookup(place, &path, None).await?)?
             }
         },
-        Command::Eval(_) | Command::Token { .. } => unreachable!("handled before connecting"),
+        Command::Eval(_) | Command::Bench(_) | Command::Token { .. } => {
+            unreachable!("handled before connecting")
+        }
     };
     emit(&serde_json::to_string_pretty(&output)?)
 }
@@ -664,6 +705,94 @@ async fn run_eval(mut config: Config, args: &EvalArgs) -> Result<()> {
             no_leaks: args.no_leaks,
         },
     )
+}
+
+/// `kioku bench`: grow (or reuse) isolated storage, then time the dataset's
+/// queries warm and in new processes.
+async fn run_bench(mut config: Config, args: &BenchArgs) -> Result<()> {
+    let dataset = &eval::Dataset::load(&args.dataset)?;
+    let notes = args.notes;
+    let corpus = dataset
+        .corpus
+        .as_ref()
+        .context("the benchmark needs a dataset with a corpus")?;
+    config.notes_root = Some(
+        std::fs::canonicalize(corpus)
+            .with_context(|| format!("cannot read corpus {}", corpus.display()))?,
+    );
+    let suffix = format!("_scale{notes}");
+    let database = match &args.database {
+        Some(database) => database.clone(),
+        None => {
+            eval::isolated_name(
+                &config.database_name()?,
+                &config.embedding_model,
+                63 - suffix.len(),
+            ) + &suffix
+        }
+    };
+    let collection = args.collection.clone().unwrap_or_else(|| {
+        eval::isolated_name(
+            &config.collection,
+            &config.embedding_model,
+            128 - suffix.len(),
+        ) + &suffix
+    });
+    let mut prepare_seconds = None;
+    let app = if args.reuse_storage {
+        eval::reuse_storage(&mut config, &database, &collection)?;
+        let app = App::connect(config.clone()).await?;
+        ensure!(
+            eval::is_prepared(&app, dataset, notes).await?,
+            "{database} wasn't grown to {notes} notes of {} by this version of the benchmark; run without --reuse-storage",
+            dataset.name
+        );
+        eprintln!("reusing {database} and collection {collection}");
+        app
+    } else {
+        eval::isolate_storage(&mut config, &database, &collection).await?;
+        eprintln!("growing {database} and collection {collection} to {notes} notes");
+        let started = std::time::Instant::now();
+        let app = App::connect(config.clone()).await?;
+        eval::prepare(&app, dataset).await?;
+        eval::grow(&app, dataset, notes).await?;
+        prepare_seconds = Some(started.elapsed().as_secs_f64());
+        app
+    };
+    let paths = eval::measure(
+        &config,
+        &app,
+        dataset,
+        &eval::ScaleOptions {
+            k: args.k,
+            repeats: args.repeats,
+        },
+    )
+    .await?;
+    let report = eval::ScaleReport {
+        dataset: dataset.name.clone(),
+        domain: dataset.domain.clone(),
+        notes,
+        distractors: notes.saturating_sub(
+            std::fs::read_dir(corpus)?
+                .filter_map(|entry| entry.ok())
+                .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "md"))
+                .count(),
+        ),
+        k: args.k,
+        embedding_model: config.embedding_model.clone(),
+        generator: eval::GENERATOR,
+        prepare_seconds,
+        paths,
+    };
+    match args.format {
+        Format::Markdown => emit(&eval::render_scale(&report))?,
+        Format::Json => emit(&serde_json::to_string_pretty(&report)?)?,
+    }
+    if let Some(path) = &args.output {
+        std::fs::write(path, serde_json::to_vec_pretty(&report)?)?;
+    }
+    Ok(())
 }
 
 /// Logs go to stderr (stdout carries the protocol). `RUST_LOG` filters them;

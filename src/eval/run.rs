@@ -6,7 +6,7 @@ use std::time::Instant;
 use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
 
-use crate::app::{App, ContextRequest, SearchRequest};
+use crate::app::{App, ContextRequest, SearchHit, SearchRequest};
 use crate::model::{Edge, NoteInput};
 use crate::rank::{MatchKind, RankOptions};
 
@@ -15,8 +15,8 @@ use super::graph::{
 };
 use super::metrics::Interval;
 use super::{
-    DEFAULT_VARIANT, Dataset, QueryResult, Summary, VARIANTS, hit_at_1, ndcg_at_k, recall_at_k,
-    reciprocal_rank,
+    DEFAULT_VARIANT, Dataset, Query, QueryResult, Summary, VARIANTS, hit_at_1, ndcg_at_k,
+    recall_at_k, reciprocal_rank,
 };
 
 /// Seeds for each ablation; results are averaged per query across them.
@@ -186,38 +186,43 @@ async fn run_queries(
             .with_context(|| format!("query {} failed", query.id))?
             .hits;
         let latency_ms = started.elapsed().as_secs_f64() * 1000.0;
-        let ranked: Vec<String> = hits.iter().map(|h| h.key.clone()).collect();
-        let graded = !query.relevant.is_empty();
-        results.push(QueryResult {
-            id: query.id.clone(),
-            category: query.category.clone(),
-            linked: hits
-                .iter()
-                .filter(|h| h.kind == MatchKind::Link)
-                .map(|h| h.key.clone())
-                .collect(),
-            recall: graded.then(|| recall_at_k(&ranked, &query.relevant, options.k)),
-            reciprocal_rank: graded.then(|| reciprocal_rank(&ranked, &query.relevant)),
-            ndcg: graded.then(|| ndcg_at_k(&ranked, &query.relevant, options.k)),
-            hit_at_1: graded.then(|| hit_at_1(&ranked, &query.relevant)),
-            complete_support: (!query.required.is_empty()).then(|| {
-                query
-                    .required
-                    .iter()
-                    .all(|key| ranked.iter().take(options.k).any(|r| r == key))
-            }),
-            leaked: query
-                .forbidden
-                .iter()
-                .filter(|key| ranked.contains(key))
-                .cloned()
-                .collect(),
-            top_dense: hits.iter().filter_map(|h| h.signals.dense).reduce(f64::max),
-            ranked,
-            latency_ms,
-        });
+        results.push(score(query, &hits, options.k, latency_ms));
     }
     Ok(results)
+}
+
+/// Score one query's results against its graded notes.
+pub(super) fn score(query: &Query, hits: &[SearchHit], k: usize, latency_ms: f64) -> QueryResult {
+    let ranked: Vec<String> = hits.iter().map(|h| h.key.clone()).collect();
+    let graded = !query.relevant.is_empty();
+    QueryResult {
+        id: query.id.clone(),
+        category: query.category.clone(),
+        linked: hits
+            .iter()
+            .filter(|h| h.kind == MatchKind::Link)
+            .map(|h| h.key.clone())
+            .collect(),
+        recall: graded.then(|| recall_at_k(&ranked, &query.relevant, k)),
+        reciprocal_rank: graded.then(|| reciprocal_rank(&ranked, &query.relevant)),
+        ndcg: graded.then(|| ndcg_at_k(&ranked, &query.relevant, k)),
+        hit_at_1: graded.then(|| hit_at_1(&ranked, &query.relevant)),
+        complete_support: (!query.required.is_empty()).then(|| {
+            query
+                .required
+                .iter()
+                .all(|key| ranked.iter().take(k).any(|r| r == key))
+        }),
+        leaked: query
+            .forbidden
+            .iter()
+            .filter(|key| ranked.contains(key))
+            .cloned()
+            .collect(),
+        top_dense: hits.iter().filter_map(|h| h.signals.dense).reduce(f64::max),
+        ranked,
+        latency_ms,
+    }
 }
 
 fn variant_report(name: &str, results: Vec<QueryResult>) -> VariantReport {

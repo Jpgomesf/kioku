@@ -34,12 +34,8 @@ fn is_disposable(name: &str) -> bool {
         && (name.contains("eval") || name.contains("test"))
 }
 
-/// Point `config` at a freshly recreated database and Qdrant collection, so a
-/// fixture corpus never touches real memories. Both names must contain
-/// "eval" or "test" and differ from the configured ones.
-pub async fn isolate_storage(config: &mut Config, database: &str, collection: &str) -> Result<()> {
-    use sqlx::Connection;
-
+/// Refuse names that aren't disposable or that name the configured storage.
+fn check_names(config: &Config, database: &str, collection: &str) -> Result<()> {
     let live_database = config.database_name()?;
     ensure!(
         is_disposable(database) && database != live_database,
@@ -50,6 +46,26 @@ pub async fn isolate_storage(config: &mut Config, database: &str, collection: &s
         "evaluation collection {collection:?} must be lowercase, contain eval or test, and differ from {:?}",
         config.collection
     );
+    Ok(())
+}
+
+/// Point `config` at isolated storage an earlier run prepared, without
+/// recreating it. The same naming rules as [`isolate_storage`] apply.
+pub fn reuse_storage(config: &mut Config, database: &str, collection: &str) -> Result<()> {
+    check_names(config, database, collection)?;
+    config.database_url = config.with_database(database)?;
+    config.vaults = None;
+    config.collection = collection.to_owned();
+    Ok(())
+}
+
+/// Point `config` at a freshly recreated database and Qdrant collection, so a
+/// fixture corpus never touches real memories. Both names must contain
+/// "eval" or "test" and differ from the configured ones.
+pub async fn isolate_storage(config: &mut Config, database: &str, collection: &str) -> Result<()> {
+    use sqlx::Connection;
+
+    check_names(config, database, collection)?;
     let mut admin = sqlx::PgConnection::connect(&config.database_url)
         .await
         .context("cannot connect to PostgreSQL to prepare the evaluation database")?;

@@ -202,6 +202,34 @@ impl Store {
         rows.iter().map(decode_note).collect()
     }
 
+    /// A value in `memory_settings`, if set.
+    pub async fn setting(&self, key: &str) -> Result<Option<String>> {
+        Ok(
+            sqlx::query_scalar("SELECT value FROM memory_settings WHERE key = $1")
+                .bind(key)
+                .fetch_optional(&self.pool)
+                .await?,
+        )
+    }
+
+    /// Set a value in `memory_settings`.
+    pub async fn set_setting(&self, key: &str, value: &str) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO memory_settings(key, value) VALUES ($1, $2)
+             ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+        )
+        .bind(key)
+        .bind(value)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Close every pooled connection, for a short-lived handle.
+    pub async fn close(&self) {
+        self.pool.close().await;
+    }
+
     /// Replace the stored embedding identity after a full reindex.
     pub async fn set_embedding_identity(&self, identity: &str) -> Result<()> {
         sqlx::query(

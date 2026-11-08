@@ -12,7 +12,9 @@ mod graph;
 mod metrics;
 mod report;
 mod run;
+mod scale;
 mod storage;
+mod synthetic;
 
 pub use dataset::{Dataset, Query};
 pub use graph::{
@@ -26,7 +28,9 @@ pub use report::{Gates, check_thresholds, render_markdown};
 pub use run::{
     Calibration, Comparison, ContextReport, EvalOptions, Report, VariantReport, prepare, run,
 };
-pub use storage::{isolate_storage, isolated_name};
+pub use scale::{PathReport, ScaleOptions, ScaleReport, grow, is_prepared, measure, render_scale};
+pub use storage::{isolate_storage, isolated_name, reuse_storage};
+pub use synthetic::GENERATOR;
 
 use crate::rank::RankOptions;
 
