@@ -5,7 +5,9 @@
 //! triggers bump on every write to its notes or links, by any process
 //! ([`SearchVersion`]). When they moved, only the notes written since the
 //! index's snapshot are read again, and the links if they changed; a deleted
-//! note rebuilds the index. The cost is per change, never per search.
+//! note, or a count below the index's (a restored database or a recreated
+//! versions table), rebuilds the index. The cost is per change, never per
+//! search.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -58,21 +60,34 @@ impl App {
     /// searches over several domains can't deadlock.
     pub(super) async fn search_indexes(&self, domains: &[String]) -> Result<Ready> {
         let versions = self.store.search_versions(domains).await?;
+        self.catch_up(domains, &versions).await
+    }
+
+    /// [`App::search_indexes`] from the versions this search read, which
+    /// another search may have refreshed an index past by now.
+    async fn catch_up(
+        &self,
+        domains: &[String],
+        versions: &HashMap<String, SearchVersion>,
+    ) -> Result<Ready> {
         let slots: Vec<Slot> = domains.iter().map(|d| self.cache.slot(d)).collect();
         let mut refreshed = 0;
         for (domain, slot) in domains.iter().zip(&slots) {
-            let current = versions.get(domain).copied().unwrap_or_default();
+            let read = versions.get(domain).copied().unwrap_or_default();
             if slot
                 .read()
                 .await
                 .as_ref()
-                .is_some_and(|c| c.version.covers(&current))
+                .is_some_and(|c| c.version == read)
             {
                 continue;
             }
             let mut cached = slot.write().await;
-            // Another search may have caught up while this one waited.
-            if !cached.as_ref().is_some_and(|c| c.version.covers(&current)) {
+            // Another search may have caught up while this one waited, even
+            // past what this one read. The refresh compares the index with
+            // the versions in its own snapshot, so that finds nothing to read,
+            // and only a count below the index's starts it over.
+            if !cached.as_ref().is_some_and(|c| c.version == read) {
                 refreshed += self.refresh(domain, &mut cached).await?;
             }
         }
@@ -339,6 +354,54 @@ mod tests {
             .execute(&pool)
             .await?;
         pool.close().await;
+        Ok(())
+    }
+
+    /// Creates and drops its own database on the server in MEMORY_TEST_DATABASE_URL.
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL; set MEMORY_TEST_DATABASE_URL"]
+    async fn a_version_that_went_back_rebuilds_the_index() -> Result<()> {
+        let scratch = ScratchDatabase::create().await?;
+        let outcome = version_checks(&scratch.url).await;
+        scratch.drop_database().await?;
+        outcome
+    }
+
+    async fn version_checks(url: &str) -> Result<()> {
+        let app = offline(url).await?;
+        let other = Store::connect(url).await?;
+        let ledger = input("relay", "ledger", "The ledger retries writes three times.");
+        let queue = input(
+            "relay",
+            "queue",
+            "Media queue consumers acknowledge in 30 seconds.",
+        );
+        save(&other, &[&ledger, &queue]).await?;
+        let (_, refreshed) = search(&app, "relay", "ledger retries", None).await?;
+        assert_eq!(refreshed, 2);
+
+        // The versions table is recreated, as a restore may do, and a note is
+        // edited: its count starts again below the index's.
+        by_hand(url, "DELETE FROM memory_search_versions").await?;
+        let edited = NoteInput {
+            body: "The ledger never retries; writes fail fast.".into(),
+            ..ledger.clone()
+        };
+        other.upsert(&edited).await?;
+        let (hits, refreshed) = search(&app, "relay", "fail fast", None).await?;
+        assert_eq!(keys(&hits), ["ledger"], "the edit is found");
+        assert_eq!(refreshed, 2, "the index was rebuilt");
+
+        // Another search refreshed the index past the versions this one read:
+        // nothing to rebuild.
+        let domains = ["relay".to_owned()];
+        let read = app.store.search_versions(&domains).await?;
+        let audit = input("relay", "audit", "The ledger audit retries nightly.");
+        save(&other, &[&audit]).await?;
+        let (_, refreshed) = search(&app, "relay", "ledger audit", None).await?;
+        assert_eq!(refreshed, 1);
+        let ready = app.catch_up(&domains, &read).await?;
+        assert_eq!(ready.refreshed, 0, "already current");
         Ok(())
     }
 

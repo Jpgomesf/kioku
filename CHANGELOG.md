@@ -172,8 +172,9 @@ All notable changes to this project are documented here. The format follows
   every write to notes or links, by any process, so a search checks one row
   and, when it moved, reads only the notes written since the index's snapshot.
   A deletion, a TRUNCATE, or a note moving to another domain rebuilds the
-  indexes it touches. Statistics are kept per status and lock, so a hidden
-  note still neither matches nor shifts the scores of visible ones.
+  indexes it touches, and so does a count below the index's, as after
+  restoring the database. Statistics are kept per status and lock, so a
+  hidden note still neither matches nor shifts the scores of visible ones.
   The query is embedded while the index is checked, and BM25 runs while
   Qdrant answers. A warm search at 10,000 notes takes 12 ms instead of 214 ms
   (median), and 16 ms instead of 2 s at 100,000; the first search in a new

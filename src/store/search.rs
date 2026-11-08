@@ -16,8 +16,9 @@ use crate::model::{Edge, SearchFields, Status};
 use super::{Store, decode_edges};
 
 /// How many times a domain's notes, links, and deletions have changed. Each
-/// count only grows, so a cache built at one version is current while no
-/// count has passed it.
+/// count only grows while the table lasts, so a cache built at one version is
+/// current while the counts equal it. A count below the cache's means the
+/// table was recreated or the database restored, and the cache starts over.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SearchVersion {
     pub notes: i64,
@@ -26,7 +27,7 @@ pub struct SearchVersion {
 }
 
 impl SearchVersion {
-    /// Whether a cache at this version has seen every change up to `other`.
+    /// Whether every count is at least `other`'s.
     pub fn covers(&self, other: &SearchVersion) -> bool {
         self.notes >= other.notes && self.links >= other.links && self.deletes >= other.deletes
     }
@@ -131,9 +132,9 @@ impl Store {
     }
 
     /// Read what a cache of `domain` needs, in one snapshot: everything when
-    /// `since` is `None` or notes were deleted since it, otherwise only the
-    /// notes written after the cache's snapshot and, if they changed, the
-    /// links.
+    /// `since` is `None`, notes were deleted since it, or a count went back,
+    /// otherwise only the notes written after the cache's snapshot and, if
+    /// they changed, the links.
     pub async fn search_delta(
         &self,
         domain: &str,
@@ -163,7 +164,7 @@ impl Store {
         })
         .transpose()?
         .unwrap_or_default();
-        let since = since.filter(|(_, old)| old.deletes == version.deletes);
+        let since = since.filter(|(_, old)| old.deletes == version.deletes && version.covers(old));
         let full = since.is_none();
         let rows = match since {
             None => {
