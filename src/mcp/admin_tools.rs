@@ -227,7 +227,7 @@ impl MemoryServer {
     #[tool(
         name = "memory_maintenance",
         title = "Age memories",
-        description = "Preview (default) or apply the monthly aging pass: active, unpinned memories whose retention score fell below the threshold move to legacy. Nothing is deleted and memory_restore reverses it. The server already runs it daily, so use it to preview, or apply only when the user asks.",
+        description = "Preview (default) or apply the monthly aging pass: active, unpinned memories whose retention score fell below the threshold move to legacy. Nothing is deleted and memory_restore reverses it. Background upkeep only logs which memories would move, so nothing ages until this runs with dry_run false or the user runs kioku maintenance: preview by default, and apply only when the user asks.",
         input_schema = schema::input::<MaintenanceArgs>(),
         annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
     )]
