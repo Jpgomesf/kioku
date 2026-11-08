@@ -15,6 +15,19 @@ All notable changes to this project are documented here. The format follows
   a new process, reporting quality, p50 and p95 latency, and time per stage.
   `--reuse-storage` measures again without embedding anything
   ([docs/evaluation.md](docs/evaluation.md#scale)).
+- `MEMORY_LEXICAL=qdrant`, a prototype that scores BM25 in Qdrant (1.20 or
+  later) over a full-text index of each note's terms, as Kioku's tokenizer
+  produces them. One batch request returns the vector, keyword, and
+  exact-label candidates, with BM25 statistics counted only over the notes the
+  caller may see in the searched domains; PostgreSQL then supplies only those
+  candidates, checked again, and the links around the top matches, so no
+  process loads a domain. The default stays `local`
+  ([docs/configuration.md](docs/configuration.md#keyword-search-in-qdrant)).
+  `kioku eval` compares it with the default, and `kioku bench --lexical`
+  measures either.
+- `kioku repair --payloads` rewrites every indexed note's Qdrant payload
+  without embedding anything, for points written before payloads carried
+  keyword fields. Run it once before switching to `MEMORY_LEXICAL=qdrant`.
 
 - `memory_get` and `memory_inspect` return each note's `aliases`, `[]` when it
   has none, so a client can tell a note without aliases from an older server.
@@ -186,6 +199,11 @@ All notable changes to this project are documented here. The format follows
 - Search no longer refuses domains of more than 10,000 notes. Saves, imports,
   and repair still load whole domains and keep that limit.
 - The schema needs PostgreSQL 13 or later. The bundled services run 17.
+- Qdrant points carry each note's BM25 terms, exact labels, and lock, with
+  full-text and keyword indexes on them, whatever `MEMORY_LEXICAL` says, so
+  every process can search with either setting. Qdrant therefore holds note
+  text as folded words. A note the embedding service may not read keeps a
+  point without a vector instead of none.
 - The README leads with how to use Kioku well: the memory loop, the
   kioku-skills hooks and skills, tool habits, note writing and upkeep, then
   results, design choices, a comparison and limits. Its long reference

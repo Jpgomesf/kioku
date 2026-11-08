@@ -336,6 +336,7 @@ Search previews and reads with `count_use: false` don't count.
 ./bin/kioku doctor        # PostgreSQL, Qdrant and the embedding service
 ./bin/kioku stats         # counts, links and pending vector updates
 ./bin/kioku repair        # finish interrupted indexing; --all rebuilds every vector
+./bin/kioku repair --payloads  # rewrite payloads for BM25 in Qdrant, without embedding
 ```
 
 Pending vectors above zero for more than a minute, or a `memory_stats` error,

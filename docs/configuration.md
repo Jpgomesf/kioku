@@ -9,6 +9,7 @@ commands also read `./.env`.
 - [Services](#services)
 - [Embeddings on the Apple GPU](#embeddings-on-the-apple-gpu)
 - [Hosted embeddings](#hosted-embeddings)
+- [Keyword search in Qdrant](#keyword-search-in-qdrant)
 - [Variables](#variables)
 
 ## Services
@@ -102,6 +103,34 @@ both.
   `./bin/kioku repair --all`: it embeds the notes the service may now read and
   removes the vectors of those it no longer may.
 
+## Keyword search in Qdrant
+
+By default each server process scores BM25 itself, over an index of every
+domain it searches, which its first search there builds from PostgreSQL.
+`MEMORY_LEXICAL=qdrant` scores BM25 in Qdrant instead, so no process loads a
+domain: one batch request returns the vector, keyword, and exact-label
+candidates, and PostgreSQL supplies only those, checked again, and the links
+around the top matches. It is a prototype; the default stays `local`
+([evaluation.md](evaluation.md#scale) compares the two).
+
+- Every point carries the note's BM25 terms (`lexical`, as Kioku's tokenizer
+  produces them), its exact labels, and its lock, whatever this setting says.
+  Points written by older versions lack them, so run
+  `./bin/kioku repair --payloads` once before switching. It rewrites payloads
+  without embedding anything.
+- Qdrant then holds each note's folded words, as PostgreSQL holds its text.
+  Only use a Qdrant you would trust with the notes themselves.
+- BM25 statistics count only the notes the caller may see in the searched
+  domains (Qdrant's per-query `idf` corpus), so other domains and vaults in the
+  collection don't change the scores.
+- Qdrant returns the top 200 keyword matches; in process, every match takes
+  part in fusion. Graph expansion reads links around the top matches three
+  steps deep.
+- A note waiting for the vector index matches nothing until the index catches
+  up, which happens automatically; with `local` it still matches by keyword.
+- Needs Qdrant 1.20 or later. If Qdrant fails, a search runs in process
+  instead and says so.
+
 ## Variables
 
 | Variable | Default | Purpose |
@@ -117,6 +146,7 @@ both.
 | `MEMORY_DEFAULT_DOMAIN` | `local` | Domain used when a call names none |
 | `MEMORY_NOTES_ROOT` | unset (`make start` sets `notes/`) | Absolute folder `memory_import` may read |
 | `MEMORY_TOOLS` | `core` | `core`, `all`, or a comma-separated list |
+| `MEMORY_LEXICAL` | `local` | Where BM25 runs: `local`, in each server process over an index of the domains it searches, or `qdrant` ([Keyword search in Qdrant](#keyword-search-in-qdrant)) |
 | `MEMORY_SIMILAR_NOTE_SCORE` | `0.9` | How similar (cosine) a stored note must be for a save to list it under `similar`; suits `nomic-embed-text`, lower it for models whose similarities run lower |
 | `MEMORY_HALF_LIFE_DAYS`, `MEMORY_LEGACY_THRESHOLD` | `90`, `0.2` | Aging policy ([usage.md](usage.md#aging-and-maintenance)) |
 | `MEMORY_BACKGROUND_UPKEEP` | `true` | Daily index repair while serving, and a log of notes aging would retire |

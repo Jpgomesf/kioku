@@ -345,7 +345,8 @@ it, and prints the settings to put in `.env`; close MCP clients first.
 - **Scale.** Each server process indexes a domain on its first search there and
   reuses the index after that: a warm search takes 10 to 16 ms from 1,000 to
   100,000 notes, but the first search in a new process, which is what a hook
-  gets, takes 26 ms at 1,000 notes and 1.8 s at 100,000
+  gets, takes 26 ms at 1,000 notes and 1.8 s at 100,000. The prototype
+  `MEMORY_LEXICAL=qdrant` keeps it under 30 ms at every size
   ([docs/evaluation.md](docs/evaluation.md#scale)).
 - **Note size.** A note must fit the embedding model's context window, about
   6 KB of English text for `nomic-embed-text`. OKF imports split long concepts.

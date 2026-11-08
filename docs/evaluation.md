@@ -247,6 +247,50 @@ it measures refuses such a domain.
 - **Quality falls with distractors** in both, the same way: a larger domain
   holds more notes that resemble the answer.
 
+### BM25 in Qdrant
+
+With `MEMORY_LEXICAL=qdrant` ([configuration.md](configuration.md#keyword-search-in-qdrant))
+no process loads a domain. Same storage and machine, after
+`kioku repair --payloads` and once Qdrant had finished optimizing:
+
+| Notes | BM25 | Recall@5 | nDCG@5 | MRR | Warm p50 / p95 ms | New process p50 / p95 ms |
+|---|---|---|---|---|---|---|
+| 24 | in process | 0.958 | 0.930 | 0.958 | 9.6 / 12.9 | 12.2 / 17.9 |
+| 24 | in Qdrant | 0.958 | 0.930 | 0.958 | 12.1 / 17.2 | 18.6 / 24.1 |
+| 1,000 | in process | 0.866 | 0.834 | 0.870 | 9.8 / 13.6 | 25.7 / 29.0 |
+| 1,000 | in Qdrant | 0.866 | 0.834 | 0.870 | 13.4 / 18.5 | 20.3 / 27.6 |
+| 10,000 | in process | 0.796 | 0.743 | 0.771 | 11.8 / 16.8 | 181.5 / 184.9 |
+| 10,000 | in Qdrant | 0.838 | 0.766 | 0.792 | 14.8 / 20.4 | 22.4 / 28.7 |
+| 100,000 | in process | 0.718 | 0.610 | 0.616 | 16.1 / 27.3 | 1,803.6 / 1,853.3 |
+| 100,000 | in Qdrant | 0.778 | 0.745 | 0.801 | 16.2 / 21.3 | 26.7 / 30.2 |
+
+- **Speed.** A warm search is 2 to 4 ms slower up to 10,000 notes (more round
+  trips to PostgreSQL) and equal at 100,000. The first search in a new process
+  stays near 20 to 27 ms at every size, against 182 ms and 1.8 s in process.
+- **Quality comes from the cut, not from Qdrant.** Qdrant returns the top 200
+  keyword matches, while in process every match takes part in fusion; among
+  thousands of distractors sharing common words, that tail adds noise. In
+  process with the same cut, rankings match BM25 in Qdrant (with the graph walk
+  below at 12 steps) on all 40 queries at 10,000 notes and 39 at 100,000, the
+  other being a tie at the cut. Whether to cut in process too is a ranking
+  decision to measure on real notes: templated synthetic notes exaggerate the
+  tail.
+- **Graph slots differ.** BM25 in Qdrant reads links three steps out from the
+  top matches, one query per step, so the walk stops early: the linked note
+  differs on 2 of 40 queries at 24 notes, without changing any score. Twelve
+  steps match the in-process walk but cost 10 to 16 ms.
+- **Ties.** At 10,000 and 100,000 notes, one or two queries ranked differently
+  between identical passes: synthetic notes often tie in BM25, and Qdrant breaks
+  ties at its cut arbitrarily.
+- **Memory.** Keyword payloads and the full-text index took Qdrant from 1.06 to
+  1.56 GiB (container memory, about 111,000 points across the benchmark
+  collections). A Kioku process that searched once stays at 17 MB at any size.
+- **Other domains don't count.** Beside a 100,000-note unrelated domain in the
+  same collection, all 40 rankings at 1,000 notes were unchanged, because the
+  BM25 statistics are counted per query over the searched domain. With Qdrant's
+  default collection-wide statistics, the keyword order changed for 18 of the
+  40 queries.
+
 ## Reading small samples
 
 - With n queries, one query moves an average by 1/n. Report counts per

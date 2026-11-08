@@ -66,7 +66,10 @@ usage, lifecycle, the revision history, and the code map.
 
 ### Qdrant is derived and rebuildable
 
-Qdrant holds only vectors, which follow from the notes and the embedding model.
+Qdrant holds vectors, which follow from the notes and the embedding model, and
+for keyword search in Qdrant (`MEMORY_LEXICAL=qdrant`) each note's BM25 terms,
+exact labels, and lock, which follow from the notes alone. PostgreSQL decides
+what a search returns.
 
 - **Losing it loses nothing.** `kioku repair --all` rebuilds the index from
   PostgreSQL.
@@ -164,8 +167,8 @@ Paths that keep PostgreSQL as the source of truth:
   search pays for building it every time (26 ms at 1,000 notes, 182 ms at
   10,000, 1.8 s at 100,000). A process that indexed 100,000 notes peaked at
   433 MB. Saves, imports, and repair still load whole domains and refuse more
-  than 10,000 notes per domain. BM25 in an index outside the process (see
-  above, or Qdrant's) would remove the first-search cost;
+  than 10,000 notes per domain. `MEMORY_LEXICAL=qdrant` removes the
+  first-search cost by scoring BM25 in Qdrant, at a few ms per warm search;
   [evaluation.md](evaluation.md#scale) has the measurements.
 - **Notes are embedded whole.** Each must fit the embedding model's context
   window. OKF imports split long concepts by section

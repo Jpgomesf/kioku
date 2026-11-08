@@ -26,6 +26,8 @@ that machine's trust; stdio is not a sandbox.
   remote embedding endpoint only with `ALLOW_REMOTE_EMBEDDINGS=true`, and a
   non-local Qdrant must use HTTPS. HTTP clients ignore proxy variables and
   don't follow redirects, so the Qdrant API key stays on the configured host.
+  Qdrant's payloads hold each note's folded words for keyword search, so a
+  hosted Qdrant holds note text as PostgreSQL does.
 - **Configuration is explicit.** Values in the file named by `--env-file` win
   over inherited variables, and `serve` never reads a `.env` from the client's
   working directory, so another project's `DATABASE_URL` cannot redirect it.
