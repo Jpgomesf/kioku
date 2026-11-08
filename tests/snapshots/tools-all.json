@@ -188,6 +188,10 @@
             "description": "Only notes with this tag, e.g. \"decision\".",
             "type": "string"
           },
+          "path": {
+            "description": "Only notes anchored to this file, a path relative to the repository root, e.g. \"src/vault/place.rs\".",
+            "type": "string"
+          },
           "limit": {
             "description": "Notes per page, 1-200. Default 50.",
             "type": "integer",
@@ -328,6 +332,13 @@
           },
           "tags": {
             "description": "Topic labels, e.g. [\"webhooks\"]. On update, omit to keep them; [] removes them.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "paths": {
+            "description": "Code paths this memory governs, as globs relative to the repository root, e.g. [\"src/vault/**\"]: a decision or convention about that code. Opening a matching file then brings this memory up. On update, omit to keep them; [] removes them.",
             "type": "array",
             "items": {
               "type": "string"

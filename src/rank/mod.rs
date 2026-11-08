@@ -298,6 +298,7 @@ mod tests {
             confidence: 0.9,
             pinned: false,
             lock: Vec::new(),
+            paths: Vec::new(),
         };
         Note {
             id: input.id(),

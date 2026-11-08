@@ -429,6 +429,7 @@ mod tests {
             confidence: 0.8,
             pinned: false,
             lock: vec![],
+            paths: Vec::new(),
         };
         let note = app.store.upsert(&input).await?;
         // Last aged two months ago, so this month's pass evaluates it.

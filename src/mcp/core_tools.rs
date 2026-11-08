@@ -411,6 +411,7 @@ impl MemoryServer {
             pinned: previous.is_some_and(|p| p.pinned),
             // Tools can't set a note lock, and an update keeps the one it has.
             lock: previous.map(|p| p.lock.clone()).unwrap_or_default(),
+            paths: keep(args.paths, previous.map(|p| &p.paths)),
         };
         // A vault session hears only about this note's own links, resolved
         // against the notes it may see.

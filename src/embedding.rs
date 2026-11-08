@@ -314,6 +314,7 @@ mod tests {
     fn note(domain: &str, lock: &[&str]) -> NoteInput {
         NoteInput {
             lock: lock.iter().map(|p| (*p).to_owned()).collect(),
+            paths: Vec::new(),
             ..crate::testing::note("k", domain).input
         }
     }

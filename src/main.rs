@@ -571,7 +571,7 @@ async fn main() -> Result<()> {
                         place.repo.root().display()
                     )
                 })?;
-                serde_json::to_value(app.codemap_lookup(place, &path).await?)?
+                serde_json::to_value(app.codemap_lookup(place, &path, None).await?)?
             }
         },
         Command::Eval(_) | Command::Token { .. } => unreachable!("handled before connecting"),

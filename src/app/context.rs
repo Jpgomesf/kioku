@@ -85,6 +85,9 @@ pub struct ContextMemory {
     pub links: Vec<String>,
     /// The note, or the sentences that fit, with `…` where text was left out.
     pub text: String,
+    /// Code paths the note governs.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
@@ -363,6 +366,7 @@ fn pack_context(
                 updated: note.updated_at.format("%Y-%m-%d").to_string(),
                 links: input.links.get(&note.id).cloned().unwrap_or_default(),
                 text: String::new(),
+                paths: note.input.paths.clone(),
             });
             let slot = pack.memories.len() - 1;
             match grow(pack, excerpt, slot)? {

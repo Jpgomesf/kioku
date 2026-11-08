@@ -167,14 +167,14 @@ The default `core` profile exposes three tools; `MEMORY_TOOLS=all` (or
 |---|---|---|
 | `memory_search` | core | Ranked previews (key, title, snippet, score) for a question |
 | `memory_get` | core | Full text of chosen memories by key, with links, within a byte budget; counts as use unless `count_use` is false |
-| `memory_save` | core | Create or update one memory by key; refuses credentials and file-backed notes; reports its links and similar notes |
+| `memory_save` | core | Create or update one memory by key, optionally anchored to code `paths`; refuses credentials and file-backed notes; reports its links and similar notes |
 | `memory_inspect` | all | Provenance, lifecycle, usage, links, and recent history of one memory |
 | `memory_feedback` | all | Record that a memory proved right or wrong |
 | `memory_retire` / `memory_restore` | all | Move a memory to legacy and back; nothing is deleted |
 | `memory_import` | all | Import Markdown notes from `MEMORY_NOTES_ROOT` |
 | `memory_maintenance` | all | Preview or apply monthly aging |
 | `memory_stats` | all | Counts by status and domain, index health |
-| `memory_list` | all | Page through a domain's notes (key, title, status, tags, origin, links to active notes, last update), filtered by status, origin, or tag |
+| `memory_list` | all | Page through a domain's notes (key, title, status, tags, paths, origin, links to active notes, last update), filtered by status, origin, tag, or a file the notes are anchored to |
 | `code_map` | all | A source file's purpose, main definitions with line numbers, and up to 5 files around it, for clients of small local models (see [Code map](#code-map)) |
 
 **What a save reports.** Besides the key and revision, `memory_save` returns
@@ -211,6 +211,7 @@ domain: my-project
 aliases: [indexing worker, worker de indexação]
 related: [local-stack, batch-worker-retirement]
 tags: [service, indexing]
+paths: [services/jobs-worker/**]
 confidence: 0.9
 pinned: false
 ---
@@ -226,6 +227,12 @@ It replaces the retired batch-worker.
   [Vaults and locks](#vaults-and-locks). A `lock` that lists no provider
   (`lock: []`, `lock:`), or a near miss such as `Lock`, `locks`, or `locked`,
   fails the file instead of importing the note unlocked.
+- `paths` anchors the note to the code it governs: globs relative to the
+  repository root, one or a list. `*` stays within a folder, `**` spans
+  folders, and a bare folder covers everything under it. A file's code map
+  entry names the notes anchored to it, and `memory_list` filters by file with
+  `path`. An anchor says which code a decision governs; it never describes the
+  code.
 - Saving a key again replaces its text, but nothing is lost: every save,
   edit, retirement, and restore appends the note's content and status to
   `memory_note_revisions`, and `memory_inspect` lists the ten latest entries.
@@ -330,6 +337,9 @@ kioku codemap show ~/code/app/src/billing.py    # what a model gets for one file
   core,code_map`), for clients of small local models, where a plugin can call
   it when the model opens a file. Without a vaults file, it reads only files
   inside the session's folder.
+- **Anchored notes.** A lookup also names up to ten notes whose `paths` match
+  the file: the decisions, conventions, and gotchas that govern it, among the
+  notes the caller may read.
 
 ## How retrieval works
 

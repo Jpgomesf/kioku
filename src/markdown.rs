@@ -36,6 +36,8 @@ struct Frontmatter {
     /// an error rather than no lock.
     #[serde(deserialize_with = "present")]
     lock: Option<OneOrMany>,
+    /// Code paths the note governs, one glob or a list (see [`crate::paths`]).
+    paths: Option<OneOrMany>,
 }
 
 /// A field that is `Some` when present, even when its value is null.
@@ -323,6 +325,7 @@ fn parse(text_in: &str, source: &str, default_domain: Option<&str>) -> Result<No
         confidence: meta.confidence.unwrap_or(0.8),
         pinned: meta.pinned.unwrap_or(false),
         lock,
+        paths: deduplicate_strings(list(meta.paths)),
     };
     note.validate()?;
     Ok(note)
@@ -602,5 +605,26 @@ mod tests {
         .unwrap();
         assert_eq!(parsed.title, "T");
         assert_eq!(parsed.body, "Body.");
+    }
+
+    #[test]
+    fn frontmatter_paths_anchor_the_note_to_code() {
+        let one = parse_markdown("---\npaths: src/vault/**\n---\nBody.", "n.md", "d").unwrap();
+        assert_eq!(one.paths, vec!["src/vault/**"]);
+        let many = parse_markdown(
+            "---\npaths: [src/vault/**, src/vault/**, viewer/src/pages/vaults]\n---\nBody.",
+            "n.md",
+            "d",
+        )
+        .unwrap();
+        assert_eq!(many.paths, vec!["src/vault/**", "viewer/src/pages/vaults"]);
+        assert!(parse_markdown("---\npaths: [/etc/passwd]\n---\nBody.", "n.md", "d").is_err());
+        assert!(parse_markdown("---\npaths: [../other]\n---\nBody.", "n.md", "d").is_err());
+        assert!(
+            parse_markdown("---\nkey: k\n---\nBody.", "n.md", "d")
+                .unwrap()
+                .paths
+                .is_empty()
+        );
     }
 }

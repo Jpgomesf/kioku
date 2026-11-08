@@ -358,6 +358,17 @@ def run(client: StdioClient, checks: Checks, notes_root: Path, hydration_key: st
     audit = client.call("memory_get", {"keys": [checkout["key"]], "domain": domain, "count_use": False})
     used_audit = client.call("memory_inspect", {"key": checkout["key"], "domain": domain})["access_count"]
     checks.check("a read with count_use false is not counted", used_audit == used_read and len(audit["memories"]) == 1)
+    anchor_key = "smoke-anchored-" + uuid.uuid4().hex[:8]
+    client.call("memory_save", {"domain": domain, "key": anchor_key, "title": "Only the vault module writes the vaults file",
+                                "body": "Writes to the vaults file go through one module, so a bad edit can't stop every client.",
+                                "tags": ["convention", "smoke-test"], "paths": ["src/vault/**"]})
+    by_path = client.call("memory_list", {"domain": domain, "path": "src/vault/place.rs"})
+    elsewhere = client.call("memory_list", {"domain": domain, "path": "src/main.rs"})
+    anchored = client.call("memory_get", {"keys": [anchor_key], "domain": domain, "count_use": False})
+    checks.check("memory_list finds the notes anchored to a file by glob",
+                 [n["key"] for n in by_path["notes"]] == [anchor_key] and by_path["notes"][0].get("paths") == ["src/vault/**"]
+                 and all(n["key"] != anchor_key for n in elsewhere["notes"]))
+    checks.check("memory_get shows a note's paths", anchored["memories"][0].get("paths") == ["src/vault/**"])
     budget = 1536
     bounded, raw, error = client.call_raw("memory_get", {"keys": [untrusted["key"]], "domain": domain, "max_bytes": budget})
     checks.check("a bounded read succeeds", not error)
