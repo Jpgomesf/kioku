@@ -128,15 +128,28 @@ impl Qdrant {
             ("labels", json!("keyword")),
             ("lexical", lexical),
         ] {
-            self.request(
-                reqwest::Method::PUT,
-                &format!("{}/index?wait=true", self.collection_path()),
-            )
-            .json(&json!({"field_name": field, "field_schema": schema}))
-            .send()
-            .await?
-            .error_for_status()
-            .context("Could not create Qdrant filter index")?;
+            let indexed = self
+                .request(
+                    reqwest::Method::PUT,
+                    &format!("{}/index?wait=true", self.collection_path()),
+                )
+                .json(&json!({"field_name": field, "field_schema": schema}))
+                .send()
+                .await?
+                .error_for_status()
+                .context("Could not create Qdrant filter index");
+            match indexed {
+                // A Qdrant older than 1.20 can't score BM25; only keyword
+                // search in Qdrant needs it, and that search then runs in
+                // process.
+                Err(error) if field == "lexical" => tracing::warn!(
+                    error = format!("{error:#}"),
+                    "this Qdrant can't score BM25; MEMORY_LEXICAL=qdrant needs Qdrant 1.20 or later"
+                ),
+                indexed => {
+                    indexed?;
+                }
+            }
         }
         Ok(created)
     }
